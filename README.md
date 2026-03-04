@@ -1,93 +1,143 @@
 # Chatalogue
 
-A local indexing, transcription, and search system for YouTube channels.
+Chatalogue is a local-first YouTube channel intelligence app for long-form podcast/video workflows:
+- ingest channels and keep episodes updated
+- transcribe + diarize at scale
+- search transcripts across episodes
+- manage speaker profiles and merges
+- detect/explain funny moments
+- generate summary/chapters
+- create and export clips
 
-## Features
-- **Channel Tracking**: Monitor multiple YouTube channels for new content.
-- **Efficient Archiving**: Downloads audio-only (m4a) to save space.
-- **AI-Powered Analysis**:
-  - **Transcription**: Modular engine (`auto | whisper | parakeet`) with automatic Whisper fallback.
-  - **Diarization**: Speaker identification using `pyannote.audio`.
-  - **Speaker Profiles**: Track unique speakers across videos and assign names/thumbnails.
-- **Search**: Full-text search across all transcripts.
-- **Clipping**: Download specific video segments on-demand without downloading the full video.
-- **Database**: Embedded PostgreSQL (binary-managed, cross-platform) with automatic SQLite migration support.
+## Technology
+- Backend: FastAPI, SQLModel, Uvicorn
+- Frontend: React + Vite + TypeScript + Tailwind
+- Database: embedded PostgreSQL runtime (auto-managed binaries) with SQLite migration support
+- Transcription: modular ASR engine (`auto`, `whisper`, `parakeet`) with fallback logic
+- Diarization: `pyannote.audio`
+- LLM integrations: local (Ollama) and remote providers
+- Media tooling: `yt-dlp`, `ffmpeg`
 
-## Setup
+## Repository layout
+- `backend/`: API, queue workers, ingestion/transcription/diarization pipeline, DB layer
+- `frontend/`: web UI
+- `install_windows.bat`: Windows install/bootstrap (venv + deps + model preload)
+- `install_mac.sh`: macOS install/bootstrap (venv + deps + model preload)
+- `run.bat`: Windows dev runner (starts backend + frontend)
 
-1. **Prerequisites**:
-   - Python 3.10+
-   - NVIDIA GPU (CUDA 11.8+ recommended)
-   - [FFmpeg](https://ffmpeg.org/download.html) installed and in PATH.
+## Prerequisites
+- Python 3.10+
+- Node.js 18+
+- `ffmpeg` available on PATH
+- Optional but recommended: NVIDIA GPU for faster transcription/diarization
 
-2. **Installation**:
-   ```bash
-   run.bat
-   ```
-   *This script creates a virtual environment and installs all dependencies.*
-   Optional Parakeet dependencies during install: set `INSTALL_PARAKEET=1` before running `run.bat`.
+## Windows installation
+From repo root in `cmd.exe`:
 
-3. **Running**:
-   The `run.bat` script will start the backend server automatically after installation.
-   
-   Access the API docs at: http://localhost:8011/docs
-
-## Development (Ralph Loop)
-This project follows the Ralph Loop agentic workflow.
-- `prd.json`: Machine-readable product specs.
-- `plan.md`: Implementation roadmap.
-- `activity.md`: Development log.
-
-## Environment Variables
-Create a `.env` file in `backend/` if needed (e.g., for Hugging Face tokens).
-- `HF_TOKEN`: Required for access to gated `pyannote` models.
-- `TRANSCRIPTION_ENGINE`: `auto` (default), `whisper`, or `parakeet`.
-- `PARAKEET_MODEL`: default `nvidia/parakeet-tdt-0.6b-v2`.
-- `PARAKEET_BATCH_SIZE`: default `16`.
-- `PARAKEET_REQUIRE_WORD_TIMESTAMPS`: `true` (default). If Parakeet output has poor word timing coverage, Chatalogue falls back to Whisper.
-- `DB_PROVIDER`: `postgres` (default) or `sqlite`.
-- `DATABASE_URL`: Optional explicit SQLAlchemy URL. If set, embedded DB bootstrap is skipped.
-- `DB_MIGRATE_SQLITE_ON_START`: `true` (default) to auto-copy existing SQLite data into Postgres on first boot.
-
-### Optional Parakeet install
-Parakeet dependencies are optional so base installs remain stable across hosts.
-
-```bash
-python -m pip install -r backend/requirements-parakeet.txt
+```bat
+install_windows.bat
 ```
 
-Optional cache warm-up (useful in installers):
-```bash
-python backend/preload_models.py --engine auto --whisper-model medium --parakeet-model nvidia/parakeet-tdt-0.6b-v2
+Then run the app:
+
+```bat
+run.bat
 ```
 
-### Embedded PostgreSQL (default)
-By default, Chatalogue starts an embedded local PostgreSQL runtime and downloads platform-matching binaries on first run.
+App URLs:
+- Frontend: `http://localhost:5173`
+- Backend API/docs: `http://localhost:8011/docs`
 
-- Data path: `backend/data/postgres`
-- Binary cache path: `backend/bin/postgres`
-- Default connection: `postgresql+psycopg://chatalogue@127.0.0.1:55432/chatalogue`
+## macOS installation
+From repo root:
 
-Optional runtime variables:
-- `EMBEDDED_PG_ENABLED=true`
-- `EMBEDDED_PG_AUTO_DOWNLOAD=true`
-- `EMBEDDED_PG_VERSION=17.6.0`
-- `EMBEDDED_PG_HOST=127.0.0.1`
-- `EMBEDDED_PG_PORT=55432`
-- `EMBEDDED_PG_USER=chatalogue`
-- `EMBEDDED_PG_DATABASE=chatalogue`
-- `EMBEDDED_PG_BIN_DIR` (override binary folder if you bundle your own binaries)
+```bash
+chmod +x install_mac.sh
+./install_mac.sh
+```
 
-### Manual migration command
-Run once if you want an explicit migration command:
+Start both backend + frontend together:
+
+```bash
+chmod +x run_mac.sh
+./run_mac.sh
+```
+
+Or start manually:
+
 ```bash
 cd backend
-python migrate_sqlite_to_postgres.py --force
+./.venv/bin/python -m uvicorn src.main:app --app-dir . --host 0.0.0.0 --port 8011
 ```
 
-Optional runtime control:
+Start frontend (new terminal):
+
 ```bash
-cd backend
-python manage_embedded_postgres.py start
-python manage_embedded_postgres.py stop
+cd frontend
+npm run dev
 ```
+
+## Installer options
+Both installers support optional environment variables.
+
+- `INSTALL_PARAKEET=1|0`
+  - Default: `1`
+  - Installs optional NeMo Parakeet dependencies when enabled.
+- `SKIP_MODEL_PRELOAD=1|0`
+  - Default: `0`
+  - When `0`, runs `backend/preload_models.py` after dependency install.
+- `PRELOAD_ENGINE=auto|whisper|parakeet`
+  - Default: `auto`
+  - Controls which ASR model cache is preloaded.
+- `OLLAMA_MODELS="<model1> <model2> ..."` (optional)
+  - If set and `ollama` exists in PATH, installer will run `ollama pull` for each model.
+
+Examples:
+
+Windows:
+```bat
+set INSTALL_PARAKEET=0
+set SKIP_MODEL_PRELOAD=1
+install_windows.bat
+```
+
+macOS:
+```bash
+INSTALL_PARAKEET=1 PRELOAD_ENGINE=auto OLLAMA_MODELS="qwen2.5:7b qwen3.5:27b" ./install_mac.sh
+```
+
+## Configuration
+Copy `backend/.env.example` to `backend/.env` and set values as needed.
+
+Common variables:
+- `HF_TOKEN`: required for gated pyannote models
+- `TRANSCRIPTION_ENGINE`: `auto` (default), `whisper`, or `parakeet`
+- `PARAKEET_MODEL`: default `nvidia/parakeet-tdt-0.6b-v2`
+- `PARAKEET_BATCH_SIZE`: default `16`
+- `PARAKEET_REQUIRE_WORD_TIMESTAMPS`: default `true`
+- `DB_PROVIDER`: default `postgres`
+- `DATABASE_URL`: explicit SQLAlchemy URL (if set, embedded bootstrap is bypassed)
+
+## Embedded PostgreSQL defaults
+- Data dir: `backend/data/postgres`
+- Binary cache: `backend/bin/postgres`
+- Default DSN: `postgresql+psycopg://chatalogue@127.0.0.1:55432/chatalogue`
+
+Optional runtime flags:
+- `EMBEDDED_PG_ENABLED`
+- `EMBEDDED_PG_AUTO_DOWNLOAD`
+- `EMBEDDED_PG_VERSION`
+- `EMBEDDED_PG_HOST`
+- `EMBEDDED_PG_PORT`
+- `EMBEDDED_PG_USER`
+- `EMBEDDED_PG_DATABASE`
+- `EMBEDDED_PG_BIN_DIR`
+
+## Troubleshooting
+- `No module named 'pkg_resources'`
+  - Ensure installer completed or run:
+    - `pip install "setuptools<81"`
+- `Sign in to confirm your age` from `yt-dlp`
+  - Configure YouTube cookies per yt-dlp docs.
+- Backend unreachable
+  - Confirm backend is running on port `8011`, then retry frontend.
