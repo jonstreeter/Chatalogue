@@ -1,0 +1,23 @@
+# PyTorch nightly with CUDA 12.8 (required for RTX 5090 / Blackwell sm_120)
+--extra-index-url https://download.pytorch.org/whl/nightly/cu128
+torch
+torchaudio
+
+# App
+fastapi
+uvicorn
+yt-dlp
+python-dotenv
+sqlmodel
+aiosqlite
+psycopg[binary]
+
+# ML / Transcription
+setuptools<81
+faster-whisper
+ctranslate2<4.6
+
+# Diarization (install with: pip install pyannote.audio --no-deps, then deps separately)
+# pyannote.audio pins torch==2.8.0 which conflicts with nightly; install deps manually
+pyannote.audio
+sympy

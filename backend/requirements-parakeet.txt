@@ -1,0 +1,9 @@
+# Optional: NVIDIA Parakeet transcription engine support
+#
+# Install inside the app venv:
+#   pip install -r backend/requirements-parakeet.txt
+#
+# Chatalogue will automatically fall back to faster-whisper when Parakeet
+# dependencies are unavailable or Parakeet cannot return usable word timestamps.
+
+nemo_toolkit[asr]

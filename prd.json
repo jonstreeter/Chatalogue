@@ -1,0 +1,91 @@
+{
+    "project_name": "Chatalogue",
+    "version": "1.0.0",
+    "features": [
+        {
+            "id": "F-001",
+            "name": "Channel Management",
+            "description": " Manage YouTube channels to index.",
+            "stories": [
+                {
+                    "id": "US-001",
+                    "story": "As a user, I can add a channel by URL so that it is tracked.",
+                    "status": "ready"
+                },
+                {
+                    "id": "US-002",
+                    "story": "As a user, I can refresh a channel to fetch new videos.",
+                    "status": "ready"
+                },
+                {
+                    "id": "US-003",
+                    "story": "As a user, I can list tracked channels.",
+                    "status": "ready"
+                }
+            ]
+        },
+        {
+            "id": "F-002",
+            "name": "Video Ingestion",
+            "description": "Download and process video audio.",
+            "stories": [
+                {
+                    "id": "US-004",
+                    "story": "System downloads m4a audio for new videos.",
+                    "status": "ready"
+                },
+                {
+                    "id": "US-005",
+                    "story": "System transcribes audio using faster-whisper on GPU.",
+                    "status": "ready"
+                },
+                {
+                    "id": "US-006",
+                    "story": "System diarizes audio to identify speakers.",
+                    "status": "ready"
+                }
+            ]
+        },
+        {
+            "id": "F-003",
+            "name": "Speaker Identity",
+            "description": "Manage speaker identities and profiles.",
+            "stories": [
+                {
+                    "id": "US-007",
+                    "story": "System stores speaker embeddings and matches repeat speakers.",
+                    "status": "ready"
+                },
+                {
+                    "id": "US-008",
+                    "story": "User can upload/paste a thumbnail for a speaker.",
+                    "status": "ready"
+                }
+            ]
+        },
+        {
+            "id": "F-004",
+            "name": "Clipping",
+            "description": "On-demand video clipping.",
+            "stories": [
+                {
+                    "id": "US-009",
+                    "story": "User can request a video clip by start/end time and download it.",
+                    "status": "ready"
+                }
+            ]
+        },
+        {
+            "id": "F-005",
+            "name": "Search",
+            "description": "Search through transcripts.",
+            "stories": [
+                {
+                    "id": "US-010",
+                    "story": "User can search for text segments across videos/channels.",
+                    "status": "ready"
+                }
+            ]
+        }
+    ]
+}

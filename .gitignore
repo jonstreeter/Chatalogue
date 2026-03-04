@@ -1,0 +1,79 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+.agent/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+backend/.venv/
+backend/.venv_old_311/
+frontend/.venv/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/playwright-report/
+frontend/test-results/
+frontend/.eslintcache
+
+# Environment / secrets
+*.env
+*.env.*
+!*.env.example
+backend/.env
+
+# Logs / runtime / temp
+*.log
+*.tmp
+*.pid
+*.out
+*.err
+*.jsonl
+nul
+backend/nul
+tmp-playwright/
+tmp_pg_artifact_test/
+snapshots/
+.tmp_openapi.json
+out.log
+tmp_jobs.json
+debug_manual.log
+
+# Chatalogue runtime artifacts
+backend/data/*
+!backend/data/.gitkeep
+backend/logs/
+backend/runtime/
+backend/bin/postgres/
+backend/bin/*.exe
+backend/bin/*.dll
+backend/debug_output*.txt
+backend/jfk_test.ogg
