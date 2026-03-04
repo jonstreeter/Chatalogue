@@ -141,3 +141,9 @@ Optional runtime flags:
   - Configure YouTube cookies per yt-dlp docs.
 - Backend unreachable
   - Confirm backend is running on port `8011`, then retry frontend.
+
+## Contributing
+See `CONTRIBUTING.md`.
+
+## License
+MIT (`LICENSE`).
