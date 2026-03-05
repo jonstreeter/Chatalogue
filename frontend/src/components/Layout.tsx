@@ -55,7 +55,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                             <div className="text-base font-bold bg-clip-text text-transparent bg-gradient-to-r from-rose-600 to-red-700 truncate">
                                 Chatalogue
                             </div>
-                            <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Admin Console</div>
+                            <div className="text-[10px] text-slate-400 tracking-wide font-semibold">Dialogue → Data</div>
                         </div>
                     </Link>
                     <button
@@ -92,7 +92,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                             <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-rose-600 to-red-700 tracking-tight truncate">
                                 Chatalogue
                             </h1>
-                            <p className="text-xs text-slate-400 mt-1 uppercase tracking-wider font-semibold">Admin Console</p>
+                            <p className="text-xs text-slate-400 mt-1 tracking-wide font-semibold">Dialogue → Data</p>
                         </div>
                     </Link>
                 </div>

@@ -277,6 +277,12 @@ export function ChannelSearch() {
             ? `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
             : `${m}:${s.toString().padStart(2, '0')}`;
     };
+    const formatPublished = (iso?: string | null) => {
+        if (!iso) return 'Unknown date';
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return 'Unknown date';
+        return d.toLocaleDateString();
+    };
 
     const videoMap = new Map(videos.map((video) => [video.id, video]));
     const previewVideo = selectedResult ? videoMap.get(selectedResult.video_id) : null;
@@ -468,6 +474,8 @@ export function ChannelSearch() {
                                                         <span className="inline-flex items-center gap-1 text-xs text-slate-500 min-w-0">
                                                             <Tv size={10} />
                                                             <span className="truncate max-w-[420px]">{resultVideo.title}</span>
+                                                            <span className="text-slate-400">• {formatPublished(resultVideo.published_at)}</span>
+                                                            <span className="text-slate-400 font-mono">• {resultVideo.youtube_id}</span>
                                                         </span>
                                                     )}
                                                 </div>

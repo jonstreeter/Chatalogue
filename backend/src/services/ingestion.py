@@ -6,9 +6,10 @@ import subprocess
 import threading
 import pickle
 import gc
+import sys
 from pathlib import Path
 from sqlmodel import Session, select, func
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 # NOTE: Heavy ML libraries (torch, faster_whisper, pyannote, numpy, scipy)
@@ -16,7 +17,7 @@ from dotenv import load_dotenv
 # blocking the process at startup. Only download/queue operations run
 # without them.
 
-from ..db.database import engine, Video, Channel, Speaker, SpeakerEmbedding, TranscriptSegment, Clip, ClipExportArtifact, Job, FunnyMoment, create_db_and_tables
+from ..db.database import engine, Video, Channel, Speaker, SpeakerEmbedding, TranscriptSegment, TranscriptSegmentRevision, Clip, ClipExportArtifact, Job, FunnyMoment, create_db_and_tables
 from .logger import log, log_verbose, is_verbose
 
 class JobPausedException(Exception):
@@ -490,15 +491,25 @@ class IngestionService:
         if not job_id:
             return
         stage_key = (stage or "").strip().lower()
-        if stage_key not in {"download", "transcribe", "diarize", "funny"}:
+        if stage_key not in {"download", "model_load", "transcribe", "transcribe_phase", "diarize", "funny"}:
             return
         now_iso = datetime.now().isoformat()
-        fields = {
-            f"stage_{stage_key}_started_at": now_iso,
-            "stage_last": stage_key,
-            "stage_last_started_at": now_iso,
-        }
-        if stage_key == "download":
+        payload = {}
+        try:
+            with Session(engine) as session:
+                job = session.get(Job, job_id)
+                if job and job.payload_json:
+                    payload = self._load_job_payload(job.payload_json)
+        except Exception:
+            payload = {}
+
+        fields = {"stage_last": stage_key, "stage_last_started_at": now_iso}
+
+        stage_field = f"stage_{stage_key}_started_at"
+        if not payload.get(stage_field):
+            fields[stage_field] = now_iso
+
+        if stage_key == "download" and not payload.get("pipeline_started_at"):
             fields["pipeline_started_at"] = now_iso
         self._upsert_job_payload_fields(job_id, fields)
 
@@ -1089,26 +1100,109 @@ class IngestionService:
 
         return max(1, min(requested, cap, hard_cap))
 
-    def _should_unload_parakeet_after_transcribe(self) -> bool:
+    def _resolve_parakeet_keep_loaded_thresholds(self, total_gb: float) -> tuple[float, float]:
+        """Return (min_free_gb, min_free_ratio) thresholds for keeping Parakeet loaded."""
+        if total_gb >= 36:
+            default_gb, default_ratio = 6.0, 0.12
+        elif total_gb >= 28:
+            default_gb, default_ratio = 5.0, 0.14
+        elif total_gb >= 20:
+            default_gb, default_ratio = 4.0, 0.16
+        else:
+            # Sub-20GB cards are usually better off unloading between episodes.
+            default_gb, default_ratio = 999.0, 1.0
+
+        raw_gb = (os.getenv("PARAKEET_KEEP_LOADED_MIN_FREE_GB") or "").strip()
+        raw_ratio = (os.getenv("PARAKEET_KEEP_LOADED_MIN_FREE_RATIO") or "").strip()
+
+        min_free_gb = default_gb
+        min_free_ratio = default_ratio
+        try:
+            if raw_gb:
+                min_free_gb = max(0.0, float(raw_gb))
+        except Exception:
+            pass
+        try:
+            if raw_ratio:
+                min_free_ratio = max(0.0, min(1.0, float(raw_ratio)))
+        except Exception:
+            pass
+
+        return min_free_gb, min_free_ratio
+
+    def _should_unload_parakeet_after_transcribe(self, job_id: int = None) -> bool:
         mode = (os.getenv("PARAKEET_UNLOAD_AFTER_TRANSCRIBE") or "auto").strip().lower()
+        decision = {"parakeet_unload_mode": mode}
         if mode in {"1", "true", "yes", "on"}:
+            decision.update({"parakeet_unload_after_transcribe": True, "parakeet_unload_reason": "forced_true"})
+            self._upsert_job_payload_fields(job_id, decision)
             return True
         if mode in {"0", "false", "no", "off"}:
+            decision.update({"parakeet_unload_after_transcribe": False, "parakeet_unload_reason": "forced_false"})
+            self._upsert_job_payload_fields(job_id, decision)
             return False
-        # auto: default to unloading on <=16GB VRAM cards to reduce spillover
-        # into shared memory during later stages (especially diarization).
-        # On Windows, keep this enabled by default because long CUDA sessions
-        # with mixed NeMo + pyannote workloads are more crash-prone.
-        if sys.platform == "win32":
-            return True
+
+        # auto: keep model loaded when there is enough free VRAM headroom,
+        # unload only under memory pressure.
         if self.device != "cuda":
-            return False
+            decision.update({"parakeet_unload_after_transcribe": True, "parakeet_unload_reason": "non_cuda"})
+            self._upsert_job_payload_fields(job_id, decision)
+            return True
+
         total = int(self._gpu_total_vram_bytes or 0)
         if total <= 0:
             total = int(self._cuda_memory_snapshot().get("total") or 0)
         if total <= 0:
+            decision.update({"parakeet_unload_after_transcribe": True, "parakeet_unload_reason": "unknown_vram"})
+            self._upsert_job_payload_fields(job_id, decision)
             return True
-        return (total / (1024 ** 3)) <= 16.0
+
+        total_gb = float(total) / (1024 ** 3)
+        snap = self._cuda_memory_snapshot()
+        free_b = int(snap.get("free") or 0)
+        free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
+        free_ratio = (float(free_b) / float(total)) if total > 0 and free_b > 0 else 0.0
+
+        # Conservative auto behavior on smaller cards to avoid spill to shared memory.
+        if total_gb < 20.0:
+            decision.update(
+                {
+                    "parakeet_unload_after_transcribe": True,
+                    "parakeet_unload_reason": "auto_small_gpu",
+                    "parakeet_cuda_free_gb_end": round(free_gb, 2),
+                    "parakeet_cuda_total_gb": round(total_gb, 2),
+                    "parakeet_cuda_free_ratio_end": round(free_ratio, 3),
+                }
+            )
+            self._upsert_job_payload_fields(job_id, decision)
+            return True
+
+        keep_min_free_gb, keep_min_free_ratio = self._resolve_parakeet_keep_loaded_thresholds(total_gb)
+        keep_loaded = free_gb >= keep_min_free_gb and free_ratio >= keep_min_free_ratio
+        decision.update(
+            {
+                "parakeet_unload_after_transcribe": (not keep_loaded),
+                "parakeet_unload_reason": "auto_keep_loaded" if keep_loaded else "auto_low_headroom",
+                "parakeet_keep_loaded_min_free_gb": round(keep_min_free_gb, 2),
+                "parakeet_keep_loaded_min_free_ratio": round(keep_min_free_ratio, 3),
+                "parakeet_cuda_free_gb_end": round(free_gb, 2),
+                "parakeet_cuda_total_gb": round(total_gb, 2),
+                "parakeet_cuda_free_ratio_end": round(free_ratio, 3),
+            }
+        )
+        self._upsert_job_payload_fields(job_id, decision)
+
+        if keep_loaded:
+            log_verbose(
+                f"Keeping Parakeet loaded (free {free_gb:.1f}GB/{total_gb:.1f}GB, "
+                f"ratio {free_ratio:.2f}, thresholds {keep_min_free_gb:.1f}GB/{keep_min_free_ratio:.2f})."
+            )
+            return False
+        log_verbose(
+            f"Unloading Parakeet after transcribe (free {free_gb:.1f}GB/{total_gb:.1f}GB, "
+            f"ratio {free_ratio:.2f}, thresholds {keep_min_free_gb:.1f}GB/{keep_min_free_ratio:.2f})."
+        )
+        return True
 
     def _ensure_ctranslate2_pkg_resources(self):
         """Install a pkg_resources shim when setuptools is absent or broken.
@@ -1285,6 +1379,7 @@ class IngestionService:
     def _load_parakeet_model(self, job_id: int = None):
         self._ensure_device()
         if self.parakeet_model is not None:
+            self._upsert_job_payload_fields(job_id, {"parakeet_model_cached": True})
             return
 
         if not self._parakeet_dependencies_available():
@@ -1296,6 +1391,8 @@ class IngestionService:
         from nemo.collections.asr.models import ASRModel
 
         parakeet_model = (os.getenv("PARAKEET_MODEL") or "nvidia/parakeet-tdt-0.6b-v2").strip()
+        self._record_job_stage_start(job_id, "model_load")
+        load_started = time.time()
         self._update_job_status_detail(job_id, f"Loading Parakeet model ({parakeet_model})...")
         log(f"Loading Parakeet model ({parakeet_model})...")
         self._apply_cuda_memory_fraction_limit()
@@ -1306,6 +1403,15 @@ class IngestionService:
         else:
             self.parakeet_model = self.parakeet_model.to(torch.device("cpu"))
         self.parakeet_model.eval()
+        load_seconds = max(0.0, time.time() - load_started)
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "parakeet_model_cached": False,
+                "stage_model_load_seconds": round(load_seconds, 2),
+                "stage_model_load_completed_at": datetime.now().isoformat(),
+            },
+        )
         log("Parakeet model loaded.")
 
     def _probe_audio_duration_seconds(self, audio_path: Path) -> float:
@@ -1350,6 +1456,31 @@ class IngestionService:
             stderr = (result.stderr or b"").decode(errors="replace")[-500:]
             raise RuntimeError(f"Failed to convert audio for Parakeet: {stderr}")
         return out_path, True
+
+    def _load_waveform_for_parakeet(self, wav_path: Path):
+        """Load mono waveform as contiguous float32 numpy array.
+
+        Using in-memory waveform input avoids NeMo's temp manifest-file path, which
+        can intermittently fail on Windows with file-lock errors (WinError 32).
+        """
+        import numpy as np
+        import soundfile as sf
+
+        samples, sample_rate = sf.read(str(wav_path), dtype="float32", always_2d=False)
+        if samples is None:
+            raise RuntimeError(f"Parakeet audio load returned no samples: {wav_path}")
+        if getattr(samples, "ndim", 1) > 1:
+            # Downmix to mono if needed.
+            samples = np.mean(samples, axis=1, dtype=np.float32)
+        samples = np.ascontiguousarray(samples, dtype=np.float32)
+        if samples.size == 0:
+            raise RuntimeError(f"Parakeet audio load returned empty waveform: {wav_path}")
+        if int(sample_rate or 0) != 16000:
+            raise RuntimeError(
+                f"Parakeet expects 16kHz audio; got {sample_rate}Hz from {wav_path}. "
+                "Convert to 16kHz before transcription."
+            )
+        return samples
 
     def _build_whisper_style_segment(self, seg_id: int, start: float, end: float, text: str, words: list):
         # Keep an object shape compatible with faster-whisper Segment without
@@ -1407,6 +1538,16 @@ class IngestionService:
         self._load_parakeet_model(job_id)
         parakeet_input, cleanup_input = self._convert_audio_for_parakeet(audio_path)
         try:
+            parakeet_input_mode = "path"
+            transcribe_input = [str(parakeet_input)]
+            try:
+                waveform = self._load_waveform_for_parakeet(parakeet_input)
+                transcribe_input = [waveform]
+                parakeet_input_mode = "tensor"
+            except Exception as e:
+                # Keep path-mode as a fallback path if waveform loading fails.
+                log_verbose(f"Parakeet waveform load failed; using path input fallback: {e}")
+
             parakeet_batch_size_requested = max(1, min(int(os.getenv("PARAKEET_BATCH_SIZE", "16")), 64))
             parakeet_batch_size = self._resolve_parakeet_batch_size(parakeet_batch_size_requested)
             mem_snap = self._cuda_memory_snapshot()
@@ -1416,6 +1557,7 @@ class IngestionService:
                     "parakeet_batch_size_requested": int(parakeet_batch_size_requested),
                     "parakeet_batch_size_effective": int(parakeet_batch_size),
                     "parakeet_batch_auto": os.getenv("PARAKEET_BATCH_AUTO", "true").strip().lower() == "true",
+                    "parakeet_input_mode": parakeet_input_mode,
                 },
             )
             if self.device == "cuda":
@@ -1465,11 +1607,14 @@ class IngestionService:
                             transcribe_started = True
                         import torch
                         with torch.inference_mode():
-                            result = self.parakeet_model.transcribe(
-                                [str(parakeet_input)],
-                                batch_size=current_batch,
-                                **kwargs,
-                            )
+                            transcribe_kwargs = dict(kwargs)
+                            # Explicitly pin to 0 workers on Windows to reduce file
+                            # handle contention in transcribe dataloaders.
+                            transcribe_kwargs["num_workers"] = 0
+                            if parakeet_input_mode == "tensor":
+                                # Tensor input path bypasses temporary manifest files.
+                                transcribe_kwargs["use_lhotse"] = False
+                            result = self.parakeet_model.transcribe(transcribe_input, batch_size=current_batch, **transcribe_kwargs)
                         break
                     except TypeError as e:
                         last_error = e
@@ -1650,9 +1795,18 @@ class IngestionService:
             "parakeet_max_gpu_memory_fraction": max(0.50, min(float(os.getenv("PARAKEET_MAX_GPU_MEMORY_FRACTION", "0.85")), 0.98)),
             "parakeet_unload_after_transcribe": os.getenv("PARAKEET_UNLOAD_AFTER_TRANSCRIBE", "auto"),
             "parakeet_release_other_models_before_transcribe": os.getenv("PARAKEET_RELEASE_OTHER_MODELS_BEFORE_TRANSCRIBE", "false").strip().lower() == "true",
+            "parakeet_keep_loaded_min_free_gb": None,
+            "parakeet_keep_loaded_min_free_ratio": None,
             "fallback_used": False,
             "error": None,
         }
+        total_vram_for_thresholds = float(self._gpu_total_vram_bytes or 0) / (1024 ** 3) if self._gpu_total_vram_bytes else 0.0
+        if total_vram_for_thresholds <= 0 and self.device == "cuda":
+            snap = self._cuda_memory_snapshot()
+            total_vram_for_thresholds = float(snap.get("total") or 0) / (1024 ** 3)
+        keep_gb, keep_ratio = self._resolve_parakeet_keep_loaded_thresholds(total_vram_for_thresholds)
+        response["parakeet_keep_loaded_min_free_gb"] = round(float(keep_gb), 2)
+        response["parakeet_keep_loaded_min_free_ratio"] = round(float(keep_ratio), 3)
 
         def _check_whisper():
             self._load_whisper_model(job_id=None, force_float32=False)
@@ -2092,6 +2246,16 @@ class IngestionService:
         s = s.strip().strip('.')
         return s or "Unknown"
 
+    def _find_audio_file_in_dir(self, directory: Path, basenames: list[str]) -> Path | None:
+        if not directory.exists():
+            return None
+        for base in basenames:
+            for ext in ['.webm', '.m4a', '.opus', '.mp3', '.ogg', '.wav']:
+                candidate = directory / f"{base}{ext}"
+                if candidate.exists():
+                    return candidate
+        return None
+
     def get_audio_path(self, video: Video) -> Path:
         """Get standard audio path for a video.
         Returns the existing audio file if found (any format), otherwise
@@ -2099,18 +2263,69 @@ class IngestionService:
         with Session(engine) as session:
              channel = session.get(Channel, video.channel_id)
              channel_name = channel.name if channel else "Unknown Channel"
+             same_title_count = session.exec(
+                 select(func.count(Video.id)).where(
+                     Video.channel_id == video.channel_id,
+                     Video.title == video.title,
+                 )
+             ).one() or 0
 
         safe_channel = self.sanitize_filename(channel_name)
         safe_title = self.sanitize_filename(video.title)
+        safe_video_key = self.sanitize_filename((video.youtube_id or f"video_{video.id or 'unknown'}"))
+        episode_slug = self.sanitize_filename(f"{safe_title}__{safe_video_key}")
 
-        episode_dir = AUDIO_DIR / safe_channel / safe_title
+        # New (collision-safe) layout: one folder per youtube_id.
+        episode_dir = AUDIO_DIR / safe_channel / episode_slug
         episode_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check for existing audio in any supported format
-        for ext in ['.webm', '.m4a', '.opus', '.mp3', '.ogg', '.wav']:
-            candidate = episode_dir / f"{safe_title}{ext}"
-            if candidate.exists():
-                return candidate
+        basenames = [safe_title, safe_video_key, episode_slug]
+        hit = self._find_audio_file_in_dir(episode_dir, basenames)
+        if hit:
+            return hit
+
+        # Legacy layout (title-only folder) can collide badly for recurring stream titles
+        # like "Come say hi!". Only auto-migrate when the title is unique in channel.
+        legacy_dir = AUDIO_DIR / safe_channel / safe_title
+        if legacy_dir.exists() and int(same_title_count) <= 1 and legacy_dir != episode_dir:
+            legacy_hit = self._find_audio_file_in_dir(legacy_dir, basenames)
+            if legacy_hit:
+                target = episode_dir / legacy_hit.name
+                try:
+                    if not target.exists():
+                        legacy_hit.rename(target)
+                    else:
+                        # Keep already migrated file, remove stale source if possible.
+                        try:
+                            legacy_hit.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    # Move transcript artifacts for this episode when available.
+                    artifact_names = [
+                        f"{safe_title}_transcript_raw.json",
+                        f"{safe_title}.srt",
+                        f"{safe_title}_speakers.srt",
+                        f"{safe_title}_diarized.txt",
+                    ]
+                    for name in artifact_names:
+                        src = legacy_dir / name
+                        dst = episode_dir / name
+                        if src.exists() and not dst.exists():
+                            try:
+                                src.rename(dst)
+                            except Exception:
+                                pass
+                    return target
+                except Exception as e:
+                    log_verbose(f"Legacy audio migration skipped for video {video.id}: {e}")
+
+        # If title is not unique in this channel, ignore legacy title-only folders to avoid
+        # cross-episode transcript/audio contamination.
+        if int(same_title_count) > 1 and legacy_dir.exists():
+            log_verbose(
+                f"Skipping legacy title-only folder for video {video.id} "
+                f"({same_title_count} videos share title '{video.title}')."
+            )
 
         # Default path for new downloads (yt-dlp will set actual extension)
         return episode_dir / f"{safe_title}.m4a"
@@ -4184,50 +4399,68 @@ class IngestionService:
             time.sleep(10)
 
     def cleanup_orphaned_active_jobs(self) -> int:
-        """Mark jobs left in active states after a crash/restart as failed.
+        """Requeue jobs left in active states after a crash/restart.
 
-        This runs at app startup before the queue worker begins polling. It prevents
-        stale rows from showing up as "Additional active jobs detected" forever.
+        This runs at app startup before queue workers begin polling. Any orphaned
+        active jobs are moved back to `queued` and prioritized to the front so work
+        resumes automatically instead of being left failed/orphaned.
         """
         orphan_statuses = ["running", "downloading", "transcribing", "diarizing"]
-        cleaned = 0
+        requeued = 0
+        per_type_front_offsets: dict[str, int] = {}
         with Session(engine) as session:
             jobs = session.exec(select(Job).where(Job.status.in_(orphan_statuses))).all()
             now = datetime.now()
             for job in jobs:
-                job.status = "failed"
-                job.completed_at = now
-                job.error = "Recovered after backend restart: job was left in an active state (orphaned)."
-                if not job.started_at:
-                    job.started_at = job.created_at or now
+                prev_status = job.status or "running"
+
+                # Move to front of the same queue by assigning a created_at just
+                # older than the current oldest queued/paused item of that type.
+                oldest_same_type = session.exec(
+                    select(Job)
+                    .where(
+                        Job.job_type == job.job_type,
+                        Job.status.in_(["queued", "paused"]),
+                        Job.id != job.id,
+                    )
+                    .order_by(Job.created_at.asc(), Job.id.asc())
+                ).first()
+                offset = per_type_front_offsets.get(job.job_type, 0) + 1
+                per_type_front_offsets[job.job_type] = offset
+                front_anchor = oldest_same_type.created_at if oldest_same_type and oldest_same_type.created_at else now
+
+                job.status = "queued"
+                job.progress = 0
+                job.status_detail = None
+                job.started_at = None
+                job.completed_at = None
+                job.error = None
+                job.created_at = front_anchor - timedelta(microseconds=offset)
+
+                payload = self._load_job_payload(job.payload_json)
+                payload.update(
+                    {
+                        "recovered_from_orphan": True,
+                        "recovered_from_orphan_at": now.isoformat(),
+                        "recovered_from_orphan_prev_status": prev_status,
+                    }
+                )
+                job.payload_json = json.dumps(payload, sort_keys=True)
                 session.add(job)
-                cleaned += 1
+                requeued += 1
 
                 video = session.get(Video, job.video_id)
                 if not video:
                     continue
-                restored = False
-                try:
-                    restored = self._restore_redo_backup_if_needed(session, job, reason="backend restart")
-                except Exception as re:
-                    log(f"Redo-backup restore failed for orphaned job {job.id}: {re}")
-                if restored:
-                    continue
-                if video.status in orphan_statuses:
-                    try:
-                        # get_audio_path may require channel relation for nested paths
-                        _ = video.channel
-                        audio_path = self.get_audio_path(video)
-                        video.status = "downloaded" if audio_path.exists() else "pending"
-                    except Exception:
-                        video.status = "pending"
+                if video.status in orphan_statuses or job.job_type == "process":
+                    video.status = "queued"
                     session.add(video)
 
             session.commit()
 
-        if cleaned:
-            log(f"Startup cleanup: marked {cleaned} orphaned active job(s) as failed.")
-        return cleaned
+        if requeued:
+            log(f"Startup recovery: requeued {requeued} orphaned active job(s) to front of queue.")
+        return requeued
 
     def process_queue(self):
         """Process pipeline jobs (download/transcribe/diarize) sequentially."""
@@ -5481,9 +5714,15 @@ class IngestionService:
                    j.progress = 0
                    session.add(j)
             session.commit()
+        self._record_job_stage_start(job_id, "transcribe_phase")
 
         log(f"Processing: {video.title}")
         log("Transcribing...")
+
+        # Resolve requested engine early so we can persist useful metadata even
+        # when we reuse an existing raw transcript and skip decoder inference.
+        selected_engine = self._select_transcription_engine()
+        self._upsert_job_payload_fields(job_id, {"transcription_engine_requested": selected_engine})
 
         # 2. Check for completed raw transcript (checkpoint)
         safe_title = self.sanitize_filename(video.title)
@@ -5616,6 +5855,18 @@ class IngestionService:
                     self._reset_partial_checkpoint_state(video.id)
                     existing_segments = []
                 else:
+                    engine_from_raw = str(
+                        data.get("transcription_engine_used")
+                        or data.get("engine")
+                        or ""
+                    ).strip().lower()
+                    if engine_from_raw not in {"parakeet", "whisper"}:
+                        engine_from_raw = selected_engine if selected_engine in {"parakeet", "whisper"} else ""
+                    payload_fields = {"transcription_reused_existing": True}
+                    if engine_from_raw in {"parakeet", "whisper"}:
+                        payload_fields["transcription_engine_used"] = engine_from_raw
+                    self._upsert_job_payload_fields(job_id, payload_fields)
+
                     # Ensure progress is 100
                     self._update_job_progress(job_id, 100)
                     self._reset_partial_checkpoint_state(video.id)
@@ -5665,10 +5916,8 @@ class IngestionService:
                 self._reset_partial_checkpoint_state(video.id)
 
         # 4. Choose transcription engine and run transcription.
-        selected_engine = self._select_transcription_engine()
         prefer_parakeet = selected_engine == "parakeet"
         transcribe_engine_used = "whisper"
-        self._upsert_job_payload_fields(job_id, {"transcription_engine_requested": selected_engine})
 
         # Keep Parakeet transcription from oversubscribing VRAM on long-running workers:
         # release pyannote models before Parakeet transcribe (they will lazy-load again
@@ -5687,6 +5936,10 @@ class IngestionService:
 
         if prefer_parakeet:
             try:
+                # Mark model-load stage boundary as soon as Parakeet path is chosen so
+                # download timing doesn't continue while model initialization runs.
+                if self.parakeet_model is None:
+                    self._record_job_stage_start(job_id, "model_load")
                 self._update_job_status_detail(job_id, "Transcribing with NVIDIA Parakeet...")
                 parakeet_segments, parakeet_duration = self._transcribe_with_parakeet(
                     transcribe_path, start_time_offset=start_time_offset, job_id=job_id
@@ -5713,7 +5966,12 @@ class IngestionService:
                 duration_info = parakeet_duration or video.duration or 0
             except Exception as e:
                 log(f"Parakeet unavailable/failed: {e}. Falling back to Whisper.")
-                self._update_job_status_detail(job_id, "Parakeet unavailable; falling back to Whisper...")
+                fallback_reason = str(e).strip().splitlines()[0] if str(e).strip() else "unknown error"
+                fallback_reason = fallback_reason[:220]
+                self._update_job_status_detail(
+                    job_id,
+                    f"Parakeet failed ({fallback_reason}); falling back to Whisper..."
+                )
                 transcribe_engine_used = "whisper"
                 self._upsert_job_payload_fields(
                     job_id,
@@ -5904,6 +6162,7 @@ class IngestionService:
                 raw_path = out_dir / f"{safe_title}_transcript_raw.json"
                 raw_data = {
                     "video_id": video.id,
+                    "transcription_engine_used": transcribe_engine_used,
                     "segments": [
                         {
                             "start": s.start,
@@ -5920,7 +6179,7 @@ class IngestionService:
         except Exception as e:
             log(f"Failed to save raw transcript checkpoint: {e}")
 
-        if transcribe_engine_used == "parakeet" and self._should_unload_parakeet_after_transcribe():
+        if transcribe_engine_used == "parakeet" and self._should_unload_parakeet_after_transcribe(job_id=job_id):
             self._release_parakeet_model("post_transcribe_low_vram")
             
         return segments, total_duration
@@ -6050,6 +6309,25 @@ class IngestionService:
             video_attached = session.get(Video, video.id)
             if not video_attached:
                 raise ValueError(f"Video {video.id} not found during diarization phase")
+
+            # Re-processing can happen multiple times for the same video; purge previous
+            # transcript rows (and edit revisions tied to them) before writing the new set.
+            try:
+                from sqlalchemy import delete as sa_delete
+                session.exec(
+                    sa_delete(TranscriptSegmentRevision).where(
+                        TranscriptSegmentRevision.video_id == video_attached.id
+                    )
+                )
+                session.exec(
+                    sa_delete(TranscriptSegment).where(
+                        TranscriptSegment.video_id == video_attached.id
+                    )
+                )
+                session.commit()
+            except Exception as e:
+                session.rollback()
+                raise RuntimeError(f"Failed to clear existing transcript rows for video {video_attached.id}: {e}")
 
             local_speaker_map = {}
             log_verbose("Identifying speakers from diarization segments...")

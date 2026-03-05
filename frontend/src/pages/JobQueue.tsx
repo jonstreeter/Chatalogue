@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import api from '../lib/api';
 import { toApiUrl } from '../lib/api';
 import type { Job } from '../types';
-import { Pause, Play, Trash2, Clock, CheckCircle2, DownloadCloud, FileText, Users, Video as VideoIcon, RefreshCw, ArrowUp, Smile, Bot, Scissors } from 'lucide-react';
+import { Pause, Play, Trash2, Clock, CheckCircle2, DownloadCloud, FileText, Users, Video as VideoIcon, RefreshCw, ArrowUp, Smile, Bot, Scissors, Cpu } from 'lucide-react';
 import axios from 'axios';
 
 const ACTIVE_STATUSES = ['downloading', 'transcribing', 'diarizing', 'running'];
@@ -309,6 +309,14 @@ export function JobQueue() {
         if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
         return `${m}:${String(s).padStart(2, '0')}`;
     };
+    const getRealtimeRatioLabel = (videoSeconds: number | null, pipelineSeconds: number | null): string | null => {
+        if (videoSeconds == null || pipelineSeconds == null) return null;
+        if (!Number.isFinite(videoSeconds) || !Number.isFinite(pipelineSeconds)) return null;
+        if (videoSeconds <= 0 || pipelineSeconds <= 0) return null;
+        const ratio = videoSeconds / pipelineSeconds;
+        if (!Number.isFinite(ratio) || ratio <= 0) return null;
+        return `${ratio >= 10 ? ratio.toFixed(0) : ratio.toFixed(1)}x realtime`;
+    };
     const parseTimeMs = (value?: string | null): number | null => {
         if (!value) return null;
         const ms = Date.parse(value);
@@ -344,24 +352,50 @@ const getStatusLabel = (status: string): string => {
         }
     };
 
-    const getTranscriptionEngineUsed = (job: Job): 'parakeet' | 'whisper' | null => {
+    const getTranscriptionEngineUsed = (job: Job): 'parakeet' | 'whisper' | 'cached' | null => {
         if ((job.job_type || '').toLowerCase() !== 'process') return null;
         const payload = getJobPayload(job);
-        const engine = String(payload.transcription_engine_used || '').toLowerCase();
-        if (engine === 'parakeet' || engine === 'whisper') return engine;
+        const normalizeEngine = (value: unknown): 'parakeet' | 'whisper' | null => {
+            const engine = String(value || '').trim().toLowerCase();
+            if (engine === 'parakeet' || engine === 'whisper') return engine;
+            return null;
+        };
+        const engineUsed = normalizeEngine(payload.transcription_engine_used);
+        if (engineUsed) return engineUsed;
+        const engineRequested = normalizeEngine(payload.transcription_engine_requested);
+        if (engineRequested) return engineRequested;
+        if (payload.stage_model_load_started_at || payload.stage_model_load_completed_at || payload.parakeet_input_mode) {
+            return 'parakeet';
+        }
+        const hasTranscribePhase = Boolean(payload.stage_transcribe_phase_started_at || payload.stage_transcribing_phase_started_at);
+        const hasTranscribeStart = Boolean(payload.stage_transcribe_started_at || payload.stage_transcribing_started_at);
+        if (hasTranscribePhase && !hasTranscribeStart && (job.status || '').toLowerCase() === 'completed') {
+            return 'cached';
+        }
+        if (hasTranscribeStart) {
+            return 'whisper';
+        }
+        if (payload.transcription_reused_existing === true) {
+            return 'cached';
+        }
         const detail = (job.status_detail || '').toLowerCase();
         if (detail.includes('parakeet')) return 'parakeet';
         if (detail.includes('whisper')) return 'whisper';
+        const err = (job.error || '').toLowerCase();
+        if (err.includes('parakeet')) return 'parakeet';
+        if (err.includes('whisper')) return 'whisper';
         return null;
     };
 
-    const EngineBadge = ({ engine }: { engine: 'parakeet' | 'whisper' }) => (
+    const EngineBadge = ({ engine }: { engine: 'parakeet' | 'whisper' | 'cached' }) => (
         <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${
             engine === 'parakeet'
                 ? 'bg-violet-50 text-violet-700 border-violet-200'
-                : 'bg-cyan-50 text-cyan-700 border-cyan-200'
+                : engine === 'whisper'
+                    ? 'bg-cyan-50 text-cyan-700 border-cyan-200'
+                    : 'bg-slate-50 text-slate-600 border-slate-200'
         }`}>
-            {engine === 'parakeet' ? 'Parakeet' : 'Whisper'}
+            {engine === 'parakeet' ? 'Parakeet' : engine === 'whisper' ? 'Whisper' : 'Cached'}
         </span>
     );
 
@@ -503,12 +537,26 @@ const getStatusLabel = (status: string): string => {
             return Number.isFinite(ms) ? ms : null;
         };
 
-        const stageStartedAt: Record<'download' | 'transcribe' | 'diarize' | 'funny', number | null> = {
+        const stageStartedAt: Record<'download' | 'model_load' | 'transcribe' | 'diarize' | 'funny', number | null> = {
             download: parseIsoTimestamp(jobPayload.stage_download_started_at ?? jobPayload.stage_downloading_started_at) ?? parseIsoTimestamp(job.started_at),
+            model_load: parseIsoTimestamp(jobPayload.stage_model_load_started_at),
             transcribe: parseIsoTimestamp(jobPayload.stage_transcribe_started_at ?? jobPayload.stage_transcribing_started_at),
             diarize: parseIsoTimestamp(jobPayload.stage_diarize_started_at ?? jobPayload.stage_diarizing_started_at),
             funny: parseIsoTimestamp(jobPayload.stage_funny_started_at),
         };
+        const transcribePhaseStartedAt = parseIsoTimestamp(jobPayload.stage_transcribe_phase_started_at);
+        const modelLoadCompletedAt = parseIsoTimestamp(jobPayload.stage_model_load_completed_at);
+        const requestedEngine = String(jobPayload.transcription_engine_requested || '').toLowerCase();
+        const parakeetRequested = requestedEngine === 'parakeet' || transcriptionEngineUsed === 'parakeet';
+        const inferredModelLoadActive =
+            parakeetRequested &&
+            job.status === 'transcribing' &&
+            stageStartedAt.transcribe == null &&
+            (detail.includes('loading parakeet') || transcribePhaseStartedAt != null);
+        const showModelLoadStage =
+            stageStartedAt.model_load != null ||
+            modelLoadCompletedAt != null ||
+            inferredModelLoadActive;
         const jobCompletedAt = parseIsoTimestamp(job.completed_at);
 
         const formatStageTimer = (seconds: number | null): string | null => {
@@ -522,7 +570,7 @@ const getStatusLabel = (status: string): string => {
             return `${secs}s`;
         };
 
-        const getStageState = (stage: 'download' | 'transcribe' | 'diarize' | 'funny') => {
+        const getStageState = (stage: 'download' | 'model_load' | 'transcribe' | 'diarize' | 'funny') => {
             const status = job.status;
             const inFunnyTail = status === 'diarizing' && videoPipelineComplete;
             if (status === 'completed') return 'completed';
@@ -537,6 +585,27 @@ const getStatusLabel = (status: string): string => {
                 return 'pending';
             }
 
+            if (stage === 'model_load') {
+                if (!showModelLoadStage) return 'pending';
+                const modelLoadActive =
+                    status === 'transcribing' &&
+                    stageStartedAt.transcribe == null &&
+                    (stageStartedAt.model_load != null || inferredModelLoadActive);
+                if (modelLoadActive) return 'active';
+                if (
+                    (stageStartedAt.model_load != null || inferredModelLoadActive) &&
+                    (
+                        stageStartedAt.transcribe != null ||
+                        modelLoadCompletedAt != null ||
+                        status === 'diarizing' ||
+                        status === 'completed'
+                    )
+                ) {
+                    return 'completed';
+                }
+                return 'pending';
+            }
+
             const stages = ['downloading', 'transcribing', 'diarizing'] as const;
             if (status === 'running') {
                 return stage === 'download' ? 'active' : 'pending';
@@ -548,15 +617,26 @@ const getStatusLabel = (status: string): string => {
             if (stage === 'transcribe') targetStageIndex = 1;
             if (stage === 'diarize') targetStageIndex = 2;
 
+            if (
+                stage === 'transcribe' &&
+                showModelLoadStage &&
+                status === 'transcribing' &&
+                stageStartedAt.transcribe == null
+            ) {
+                return 'pending';
+            }
             if (stage === 'diarize' && inFunnyTail) return 'completed';
             if (currentStageIndex > targetStageIndex) return 'completed';
             if (currentStageIndex === targetStageIndex) return 'active';
             return 'pending';
         };
 
-        const getStageElapsedSeconds = (stage: 'download' | 'transcribe' | 'diarize' | 'funny', state: 'completed' | 'active' | 'pending' | 'failed'): number | null => {
+        const getStageElapsedSeconds = (stage: 'download' | 'model_load' | 'transcribe' | 'diarize' | 'funny', state: 'completed' | 'active' | 'pending' | 'failed'): number | null => {
             if (state === 'pending' || state === 'failed') return null;
             if (stage === 'transcribe' && state === 'active' && stageStartedAt.transcribe == null) {
+                return null;
+            }
+            if (stage === 'model_load' && stageStartedAt.model_load == null && transcribePhaseStartedAt == null) {
                 return null;
             }
 
@@ -565,10 +645,12 @@ const getStatusLabel = (status: string): string => {
                 stageStartedAt[stage]
                 ?? (stage === 'download'
                     ? fallbackStart
+                    : stage === 'model_load'
+                        ? stageStartedAt.model_load ?? transcribePhaseStartedAt ?? stageStartedAt.download ?? fallbackStart
                     : stage === 'transcribe'
-                        ? stageStartedAt.transcribe ?? stageStartedAt.download ?? fallbackStart
+                        ? stageStartedAt.transcribe ?? stageStartedAt.model_load ?? transcribePhaseStartedAt ?? stageStartedAt.download ?? fallbackStart
                         : stage === 'diarize'
-                            ? stageStartedAt.transcribe ?? stageStartedAt.download ?? fallbackStart
+                            ? stageStartedAt.transcribe ?? stageStartedAt.model_load ?? transcribePhaseStartedAt ?? stageStartedAt.download ?? fallbackStart
                             : stageStartedAt.diarize ?? stageStartedAt.transcribe ?? stageStartedAt.download ?? fallbackStart);
             if (!startMs) return null;
 
@@ -577,7 +659,9 @@ const getStatusLabel = (status: string): string => {
                 endMs = stageNowMs;
             } else {
                 if (stage === 'download') {
-                    endMs = stageStartedAt.transcribe ?? stageStartedAt.diarize ?? jobCompletedAt ?? stageNowMs;
+                    endMs = transcribePhaseStartedAt ?? stageStartedAt.model_load ?? stageStartedAt.transcribe ?? stageStartedAt.diarize ?? jobCompletedAt ?? stageNowMs;
+                } else if (stage === 'model_load') {
+                    endMs = stageStartedAt.transcribe ?? modelLoadCompletedAt ?? stageStartedAt.diarize ?? jobCompletedAt ?? stageNowMs;
                 } else if (stage === 'transcribe') {
                     endMs = stageStartedAt.diarize ?? jobCompletedAt ?? stageNowMs;
                 } else if (stage === 'diarize') {
@@ -591,7 +675,7 @@ const getStatusLabel = (status: string): string => {
             return (endMs - startMs) / 1000;
         };
 
-        const renderProgressBar = (label: string, stage: 'download' | 'transcribe' | 'diarize' | 'funny', Icon: React.ElementType) => {
+        const renderProgressBar = (label: string, stage: 'download' | 'model_load' | 'transcribe' | 'diarize' | 'funny', Icon: React.ElementType) => {
             const state = getStageState(stage);
             const waitingForTranscriptionStart = stage === 'transcribe' && state === 'active' && stageStartedAt.transcribe == null;
             const percent = state === 'completed' ? 100 : state === 'active' ? (waitingForTranscriptionStart ? 0 : job.progress) : 0;
@@ -615,7 +699,7 @@ const getStatusLabel = (status: string): string => {
                             {state === 'completed' && <CheckCircle2 size={14} className="text-green-500" />}
                             {state === 'active' && (
                                 <span className="text-blue-600 animate-pulse">
-                                    {waitingForTranscriptionStart ? 'Waiting for model...' : 'Processing...'}
+                                    {stage === 'model_load' ? 'Loading model...' : (waitingForTranscriptionStart ? 'Waiting for model...' : 'Processing...')}
                                 </span>
                             )}
                         </div>
@@ -685,6 +769,7 @@ const getStatusLabel = (status: string): string => {
 
                     <div className="space-y-2.5">
                         {renderProgressBar('Downloading', 'download', DownloadCloud)}
+                        {showModelLoadStage && renderProgressBar('Model Loading', 'model_load', Cpu)}
                         {renderProgressBar('Transcribing', 'transcribe', FileText)}
                         {renderProgressBar('Diarizing', 'diarize', Users)}
                         {renderProgressBar('Funny Moments', 'funny', Smile)}
@@ -1125,11 +1210,28 @@ const getStatusLabel = (status: string): string => {
                                                                 const elapsed = getJobElapsedSeconds(job);
                                                                 const stageTotal = processStageSummary?.totalDuration ?? runtime;
                                                                 const isProcess = (job.job_type || '').toLowerCase() === 'process';
+                                                                const videoLengthSeconds =
+                                                                    typeof job.video?.duration === 'number' && job.video.duration > 0
+                                                                        ? job.video.duration
+                                                                        : null;
+                                                                const realtimeRatio = isProcess
+                                                                    ? getRealtimeRatioLabel(videoLengthSeconds, stageTotal)
+                                                                    : null;
                                                                 return (
                                                                     <>
                                                                         <div className="text-slate-700 font-medium">
                                                                             {isProcess ? `all ${formatDuration(stageTotal)}` : formatDuration(runtime)}
                                                                         </div>
+                                                                        {isProcess && videoLengthSeconds != null && (
+                                                                            <div className="text-[11px] text-slate-400 mt-0.5">
+                                                                                video {formatDuration(videoLengthSeconds)}
+                                                                            </div>
+                                                                        )}
+                                                                        {isProcess && realtimeRatio && (
+                                                                            <div className="text-[11px] text-slate-400 mt-0.5">
+                                                                                speed {realtimeRatio}
+                                                                            </div>
+                                                                        )}
                                                                         {isProcess && processStageSummary?.processDuration != null && stageTotal != null && Math.abs(stageTotal - processStageSummary.processDuration) >= 1 && (
                                                                             <div className="text-[11px] text-slate-400 mt-0.5">
                                                                                 pipeline {formatDuration(processStageSummary.processDuration)}
