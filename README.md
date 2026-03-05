@@ -1,65 +1,53 @@
 # Chatalogue
 
-![Chatalogue Logo](frontend/public/chatalogue-logo.svg)
+|  |  |
+|---|---|
+| <img src="frontend/public/chatalogue-logo.svg" width="44" alt="Chatalogue logo" /> | **Chatalogue**<br/>*Dialogue -> Data* |
 
-Chatalogue is a local-first YouTube analysis workstation for long-form video/podcast workflows:
+Chatalogue is a local-first workstation for long-form spoken content:
 - channel ingest + refresh
 - transcription + diarization pipeline
 - channel-level transcript search
 - speaker profile management/merging
 - funny-moment detection + explanation
-- AI summary + chapter generation
-- clip editing/export/upload flows
+- AI summaries + chapter generation
+- clip editing/export/upload
 
-## Stack
-- Backend: FastAPI + SQLModel + Uvicorn
-- Frontend: React + Vite + TypeScript + Tailwind
-- Database: embedded PostgreSQL runtime (auto-managed binaries)
-- ASR engines: Whisper + NVIDIA Parakeet (configurable/fallback)
-- Diarization: pyannote.audio
-- LLM providers: local Ollama + remote API providers
-- Media tooling: yt-dlp + ffmpeg
+## Installation (First)
 
-## Prerequisites
-- Python 3.10+
-- Node.js 18+
-- `ffmpeg` on PATH (recommended)
-- Optional: NVIDIA GPU for fastest transcription/diarization
+### One-file bootstrap installers
+Put one installer file into the folder where you want Chatalogue installed, then run it.
 
-## Quick Start
+The installer will:
+1. Check prerequisites (`git`, Python, Node, optional `ffmpeg`)
+2. Clone/update the GitHub repo
+3. Create backend `.venv`
+4. Install backend + frontend dependencies
+5. Install optional Parakeet dependencies
+6. Preload transcription models
 
-### Windows
-From repo root:
+By default, repo is installed to `./Chatalogue` relative to the installer script location.
 
-```bat
-run.bat
-```
+### Windows installer
+- Direct `.bat`:  
+  `https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/install_windows.bat`
+- Zipped `.bat` (if browser/security policy blocks script download):  
+  `https://github.com/jonstreeter/Chatalogue/raw/main/installers/install_windows.zip`
 
-`run.bat` now auto-runs `install_windows.bat` if dependencies are missing, waits for backend readiness, then starts frontend.
+### macOS installer
+- Direct `.sh`:  
+  `https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/install_mac.sh`
+- Zipped `.sh` (if needed):  
+  `https://github.com/jonstreeter/Chatalogue/raw/main/installers/install_mac.zip`
 
-### macOS
-From repo root:
-
-```bash
-chmod +x run_mac.sh install_mac.sh
-./run_mac.sh
-```
-
-`run_mac.sh` now auto-runs `install_mac.sh` when venv or frontend dependencies are missing.
-
-### App URLs
-- Frontend: `http://localhost:5173`
-- Backend API docs: `http://localhost:8011/docs`
-
-## Install Scripts
-- `install_windows.bat`: creates backend venv, installs backend/frontend deps, optional Parakeet deps, optional model preloading.
-- `install_mac.sh`: same flow for macOS.
-
-Installer env vars:
-- `INSTALL_PARAKEET=1|0` (default `1`)
-- `SKIP_MODEL_PRELOAD=1|0` (default `0`)
-- `PRELOAD_ENGINE=auto|whisper|parakeet` (default `auto`)
-- `OLLAMA_MODELS="model1 model2 ..."` (optional Ollama pulls)
+### Optional installer environment variables
+- `CHATALOGUE_REPO_URL` (default: `https://github.com/jonstreeter/Chatalogue.git`)
+- `CHATALOGUE_REPO_BRANCH` (default: `main`)
+- `CHATALOGUE_REPO_DIR` (default: `Chatalogue`)
+- `INSTALL_PARAKEET=1|0` (default: `1`)
+- `SKIP_MODEL_PRELOAD=1|0` (default: `0`)
+- `PRELOAD_ENGINE=auto|whisper|parakeet` (default: `auto`)
+- `OLLAMA_MODELS="model1 model2 ..."` (optional model pulls)
 
 Examples:
 
@@ -75,11 +63,35 @@ macOS:
 INSTALL_PARAKEET=1 PRELOAD_ENGINE=auto OLLAMA_MODELS="qwen2.5:7b qwen3.5:27b" ./install_mac.sh
 ```
 
-## Startup Scripts
-- `run.bat`: full Windows startup (backend + frontend, readiness-gated)
-- `run_mac.sh`: full macOS startup (backend + frontend, readiness-gated)
-- `run_frontend.bat`: frontend-only startup
-- `backend/run_worker.bat`: backend debug worker helper
+## Run
+
+After install:
+
+### Windows
+```bat
+Chatalogue\run.bat
+```
+
+### macOS
+```bash
+chmod +x Chatalogue/run_mac.sh
+./Chatalogue/run_mac.sh
+```
+
+`run.bat` and `run_mac.sh` wait for backend readiness before launching frontend.
+
+### App URLs
+- Frontend: `http://localhost:5173`
+- Backend API docs: `http://localhost:8011/docs`
+
+## Stack
+- Backend: FastAPI + SQLModel + Uvicorn
+- Frontend: React + Vite + TypeScript + Tailwind
+- Database: embedded PostgreSQL runtime (auto-managed binaries)
+- ASR engines: Whisper + NVIDIA Parakeet (configurable/fallback)
+- Diarization: pyannote.audio
+- LLM providers: local Ollama + hosted APIs
+- Media tooling: yt-dlp + ffmpeg
 
 ## Configuration
 Copy `backend/.env.example` to `backend/.env` and set keys as needed.
@@ -91,16 +103,10 @@ Common keys:
 - `DB_PROVIDER=postgres`
 - `DATABASE_URL` (optional explicit DB URL)
 
-## Embedded PostgreSQL Defaults
+## Embedded PostgreSQL defaults
 - Data: `backend/data/postgres`
 - Binaries cache: `backend/bin/postgres`
 - Default DSN: `postgresql+psycopg://chatalogue@127.0.0.1:55432/chatalogue`
-
-## Brand
-- Primary: `#FF5252`
-- Secondary: `#ED3B3B`
-- Accent: `#FF8A8A`
-- Surface tint: `#FFF1F1`
 
 ## Troubleshooting
 - `No module named 'pkg_resources'`:
@@ -112,3 +118,4 @@ Common keys:
 
 ## License
 MIT (`LICENSE`).
+

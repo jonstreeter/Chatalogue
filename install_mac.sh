@@ -1,7 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+REPO_URL="${CHATALOGUE_REPO_URL:-https://github.com/jonstreeter/Chatalogue.git}"
+REPO_BRANCH="${CHATALOGUE_REPO_BRANCH:-main}"
+REPO_DIR_NAME="${CHATALOGUE_REPO_DIR:-Chatalogue}"
+
+ROOT_DIR="$SCRIPT_DIR"
+if [[ ! -f "$ROOT_DIR/backend/src/main.py" || ! -f "$ROOT_DIR/frontend/package.json" ]]; then
+  echo "[Bootstrap] Local repo not detected in \"$SCRIPT_DIR\"."
+  if ! command -v git >/dev/null 2>&1; then
+    echo "[ERROR] Git is required for bootstrap install."
+    exit 1
+  fi
+
+  CLONE_TARGET="$SCRIPT_DIR/$REPO_DIR_NAME"
+  if [[ -d "$CLONE_TARGET/.git" ]]; then
+    echo "[Bootstrap] Existing repo found at \"$CLONE_TARGET\". Pulling latest $REPO_BRANCH..."
+    (
+      cd "$CLONE_TARGET"
+      git checkout "$REPO_BRANCH" >/dev/null 2>&1 || true
+      git pull --ff-only origin "$REPO_BRANCH" || echo "[WARN] git pull failed. Continuing with existing checkout."
+    )
+  else
+    if [[ -e "$CLONE_TARGET" ]]; then
+      echo "[ERROR] \"$CLONE_TARGET\" exists but is not a git repository."
+      echo "Delete it or set CHATALOGUE_REPO_DIR to a different folder name."
+      exit 1
+    fi
+    echo "[Bootstrap] Cloning $REPO_URL ($REPO_BRANCH)..."
+    git clone --branch "$REPO_BRANCH" --depth 1 "$REPO_URL" "$CLONE_TARGET"
+  fi
+  ROOT_DIR="$CLONE_TARGET"
+fi
+
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 VENV_DIR="$BACKEND_DIR/.venv"
@@ -83,6 +116,8 @@ fi
 
 echo
 echo "Installation complete."
+echo "Project root: $ROOT_DIR"
 echo "Backend venv: $VENV_DIR"
-echo "Start backend: $VENV_DIR/bin/python -m uvicorn src.main:app --app-dir \"$BACKEND_DIR\" --host 0.0.0.0 --port 8011"
-echo "Start frontend: cd \"$FRONTEND_DIR\" && npm run dev"
+if [[ -x "$ROOT_DIR/run_mac.sh" ]]; then
+  echo "Start app with: $ROOT_DIR/run_mac.sh"
+fi

@@ -1,9 +1,54 @@
 @echo off
 SETLOCAL EnableDelayedExpansion
 
-SET "PROJECT_ROOT=%~dp0"
-SET "BACKEND_DIR=%PROJECT_ROOT%backend"
-SET "FRONTEND_DIR=%PROJECT_ROOT%frontend"
+SET "SCRIPT_DIR=%~dp0"
+IF "%SCRIPT_DIR:~-1%"=="\" SET "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+
+SET "REPO_URL=%CHATALOGUE_REPO_URL%"
+IF "%REPO_URL%"=="" SET "REPO_URL=https://github.com/jonstreeter/Chatalogue.git"
+
+SET "REPO_BRANCH=%CHATALOGUE_REPO_BRANCH%"
+IF "%REPO_BRANCH%"=="" SET "REPO_BRANCH=main"
+
+SET "REPO_DIR_NAME=%CHATALOGUE_REPO_DIR%"
+IF "%REPO_DIR_NAME%"=="" SET "REPO_DIR_NAME=Chatalogue"
+
+SET "PROJECT_ROOT=%SCRIPT_DIR%"
+IF EXIST "%PROJECT_ROOT%\backend\src\main.py" IF EXIST "%PROJECT_ROOT%\frontend\package.json" GOTO :project_ready
+
+echo [Bootstrap] Local repo not detected in "%SCRIPT_DIR%".
+where git >nul 2>&1
+IF %ERRORLEVEL% NEQ 0 (
+  echo [ERROR] Git is required for bootstrap install. Please install Git and retry.
+  EXIT /B 1
+)
+
+SET "CLONE_TARGET=%SCRIPT_DIR%\%REPO_DIR_NAME%"
+IF EXIST "%CLONE_TARGET%\.git" (
+  echo [Bootstrap] Existing repo found at "%CLONE_TARGET%". Pulling latest %REPO_BRANCH%...
+  git -C "%CLONE_TARGET%" checkout "%REPO_BRANCH%" >nul 2>&1
+  git -C "%CLONE_TARGET%" pull --ff-only origin "%REPO_BRANCH%"
+  IF %ERRORLEVEL% NEQ 0 (
+    echo [WARN] git pull failed. Continuing with existing checkout.
+  )
+) ELSE (
+  IF EXIST "%CLONE_TARGET%" (
+    echo [ERROR] "%CLONE_TARGET%" exists but is not a git repository.
+    echo Delete it or set CHATALOGUE_REPO_DIR to a different folder name.
+    EXIT /B 1
+  )
+  echo [Bootstrap] Cloning %REPO_URL% (%REPO_BRANCH%)...
+  git clone --branch "%REPO_BRANCH%" --depth 1 "%REPO_URL%" "%CLONE_TARGET%"
+  IF %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] Failed to clone repository.
+    EXIT /B 1
+  )
+)
+SET "PROJECT_ROOT=%CLONE_TARGET%"
+
+:project_ready
+SET "BACKEND_DIR=%PROJECT_ROOT%\backend"
+SET "FRONTEND_DIR=%PROJECT_ROOT%\frontend"
 SET "VENV_DIR=%BACKEND_DIR%\.venv"
 SET "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 SET "PIP_CMD=%VENV_DIR%\Scripts\pip.exe"
@@ -95,7 +140,12 @@ IF DEFINED OLLAMA_MODELS (
 
 echo.
 echo Installation complete.
+echo Project root: %PROJECT_ROOT%
 echo Backend venv: %VENV_DIR%
-echo Start app with: run.bat
+IF EXIST "%PROJECT_ROOT%\run.bat" (
+  echo Start app with: "%PROJECT_ROOT%\run.bat"
+) ELSE (
+  echo Start app by running backend/frontend manually from %PROJECT_ROOT%.
+)
 echo.
 ENDLOCAL
