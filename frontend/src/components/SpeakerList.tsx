@@ -46,7 +46,7 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
     const [mergeSelected, setMergeSelected] = useState<Set<number>>(new Set());
     const [merging, setMerging] = useState(false);
     const infiniteSentinelRef = useRef<HTMLDivElement | null>(null);
-    const pageSize = 120;
+    const pageSize = 80;
     const canUsePagination = !videoId;
     const scopeKey = `channel:${channelId || 'all'}|video:${videoId ?? 'none'}`;
 
@@ -374,6 +374,8 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
                             src={getSpeakerThumbSrc(speaker) || undefined}
                             alt={speaker.name}
                             className="w-full h-full object-cover"
+                            loading="lazy"
+                            decoding="async"
                         />
                     ) : (
                         <div className="flex items-center justify-center h-full">
@@ -491,6 +493,8 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
                                 src={getSpeakerThumbSrc(speaker) || undefined}
                                 alt={speaker.name}
                                 className="w-full h-full object-cover"
+                                loading="lazy"
+                                decoding="async"
                             />
                         ) : (
                             <div className="flex items-center justify-center h-full">

@@ -33,6 +33,11 @@ IF %ERRORLEVEL% NEQ 0 (
   EXIT /B 1
 )
 
+where ffmpeg >nul 2>&1
+IF %ERRORLEVEL% NEQ 0 (
+  echo [WARN] ffmpeg was not found in PATH. Download/extract will work, but media conversion may fail until ffmpeg is installed.
+)
+
 echo [1/8] Creating backend virtual environment...
 IF NOT EXIST "%VENV_PYTHON%" (
   cd /d "%BACKEND_DIR%"

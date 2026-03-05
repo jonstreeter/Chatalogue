@@ -111,11 +111,11 @@ export function Channels() {
         <div className="space-y-6">
             <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                 <h2 className="text-2xl font-bold text-gray-800">Channels</h2>
-                <div className="w-full xl:w-auto flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="w-full xl:w-auto flex flex-col gap-2 lg:flex-row lg:items-center">
                     <button
                         onClick={() => fileInputRef.current?.click()}
                         disabled={importing}
-                        className="inline-flex min-h-10 items-center justify-center gap-2 bg-white text-slate-600 px-4 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 text-sm font-medium disabled:opacity-50"
+                        className="inline-flex h-11 items-center justify-center gap-2 bg-white text-slate-700 px-5 rounded-xl border border-slate-200 hover:bg-slate-50 text-sm font-semibold disabled:opacity-50 whitespace-nowrap shrink-0"
                     >
                         {importing ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />}
                         {importing ? 'Importing...' : 'Import Archive'}
@@ -133,12 +133,12 @@ export function Channels() {
                             value={newUrl}
                             onChange={(e) => setNewUrl(e.target.value)}
                             placeholder="https://youtube.com/@..."
-                            className="w-full min-w-0 px-4 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none sm:w-72"
+                            className="w-full min-w-0 h-11 px-4 border rounded-xl focus:ring-2 focus:ring-blue-500 outline-none sm:w-72"
                         />
                         <button
                             type="submit"
                             disabled={adding}
-                            className="inline-flex min-h-10 items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
+                            className="inline-flex h-11 items-center justify-center gap-2 bg-blue-600 text-white px-5 rounded-xl hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap font-semibold"
                         >
                             <Plus size={18} />
                             {adding ? 'Adding...' : 'Add Channel'}
@@ -165,7 +165,7 @@ export function Channels() {
                     </button>
                 </div>
             ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div className="grid [grid-template-columns:repeat(auto-fit,minmax(300px,1fr))] gap-x-5 gap-y-6 items-stretch">
                     {channels.map((channel, idx) => {
                         const stats = channelStats[channel.id];
                         const initials = (channel.name || 'C')
@@ -177,11 +177,11 @@ export function Channels() {
                         return (
                             <div
                                 key={channel.id}
-                                className="glass-panel p-6 rounded-2xl hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 group"
+                                className="glass-panel w-full min-w-0 p-5 rounded-2xl hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 group h-full flex flex-col"
                                 style={{ animationDelay: `${idx * 100}ms` }}
                             >
-                                <div className="-mx-6 -mt-6 mb-4">
-                                    <div className="relative h-24 rounded-t-2xl overflow-hidden border-b border-white/50 bg-gradient-to-r from-blue-100 via-indigo-100 to-slate-100">
+                                <div className="-mx-5 -mt-5 mb-4">
+                                    <div className="relative h-32 rounded-t-2xl overflow-hidden border-b border-white/50 bg-gradient-to-r from-blue-100 via-indigo-100 to-slate-100">
                                         {channel.header_image_url ? (
                                             <>
                                                 <img
@@ -204,13 +204,13 @@ export function Channels() {
 
                                 <div className="flex justify-between items-start mb-4 gap-3">
                                     <div className="flex items-start gap-3 min-w-0">
-                                        <div className="-mt-10 relative z-10 shrink-0">
-                                            <div className="w-14 h-14 rounded-xl bg-white p-0.5 shadow-lg ring-1 ring-slate-200 overflow-hidden">
+                                        <div className="-mt-14 relative z-10 shrink-0">
+                                            <div className="w-[4.5rem] h-[4.5rem] rounded-2xl bg-white p-0.5 shadow-lg ring-1 ring-slate-200 overflow-hidden">
                                                 {channel.icon_url ? (
                                                     <img
                                                         src={channel.icon_url}
                                                         alt=""
-                                                        className="w-full h-full object-cover rounded-[10px]"
+                                                        className="w-full h-full object-cover rounded-2xl"
                                                         loading="lazy"
                                                         referrerPolicy="no-referrer"
                                                         onError={(e) => {
@@ -221,7 +221,7 @@ export function Channels() {
                                                     />
                                                 ) : null}
                                                 <div
-                                                    className={`w-full h-full rounded-[10px] bg-gradient-to-br from-slate-100 to-slate-200 text-slate-600 font-bold text-sm items-center justify-center ${channel.icon_url ? 'hidden' : 'flex'}`}
+                                                    className={`w-full h-full rounded-2xl bg-gradient-to-br from-slate-100 to-slate-200 text-slate-600 font-bold text-base items-center justify-center ${channel.icon_url ? 'hidden' : 'flex'}`}
                                                 >
                                                     {initials}
                                                 </div>
@@ -240,27 +240,36 @@ export function Channels() {
                                 {/* Stats Section */}
                                 {stats && (
                                     <div className="grid grid-cols-3 gap-2 mb-4 text-center">
-                                        <div className="bg-slate-50 rounded-lg p-2">
-                                            <div className="flex items-center justify-center gap-1 text-blue-500 mb-1">
+                                        <Link
+                                            to={`/channel/${channel.id}`}
+                                            className="bg-slate-50 rounded-lg px-2 py-1.5 border border-slate-100 hover:border-blue-200 hover:bg-blue-50 transition-colors"
+                                        >
+                                            <div className="flex items-center justify-center gap-1 text-blue-500 mb-0.5">
                                                 <Film size={14} />
                                             </div>
-                                            <p className="text-lg font-bold text-slate-700">{stats.video_count}</p>
-                                            <p className="text-xs text-slate-400">Videos</p>
-                                        </div>
-                                        <div className="bg-slate-50 rounded-lg p-2">
-                                            <div className="flex items-center justify-center gap-1 text-green-500 mb-1">
+                                            <p className="text-base font-bold text-slate-700 leading-tight">{stats.video_count}</p>
+                                            <p className="text-[11px] text-slate-400">Videos</p>
+                                        </Link>
+                                        <Link
+                                            to={`/channel/${channel.id}/transcripts`}
+                                            className="bg-slate-50 rounded-lg px-2 py-1.5 border border-slate-100 hover:border-green-200 hover:bg-green-50 transition-colors"
+                                        >
+                                            <div className="flex items-center justify-center gap-1 text-green-500 mb-0.5">
                                                 <FileText size={14} />
                                             </div>
-                                            <p className="text-lg font-bold text-slate-700">{stats.processed_count}</p>
-                                            <p className="text-xs text-slate-400">Processed</p>
-                                        </div>
-                                        <div className="bg-slate-50 rounded-lg p-2">
-                                            <div className="flex items-center justify-center gap-1 text-purple-500 mb-1">
+                                            <p className="text-base font-bold text-slate-700 leading-tight">{stats.processed_count}</p>
+                                            <p className="text-[11px] text-slate-400">Transcripts</p>
+                                        </Link>
+                                        <Link
+                                            to={`/channel/${channel.id}/speakers`}
+                                            className="bg-slate-50 rounded-lg px-2 py-1.5 border border-slate-100 hover:border-purple-200 hover:bg-purple-50 transition-colors"
+                                        >
+                                            <div className="flex items-center justify-center gap-1 text-purple-500 mb-0.5">
                                                 <Users size={14} />
                                             </div>
-                                            <p className="text-lg font-bold text-slate-700">{stats.speaker_count}</p>
-                                            <p className="text-xs text-slate-400">Speakers</p>
-                                        </div>
+                                            <p className="text-base font-bold text-slate-700 leading-tight">{stats.speaker_count}</p>
+                                            <p className="text-[11px] text-slate-400">Speakers</p>
+                                        </Link>
                                     </div>
                                 )}
 
@@ -280,7 +289,7 @@ export function Channels() {
                                     </div>
                                 </div>
 
-                                <div className="flex gap-2">
+                                <div className="flex gap-2 mt-auto">
                                     <button
                                         onClick={() => handleRefresh(channel.id)}
                                         disabled={refreshingIds.has(channel.id)}
@@ -295,7 +304,7 @@ export function Channels() {
                                     </button>
                                     <Link
                                         to={`/channel/${channel.id}`}
-                                        className="flex-1 bg-gradient-to-r from-blue-500 to-indigo-500 text-white py-2.5 rounded-xl hover:shadow-lg hover:shadow-blue-500/25 transition-all flex items-center justify-center gap-2 text-sm font-medium"
+                                        className="flex-1 bg-blue-600 text-white py-2.5 rounded-xl hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-500/25 transition-all flex items-center justify-center gap-2 text-sm font-semibold border border-blue-700/20"
                                     >
                                         Open
                                         <ChevronRight size={16} />

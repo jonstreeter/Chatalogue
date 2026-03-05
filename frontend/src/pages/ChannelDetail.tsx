@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import api from '../lib/api';
 import { DeleteChannelModal } from '../components/DeleteChannelModal';
+import type { Channel } from '../types';
 
 const tabs = [
     { path: '', label: 'Videos', icon: Video },
@@ -17,19 +18,23 @@ export function ChannelDetail() {
     const { id } = useParams<{ id: string }>();
     const navigate = useNavigate();
     const [channelName, setChannelName] = useState<string>('');
+    const [channelIconUrl, setChannelIconUrl] = useState<string>('');
     const [showDeleteModal, setShowDeleteModal] = useState(false);
     const [exporting, setExporting] = useState(false);
     const [showBatchPublishModal, setShowBatchPublishModal] = useState(false);
 
     useEffect(() => {
         if (id) {
-            api.get(`/channels/${id}`)
+            api.get<Channel>(`/channels/${id}`)
                 .then(res => {
                     if (res.data?.name) setChannelName(res.data.name);
+                    setChannelIconUrl(res.data?.icon_url || '');
                 })
                 .catch(() => { });
         }
     }, [id]);
+
+    const channelInitial = (channelName?.trim()?.[0] || 'C').toUpperCase();
 
     const handleExport = async () => {
         setExporting(true);
@@ -51,15 +56,41 @@ export function ChannelDetail() {
 
     return (
         <div className="space-y-6">
-            {/* Back navigation + actions */}
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <Link
-                    to="/"
-                    className="inline-flex items-center gap-2 text-slate-500 hover:text-slate-700 transition-colors text-sm"
-                >
-                    <ArrowLeft size={16} />
-                    Back to Channels
-                </Link>
+            {/* Back navigation + channel context + actions */}
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div className="min-w-0">
+                    <Link
+                        to="/"
+                        className="inline-flex items-center gap-2 text-slate-500 hover:text-slate-700 transition-colors text-sm"
+                    >
+                        <ArrowLeft size={16} />
+                        Back to Channels
+                    </Link>
+                    <div className="mt-2 flex items-center gap-3 min-w-0">
+                        <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-white p-0.5 shadow-sm ring-1 ring-slate-200 overflow-hidden shrink-0">
+                            {channelIconUrl ? (
+                                <img
+                                    src={channelIconUrl}
+                                    alt=""
+                                    className="w-full h-full object-cover rounded-[10px]"
+                                    loading="lazy"
+                                    referrerPolicy="no-referrer"
+                                    onError={(e) => {
+                                        (e.currentTarget as HTMLImageElement).style.display = 'none';
+                                        const next = e.currentTarget.nextElementSibling as HTMLElement | null;
+                                        if (next) next.style.display = 'flex';
+                                    }}
+                                />
+                            ) : null}
+                            <div className={`w-full h-full rounded-[10px] bg-gradient-to-br from-slate-100 to-slate-200 text-slate-600 font-bold text-sm items-center justify-center ${channelIconUrl ? 'hidden' : 'flex'}`}>
+                                {channelInitial}
+                            </div>
+                        </div>
+                        <h1 className="text-xl sm:text-2xl font-bold text-slate-800 truncate" title={channelName || `Channel ${id}`}>
+                            {channelName || `Channel ${id}`}
+                        </h1>
+                    </div>
+                </div>
 
                 <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
                     <button

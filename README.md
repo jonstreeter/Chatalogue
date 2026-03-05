@@ -1,96 +1,65 @@
 # Chatalogue
 
-Chatalogue is a local-first YouTube channel intelligence app for long-form podcast/video workflows:
-- ingest channels and keep episodes updated
-- transcribe + diarize at scale
-- search transcripts across episodes
-- manage speaker profiles and merges
-- detect/explain funny moments
-- generate summary/chapters
-- create and export clips
+![Chatalogue Logo](frontend/public/chatalogue-logo.svg)
 
-## Technology
-- Backend: FastAPI, SQLModel, Uvicorn
+Chatalogue is a local-first YouTube analysis workstation for long-form video/podcast workflows:
+- channel ingest + refresh
+- transcription + diarization pipeline
+- channel-level transcript search
+- speaker profile management/merging
+- funny-moment detection + explanation
+- AI summary + chapter generation
+- clip editing/export/upload flows
+
+## Stack
+- Backend: FastAPI + SQLModel + Uvicorn
 - Frontend: React + Vite + TypeScript + Tailwind
-- Database: embedded PostgreSQL runtime (auto-managed binaries) with SQLite migration support
-- Transcription: modular ASR engine (`auto`, `whisper`, `parakeet`) with fallback logic
-- Diarization: `pyannote.audio`
-- LLM integrations: local (Ollama) and remote providers
-- Media tooling: `yt-dlp`, `ffmpeg`
-
-## Repository layout
-- `backend/`: API, queue workers, ingestion/transcription/diarization pipeline, DB layer
-- `frontend/`: web UI
-- `install_windows.bat`: Windows install/bootstrap (venv + deps + model preload)
-- `install_mac.sh`: macOS install/bootstrap (venv + deps + model preload)
-- `run.bat`: Windows dev runner (starts backend + frontend)
+- Database: embedded PostgreSQL runtime (auto-managed binaries)
+- ASR engines: Whisper + NVIDIA Parakeet (configurable/fallback)
+- Diarization: pyannote.audio
+- LLM providers: local Ollama + remote API providers
+- Media tooling: yt-dlp + ffmpeg
 
 ## Prerequisites
 - Python 3.10+
 - Node.js 18+
-- `ffmpeg` available on PATH
-- Optional but recommended: NVIDIA GPU for faster transcription/diarization
+- `ffmpeg` on PATH (recommended)
+- Optional: NVIDIA GPU for fastest transcription/diarization
 
-## Windows installation
-From repo root in `cmd.exe`:
+## Quick Start
 
-```bat
-install_windows.bat
-```
-
-Then run the app:
+### Windows
+From repo root:
 
 ```bat
 run.bat
 ```
 
-App URLs:
-- Frontend: `http://localhost:5173`
-- Backend API/docs: `http://localhost:8011/docs`
+`run.bat` now auto-runs `install_windows.bat` if dependencies are missing, waits for backend readiness, then starts frontend.
 
-## macOS installation
+### macOS
 From repo root:
 
 ```bash
-chmod +x install_mac.sh
-./install_mac.sh
-```
-
-Start both backend + frontend together:
-
-```bash
-chmod +x run_mac.sh
+chmod +x run_mac.sh install_mac.sh
 ./run_mac.sh
 ```
 
-Or start manually:
+`run_mac.sh` now auto-runs `install_mac.sh` when venv or frontend dependencies are missing.
 
-```bash
-cd backend
-./.venv/bin/python -m uvicorn src.main:app --app-dir . --host 0.0.0.0 --port 8011
-```
+### App URLs
+- Frontend: `http://localhost:5173`
+- Backend API docs: `http://localhost:8011/docs`
 
-Start frontend (new terminal):
+## Install Scripts
+- `install_windows.bat`: creates backend venv, installs backend/frontend deps, optional Parakeet deps, optional model preloading.
+- `install_mac.sh`: same flow for macOS.
 
-```bash
-cd frontend
-npm run dev
-```
-
-## Installer options
-Both installers support optional environment variables.
-
-- `INSTALL_PARAKEET=1|0`
-  - Default: `1`
-  - Installs optional NeMo Parakeet dependencies when enabled.
-- `SKIP_MODEL_PRELOAD=1|0`
-  - Default: `0`
-  - When `0`, runs `backend/preload_models.py` after dependency install.
-- `PRELOAD_ENGINE=auto|whisper|parakeet`
-  - Default: `auto`
-  - Controls which ASR model cache is preloaded.
-- `OLLAMA_MODELS="<model1> <model2> ..."` (optional)
-  - If set and `ollama` exists in PATH, installer will run `ollama pull` for each model.
+Installer env vars:
+- `INSTALL_PARAKEET=1|0` (default `1`)
+- `SKIP_MODEL_PRELOAD=1|0` (default `0`)
+- `PRELOAD_ENGINE=auto|whisper|parakeet` (default `auto`)
+- `OLLAMA_MODELS="model1 model2 ..."` (optional Ollama pulls)
 
 Examples:
 
@@ -106,44 +75,40 @@ macOS:
 INSTALL_PARAKEET=1 PRELOAD_ENGINE=auto OLLAMA_MODELS="qwen2.5:7b qwen3.5:27b" ./install_mac.sh
 ```
 
+## Startup Scripts
+- `run.bat`: full Windows startup (backend + frontend, readiness-gated)
+- `run_mac.sh`: full macOS startup (backend + frontend, readiness-gated)
+- `run_frontend.bat`: frontend-only startup
+- `backend/run_worker.bat`: backend debug worker helper
+
 ## Configuration
-Copy `backend/.env.example` to `backend/.env` and set values as needed.
+Copy `backend/.env.example` to `backend/.env` and set keys as needed.
 
-Common variables:
-- `HF_TOKEN`: required for gated pyannote models
-- `TRANSCRIPTION_ENGINE`: `auto` (default), `whisper`, or `parakeet`
-- `PARAKEET_MODEL`: default `nvidia/parakeet-tdt-0.6b-v2`
-- `PARAKEET_BATCH_SIZE`: default `16`
-- `PARAKEET_REQUIRE_WORD_TIMESTAMPS`: default `true`
-- `DB_PROVIDER`: default `postgres`
-- `DATABASE_URL`: explicit SQLAlchemy URL (if set, embedded bootstrap is bypassed)
+Common keys:
+- `HF_TOKEN`
+- `TRANSCRIPTION_ENGINE=auto|whisper|parakeet`
+- `PARAKEET_MODEL` (default `nvidia/parakeet-tdt-0.6b-v2`)
+- `DB_PROVIDER=postgres`
+- `DATABASE_URL` (optional explicit DB URL)
 
-## Embedded PostgreSQL defaults
-- Data dir: `backend/data/postgres`
-- Binary cache: `backend/bin/postgres`
+## Embedded PostgreSQL Defaults
+- Data: `backend/data/postgres`
+- Binaries cache: `backend/bin/postgres`
 - Default DSN: `postgresql+psycopg://chatalogue@127.0.0.1:55432/chatalogue`
 
-Optional runtime flags:
-- `EMBEDDED_PG_ENABLED`
-- `EMBEDDED_PG_AUTO_DOWNLOAD`
-- `EMBEDDED_PG_VERSION`
-- `EMBEDDED_PG_HOST`
-- `EMBEDDED_PG_PORT`
-- `EMBEDDED_PG_USER`
-- `EMBEDDED_PG_DATABASE`
-- `EMBEDDED_PG_BIN_DIR`
+## Brand
+- Primary: `#FF5252`
+- Secondary: `#ED3B3B`
+- Accent: `#FF8A8A`
+- Surface tint: `#FFF1F1`
 
 ## Troubleshooting
-- `No module named 'pkg_resources'`
-  - Ensure installer completed or run:
-    - `pip install "setuptools<81"`
-- `Sign in to confirm your age` from `yt-dlp`
-  - Configure YouTube cookies per yt-dlp docs.
-- Backend unreachable
-  - Confirm backend is running on port `8011`, then retry frontend.
-
-## Contributing
-See `CONTRIBUTING.md`.
+- `No module named 'pkg_resources'`:
+  - `pip install "setuptools<81"` in backend venv.
+- yt-dlp age/cookie errors:
+  - configure YouTube cookies per yt-dlp docs.
+- Backend unreachable:
+  - verify `http://localhost:8011/system/worker-status`.
 
 ## License
 MIT (`LICENSE`).

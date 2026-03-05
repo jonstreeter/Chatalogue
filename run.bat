@@ -29,50 +29,17 @@ for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":5173.*LISTENING" 2^>nul') d
 )
 timeout /t 2 /nobreak >nul
 
-:: If venv already exists, skip Python detection
-IF EXIST "%VENV_PYTHON%" goto :venv_ready
-
-:: Find Python - try "python", then "py" (Windows Launcher)
-SET "PYTHON_CMD="
-where python >nul 2>&1 && SET "PYTHON_CMD=python"
-IF "!PYTHON_CMD!"=="" (
-    where py >nul 2>&1 && SET "PYTHON_CMD=py"
-)
-IF "!PYTHON_CMD!"=="" (
-    echo Python is not installed or not in PATH.
-    echo Install Python 3.10+ and ensure "Add to PATH" is checked.
-    pause
-    exit /b 1
+:: Ensure backend/frontend dependencies exist
+IF NOT EXIST "%VENV_PYTHON%" (
+    echo Backend venv missing. Running install_windows.bat...
+    call "%PROJECT_ROOT%install_windows.bat"
+    IF !ERRORLEVEL! NEQ 0 (
+        echo install_windows.bat failed. Aborting startup.
+        pause
+        exit /b 1
+    )
 )
 
-echo Creating Python virtual environment...
-cd /d "%BACKEND_DIR%"
-!PYTHON_CMD! -m venv .venv
-echo Installing dependencies (this may take a while on first run)...
-
-:: Step 1: PyTorch nightly with CUDA 12.8 (required for RTX 5090 Blackwell)
-echo [1/4] Installing PyTorch nightly cu128...
-"%VENV_DIR%\Scripts\pip" install --pre torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
-
-:: Step 2: App dependencies
-echo [2/4] Installing app dependencies...
-"%VENV_DIR%\Scripts\pip" install fastapi uvicorn yt-dlp python-dotenv sqlmodel aiosqlite psycopg[binary] "setuptools<81" faster-whisper "ctranslate2<4.6" python-multipart
-
-:: Step 3: pyannote (--no-deps to avoid torch version conflict)
-echo [3/4] Installing pyannote.audio...
-"%VENV_DIR%\Scripts\pip" install pyannote.audio --no-deps
-
-:: Step 4: pyannote's other dependencies
-echo [4/4] Installing pyannote dependencies...
-"%VENV_DIR%\Scripts\pip" install asteroid-filterbanks einops huggingface-hub lightning matplotlib opentelemetry-api opentelemetry-exporter-otlp opentelemetry-sdk pyannote-core pyannote-database pyannote-metrics pyannote-pipeline pytorch-metric-learning rich safetensors soundfile torch-audiomentations torchmetrics torchcodec pyannoteai-sdk av onnxruntime tokenizers
-
-:: Optional Step: Parakeet engine dependencies (set INSTALL_PARAKEET=1 before running)
-IF /I "%INSTALL_PARAKEET%"=="1" (
-    echo [optional] Installing Parakeet dependencies...
-    "%VENV_DIR%\Scripts\pip" install -r "%BACKEND_DIR%\requirements-parakeet.txt"
-)
-
-:venv_ready
 echo Python venv OK.
 
 :: Check if Node.js is installed
@@ -94,12 +61,23 @@ IF NOT EXIST "%FRONTEND_DIR%\node_modules" (
 echo Starting Backend Server on http://localhost:%BACKEND_PORT% ...
 start "%PROJECT_NAME% Backend" "%VENV_PYTHON%" -m uvicorn src.main:app --app-dir "%BACKEND_DIR%" --host 0.0.0.0 --port %BACKEND_PORT%
 
+:: Wait for backend readiness before starting frontend
+echo Waiting for backend to become ready...
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$url='http://127.0.0.1:%BACKEND_PORT%/system/worker-status'; $deadline=(Get-Date).AddSeconds(120); $ok=$false; while((Get-Date)-lt $deadline){ try { $r=Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 300){ $ok=$true; break } } catch {} Start-Sleep -Milliseconds 800 }; if(-not $ok){ exit 1 }"
+IF !ERRORLEVEL! NEQ 0 (
+    echo Backend did not become ready in time.
+    echo Check backend logs/terminal, then re-run this script.
+    pause
+    exit /b 1
+)
+
 :: Start Frontend
 echo Starting Frontend on http://localhost:5173 ...
 start "%PROJECT_NAME% Frontend" cmd /c "cd /d "%FRONTEND_DIR%" && npm run dev"
 
-:: Wait for servers to start, then open browser
-timeout /t 3 /nobreak >nul
+:: Wait for frontend dev server to bind, then open browser
+timeout /t 2 /nobreak >nul
 start http://localhost:5173
 
 echo.

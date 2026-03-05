@@ -42,18 +42,21 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <div className="flex h-screen overflow-hidden bg-slate-50">
             {/* Ambient Background */}
             <div className="absolute inset-0 overflow-hidden pointer-events-none">
-                <div className="absolute -top-40 -right-40 w-96 h-96 bg-gradient-to-br from-blue-400/20 to-indigo-500/20 rounded-full blur-3xl" />
-                <div className="absolute top-1/2 -left-40 w-80 h-80 bg-gradient-to-br from-indigo-400/15 to-purple-500/15 rounded-full blur-3xl" />
+                <div className="absolute -top-40 -right-40 w-96 h-96 bg-gradient-to-br from-rose-400/20 to-red-500/20 rounded-full blur-3xl" />
+                <div className="absolute top-1/2 -left-40 w-80 h-80 bg-gradient-to-br from-rose-300/15 to-pink-500/15 rounded-full blur-3xl" />
             </div>
 
             {/* Mobile Top Bar */}
             <div className="md:hidden absolute top-0 left-0 right-0 z-20 px-3 pt-3">
                 <div className="glass-sidebar rounded-2xl px-3 py-2.5 flex items-center justify-between border border-white/40 shadow-sm">
-                    <Link to="/" className="min-w-0">
-                        <div className="text-base font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600 truncate">
-                            Chatalogue
+                    <Link to="/" className="min-w-0 flex items-center gap-2.5">
+                        <img src="/chatalogue-logo.svg" alt="Chatalogue logo" className="h-8 w-8 shrink-0 drop-shadow-sm" />
+                        <div className="min-w-0">
+                            <div className="text-base font-bold bg-clip-text text-transparent bg-gradient-to-r from-rose-600 to-red-700 truncate">
+                                Chatalogue
+                            </div>
+                            <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Admin Console</div>
                         </div>
-                        <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Admin Console</div>
                     </Link>
                     <button
                         type="button"
@@ -83,11 +86,14 @@ export function Layout({ children }: { children: React.ReactNode }) {
             >
                 <div className="md:hidden h-3" />
                 <div className="p-8 pb-4">
-                    <Link to="/" className="block">
-                        <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600 tracking-tight">
-                            Chatalogue
-                        </h1>
-                        <p className="text-xs text-slate-400 mt-1 uppercase tracking-wider font-semibold">Admin Console</p>
+                    <Link to="/" className="flex items-center gap-3">
+                        <img src="/chatalogue-logo.svg" alt="Chatalogue logo" className="h-9 w-9 shrink-0 drop-shadow-sm" />
+                        <div className="min-w-0">
+                            <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-rose-600 to-red-700 tracking-tight truncate">
+                                Chatalogue
+                            </h1>
+                            <p className="text-xs text-slate-400 mt-1 uppercase tracking-wider font-semibold">Admin Console</p>
+                        </div>
                     </Link>
                 </div>
 

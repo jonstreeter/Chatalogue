@@ -45,6 +45,18 @@ interface TranscriptionEngineTestResult {
     whisper_model?: string;
     whisper_compute_type?: string | null;
     parakeet_model?: string;
+    parakeet_batch_size_requested?: number;
+    parakeet_batch_auto?: boolean;
+    parakeet_effective_batch_size?: number;
+    parakeet_batch_hard_max?: number;
+    parakeet_max_gpu_memory_fraction?: number;
+    parakeet_unload_after_transcribe?: boolean | string;
+    cuda_memory?: {
+        free_gb?: number;
+        total_gb?: number;
+        allocated_gb?: number;
+        reserved_gb?: number;
+    };
     fallback_used?: boolean;
     error?: string | null;
 }
@@ -318,7 +330,9 @@ export function Settings() {
     const [computeType, setComputeType] = useState('int8_float16');
     const [parakeetModel, setParakeetModel] = useState('nvidia/parakeet-tdt-0.6b-v2');
     const [parakeetBatchSize, setParakeetBatchSize] = useState(16);
+    const [parakeetBatchAuto, setParakeetBatchAuto] = useState(true);
     const [parakeetRequireWordTimestamps, setParakeetRequireWordTimestamps] = useState(true);
+    const [parakeetUnloadAfterTranscribe, setParakeetUnloadAfterTranscribe] = useState(false);
     const [testingTranscriptionEngine, setTestingTranscriptionEngine] = useState(false);
     const [transcriptionEngineTestResult, setTranscriptionEngineTestResult] = useState<TranscriptionEngineTestResult | null>(null);
     const [beamSize, setBeamSize] = useState(1);
@@ -426,7 +440,7 @@ export function Settings() {
 
     useEffect(() => {
         setTranscriptionEngineTestResult(null);
-    }, [transcriptionEngine, transcriptionModel, computeType, parakeetModel, parakeetBatchSize, parakeetRequireWordTimestamps]);
+    }, [transcriptionEngine, transcriptionModel, computeType, parakeetModel, parakeetBatchSize, parakeetBatchAuto, parakeetRequireWordTimestamps, parakeetUnloadAfterTranscribe]);
 
     const loadSettings = async () => {
         try {
@@ -441,7 +455,9 @@ export function Settings() {
             setComputeType(res.data.transcription_compute_type || 'float16');
             setParakeetModel(res.data.parakeet_model || 'nvidia/parakeet-tdt-0.6b-v2');
             setParakeetBatchSize(res.data.parakeet_batch_size ?? 16);
+            setParakeetBatchAuto(res.data.parakeet_batch_auto ?? true);
             setParakeetRequireWordTimestamps(res.data.parakeet_require_word_timestamps ?? true);
+            setParakeetUnloadAfterTranscribe(res.data.parakeet_unload_after_transcribe ?? false);
             setBeamSize(res.data.beam_size ?? 1);
             setVadFilter(res.data.vad_filter ?? true);
             setBatchedTranscription(res.data.batched_transcription ?? true);
@@ -1037,7 +1053,9 @@ export function Settings() {
                 transcription_compute_type: computeType,
                 parakeet_model: parakeetModel,
                 parakeet_batch_size: parakeetBatchSize,
+                parakeet_batch_auto: parakeetBatchAuto,
                 parakeet_require_word_timestamps: parakeetRequireWordTimestamps,
+                parakeet_unload_after_transcribe: parakeetUnloadAfterTranscribe,
                 beam_size: beamSize,
                 vad_filter: vadFilter,
                 batched_transcription: batchedTranscription,
@@ -1210,10 +1228,30 @@ export function Settings() {
                                                             max={64}
                                                             value={parakeetBatchSize}
                                                             onChange={(e) => setParakeetBatchSize(Number(e.target.value || 16))}
+                                                            disabled={parakeetBatchAuto}
                                                             className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                                                         />
+                                                        <p className="mt-1 text-xs text-slate-500">
+                                                            {parakeetBatchAuto
+                                                                ? 'Auto mode adjusts batch size to available VRAM and free GPU memory.'
+                                                                : 'Manual override. Higher batch can increase speed but may trigger shared-memory spill and slowdown.'}
+                                                        </p>
                                                     </div>
                                                     <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200">
+                                                        <div className="flex-1">
+                                                            <label className="block text-sm font-medium text-slate-700">
+                                                                Auto Batch (VRAM-aware)
+                                                            </label>
+                                                            <p className="text-xs text-slate-500 mt-0.5">
+                                                                Automatically reduces Parakeet batch size on lower-VRAM or memory-pressured GPUs.
+                                                            </p>
+                                                        </div>
+                                                        <label className="relative inline-flex items-center cursor-pointer ml-4">
+                                                            <input type="checkbox" checked={parakeetBatchAuto} onChange={(e) => setParakeetBatchAuto(e.target.checked)} className="sr-only peer" />
+                                                            <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                                        </label>
+                                                    </div>
+                                                    <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200 sm:col-span-2">
                                                         <div className="flex-1">
                                                             <label className="block text-sm font-medium text-slate-700">
                                                                 Require Word Timestamps
@@ -1224,6 +1262,20 @@ export function Settings() {
                                                         </div>
                                                         <label className="relative inline-flex items-center cursor-pointer ml-4">
                                                             <input type="checkbox" checked={parakeetRequireWordTimestamps} onChange={(e) => setParakeetRequireWordTimestamps(e.target.checked)} className="sr-only peer" />
+                                                            <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                                        </label>
+                                                    </div>
+                                                    <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200 sm:col-span-2">
+                                                        <div className="flex-1">
+                                                            <label className="block text-sm font-medium text-slate-700">
+                                                                Release Parakeet After Transcribe
+                                                            </label>
+                                                            <p className="text-xs text-slate-500 mt-0.5">
+                                                                Frees GPU memory before diarization/other tasks. Recommended on 16GB-and-below cards.
+                                                            </p>
+                                                        </div>
+                                                        <label className="relative inline-flex items-center cursor-pointer ml-4">
+                                                            <input type="checkbox" checked={parakeetUnloadAfterTranscribe} onChange={(e) => setParakeetUnloadAfterTranscribe(e.target.checked)} className="sr-only peer" />
                                                             <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
                                                         </label>
                                                     </div>
@@ -1315,6 +1367,25 @@ export function Settings() {
                                                     <div className="mt-1 text-xs">
                                                         Requested: {transcriptionEngineTestResult.requested_engine} | Resolved: {transcriptionEngineTestResult.resolved_engine || 'unknown'} | Device: {transcriptionEngineTestResult.device || 'unknown'}
                                                     </div>
+                                                    {typeof transcriptionEngineTestResult.parakeet_effective_batch_size === 'number' && (
+                                                        <div className="mt-1 text-xs">
+                                                            Parakeet batch: {transcriptionEngineTestResult.parakeet_effective_batch_size}
+                                                            {typeof transcriptionEngineTestResult.parakeet_batch_size_requested === 'number'
+                                                                ? ` (requested ${transcriptionEngineTestResult.parakeet_batch_size_requested})`
+                                                                : ''}
+                                                            {typeof transcriptionEngineTestResult.parakeet_batch_auto === 'boolean'
+                                                                ? ` • auto ${transcriptionEngineTestResult.parakeet_batch_auto ? 'on' : 'off'}`
+                                                                : ''}
+                                                        </div>
+                                                    )}
+                                                    {transcriptionEngineTestResult.cuda_memory && (
+                                                        <div className="mt-1 text-xs">
+                                                            CUDA mem: {transcriptionEngineTestResult.cuda_memory.free_gb ?? '?'}GB free / {transcriptionEngineTestResult.cuda_memory.total_gb ?? '?'}GB total
+                                                            {typeof transcriptionEngineTestResult.cuda_memory.reserved_gb === 'number'
+                                                                ? ` • reserved ${transcriptionEngineTestResult.cuda_memory.reserved_gb}GB`
+                                                                : ''}
+                                                        </div>
+                                                    )}
                                                     {transcriptionEngineTestResult.fallback_used && (
                                                         <div className="mt-1 text-xs">Fallback used: yes</div>
                                                     )}

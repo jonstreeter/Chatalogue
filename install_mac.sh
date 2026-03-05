@@ -21,6 +21,10 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "[WARN] ffmpeg was not found in PATH. Media conversion features may fail until ffmpeg is installed."
+fi
+
 echo "[1/8] Creating backend virtual environment..."
 if [ ! -x "$VENV_DIR/bin/python" ]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
 import { toApiUrl } from '../lib/api';
@@ -7,6 +7,13 @@ import { Pause, Play, Trash2, Clock, CheckCircle2, DownloadCloud, FileText, User
 import axios from 'axios';
 
 const ACTIVE_STATUSES = ['downloading', 'transcribing', 'diarizing', 'running'];
+const JOBS_FETCH_LIMIT = 1200;
+const HISTORY_FETCH_LIMIT = 800;
+const JOBS_POLL_MS = 4000;
+const HISTORY_POLL_MS = 8000;
+const SUMMARY_POLL_MS = 5000;
+const WORKER_POLL_MS = 10000;
+const MAX_RENDERED_PENDING_PER_QUEUE = 140;
 type QueueName = 'pipeline' | 'funny' | 'youtube' | 'clip' | 'other';
 
 const queueLabel: Record<QueueName, string> = {
@@ -48,83 +55,187 @@ const getJobTypeLabel = (jobType: string): string => {
 };
 
 type QueueSummary = Record<QueueName, { queued: number; running: number; paused: number; completed: number; failed: number; total: number }>;
+type ProcessStageSummary = {
+    transcribeDone: boolean;
+    diarizeDone: boolean;
+    funnyDone: boolean;
+    transcribeDuration: number | null;
+    diarizeDuration: number | null;
+    funnyDuration: number | null;
+    processDuration: number | null;
+    totalDuration: number | null;
+};
 
 export function JobQueue() {
     const [jobs, setJobs] = useState<Job[]>([]);
+    const [historyRows, setHistoryRows] = useState<Job[]>([]);
+    const [funnyHistoryRows, setFunnyHistoryRows] = useState<Job[]>([]);
     const [queueSummary, setQueueSummary] = useState<QueueSummary | null>(null);
     const [loading, setLoading] = useState(true);
     const [workerStatus, setWorkerStatus] = useState<'online' | 'offline' | 'stalled'>('offline');
     const [lowerTab, setLowerTab] = useState<'pending' | 'history'>('pending');
+    const mountedRef = useRef(false);
+    const jobsInFlightRef = useRef(false);
+    const summaryInFlightRef = useRef(false);
+    const historyInFlightRef = useRef(false);
+    const workerInFlightRef = useRef(false);
+    const jobsAbortRef = useRef<AbortController | null>(null);
+    const summaryAbortRef = useRef<AbortController | null>(null);
+    const historyAbortRef = useRef<AbortController | null>(null);
+    const workerAbortRef = useRef<AbortController | null>(null);
 
-    const fetchJobs = async () => {
+    const isRequestCanceled = (err: unknown) =>
+        axios.isAxiosError(err) && (err.code === 'ERR_CANCELED' || err.message === 'canceled');
+
+    const fetchJobs = async (force = false) => {
+        if (jobsInFlightRef.current && !force) return;
+        if (force && jobsAbortRef.current) jobsAbortRef.current.abort();
+        jobsInFlightRef.current = true;
+        const controller = new AbortController();
+        jobsAbortRef.current = controller;
         try {
-            const res = await api.get<Job[]>('/jobs', { params: { limit: 2000 } });
+            const res = await api.get<Job[]>('/jobs', {
+                params: { limit: JOBS_FETCH_LIMIT },
+                signal: controller.signal,
+            });
+            if (!mountedRef.current) return;
             setJobs(Array.isArray(res.data) ? res.data : []);
         } catch (e) {
+            if (isRequestCanceled(e)) return;
             console.error('Failed to fetch jobs:', e);
-            setJobs([]);
+            if (!mountedRef.current) return;
+            // Preserve existing list on transient fetch failures to avoid jarring full resets.
         } finally {
-            setLoading(false);
+            jobsInFlightRef.current = false;
+            if (mountedRef.current) setLoading(false);
         }
     };
 
-    const fetchQueueSummary = async () => {
+    const fetchQueueSummary = async (force = false) => {
+        if (summaryInFlightRef.current && !force) return;
+        if (force && summaryAbortRef.current) summaryAbortRef.current.abort();
+        summaryInFlightRef.current = true;
+        const controller = new AbortController();
+        summaryAbortRef.current = controller;
         try {
-            const res = await api.get<QueueSummary>('/jobs/queues/summary');
+            const res = await api.get<QueueSummary>('/jobs/queues/summary', { signal: controller.signal });
+            if (!mountedRef.current) return;
             setQueueSummary(res.data || null);
         } catch (e) {
+            if (isRequestCanceled(e)) return;
             console.error('Failed to fetch queue summary:', e);
+            if (!mountedRef.current) return;
             setQueueSummary(null);
+        } finally {
+            summaryInFlightRef.current = false;
         }
     };
 
-    const checkWorkerStatus = async () => {
+    const fetchHistoryJobs = async (force = false) => {
+        if (historyInFlightRef.current && !force) return;
+        if (force && historyAbortRef.current) historyAbortRef.current.abort();
+        historyInFlightRef.current = true;
+        const controller = new AbortController();
+        historyAbortRef.current = controller;
         try {
-            const res = await api.get('/system/worker-status');
+            const [completedRes, failedRes, funnyCompletedRes] = await Promise.all([
+                api.get<Job[]>('/jobs', {
+                    params: { status: 'completed', job_type: 'process', limit: HISTORY_FETCH_LIMIT },
+                    signal: controller.signal,
+                }),
+                api.get<Job[]>('/jobs', {
+                    params: { status: 'failed', job_type: 'process', limit: HISTORY_FETCH_LIMIT },
+                    signal: controller.signal,
+                }),
+                api.get<Job[]>('/jobs', {
+                    params: { status: 'completed', job_type: 'funny_detect,funny_explain', limit: HISTORY_FETCH_LIMIT },
+                    signal: controller.signal,
+                }),
+            ]);
+            if (!mountedRef.current) return;
+            const processMerged = [
+                ...(Array.isArray(completedRes.data) ? completedRes.data : []),
+                ...(Array.isArray(failedRes.data) ? failedRes.data : []),
+            ].sort(byDescCreated);
+            const funnyMerged = (Array.isArray(funnyCompletedRes.data) ? funnyCompletedRes.data : []).sort(byDescCreated);
+            setHistoryRows(processMerged);
+            setFunnyHistoryRows(funnyMerged);
+        } catch (e) {
+            if (isRequestCanceled(e)) return;
+            console.error('Failed to fetch history jobs:', e);
+            if (!mountedRef.current) return;
+            // Keep existing history rows on transient failures.
+        } finally {
+            historyInFlightRef.current = false;
+        }
+    };
+
+    const checkWorkerStatus = async (force = false) => {
+        if (workerInFlightRef.current && !force) return;
+        if (force && workerAbortRef.current) workerAbortRef.current.abort();
+        workerInFlightRef.current = true;
+        const controller = new AbortController();
+        workerAbortRef.current = controller;
+        try {
+            const res = await api.get('/system/worker-status', { signal: controller.signal });
+            if (!mountedRef.current) return;
             setWorkerStatus(res.data.status);
-        } catch {
+        } catch (e) {
+            if (isRequestCanceled(e)) return;
+            if (!mountedRef.current) return;
             setWorkerStatus('offline');
+        } finally {
+            workerInFlightRef.current = false;
         }
     };
 
     useEffect(() => {
-        fetchJobs();
-        fetchQueueSummary();
-        checkWorkerStatus();
-        const jobInterval = setInterval(fetchJobs, 2000);
-        const summaryInterval = setInterval(fetchQueueSummary, 2500);
-        const workerInterval = setInterval(checkWorkerStatus, 5000);
+        mountedRef.current = true;
+        fetchJobs(true);
+        fetchHistoryJobs(true);
+        fetchQueueSummary(true);
+        checkWorkerStatus(true);
+        const jobInterval = setInterval(() => fetchJobs(), JOBS_POLL_MS);
+        const historyInterval = setInterval(() => fetchHistoryJobs(), HISTORY_POLL_MS);
+        const summaryInterval = setInterval(() => fetchQueueSummary(), SUMMARY_POLL_MS);
+        const workerInterval = setInterval(() => checkWorkerStatus(), WORKER_POLL_MS);
         return () => {
+            mountedRef.current = false;
             clearInterval(jobInterval);
+            clearInterval(historyInterval);
             clearInterval(summaryInterval);
             clearInterval(workerInterval);
+            jobsAbortRef.current?.abort();
+            historyAbortRef.current?.abort();
+            summaryAbortRef.current?.abort();
+            workerAbortRef.current?.abort();
         };
     }, []);
 
     const handlePause = async (jobId: number) => {
-        try { await api.post(`/jobs/${jobId}/pause`); fetchJobs(); } catch (e) { console.error(e); }
+        try { await api.post(`/jobs/${jobId}/pause`); fetchJobs(true); fetchHistoryJobs(true); fetchQueueSummary(true); } catch (e) { console.error(e); }
     };
 
     const handleResume = async (jobId: number) => {
-        try { await api.post(`/jobs/${jobId}/resume`); fetchJobs(); } catch (e) { console.error(e); }
+        try { await api.post(`/jobs/${jobId}/resume`); fetchJobs(true); fetchHistoryJobs(true); fetchQueueSummary(true); } catch (e) { console.error(e); }
     };
 
     const handleMoveToTop = async (jobId: number) => {
-        try { await api.post(`/jobs/${jobId}/move-to-top`); fetchJobs(); } catch (e) { console.error(e); }
+        try { await api.post(`/jobs/${jobId}/move-to-top`); fetchJobs(true); fetchHistoryJobs(true); fetchQueueSummary(true); } catch (e) { console.error(e); }
     };
 
     const handleCancel = async (jobId: number) => {
         if (!confirm('Cancel this job?')) return;
-        try { await api.delete(`/jobs/${jobId}`); fetchJobs(); } catch (e) { console.error(e); }
+        try { await api.delete(`/jobs/${jobId}`); fetchJobs(true); fetchHistoryJobs(true); fetchQueueSummary(true); } catch (e) { console.error(e); }
     };
 
     const handlePauseAll = async () => {
         if (!confirm('Pause all queued jobs? Running jobs will finish.')) return;
-        try { await api.post('/jobs/pause-all'); fetchJobs(); } catch (e) { console.error(e); }
+        try { await api.post('/jobs/pause-all'); fetchJobs(true); fetchHistoryJobs(true); fetchQueueSummary(true); } catch (e) { console.error(e); }
     };
 
     const handleResumeAll = async () => {
-        try { await api.post('/jobs/resume-all'); fetchJobs(); } catch (e) { console.error(e); }
+        try { await api.post('/jobs/resume-all'); fetchJobs(true); fetchHistoryJobs(true); fetchQueueSummary(true); } catch (e) { console.error(e); }
     };
 
     const handleClearQueue = async () => {
@@ -132,7 +243,7 @@ export function JobQueue() {
         try {
             const res = await api.delete<{ deleted?: number }>('/jobs/queue');
             const deleted = Number(res.data?.deleted || 0);
-            await Promise.all([fetchJobs(), fetchQueueSummary()]);
+            await Promise.all([fetchJobs(true), fetchHistoryJobs(true), fetchQueueSummary(true)]);
             alert(`Cleared ${deleted} queued/paused job${deleted === 1 ? '' : 's'}. Running jobs are not canceled.`);
         } catch (e) {
             console.error(e);
@@ -145,11 +256,18 @@ export function JobQueue() {
 
     const handleClearHistory = async () => {
         if (!confirm('Clear completed and failed jobs history?')) return;
-        try { await api.delete('/jobs/history'); fetchJobs(); } catch (e) { console.error(e); }
+        try {
+            await api.delete('/jobs/history');
+            setHistoryRows([]);
+            setFunnyHistoryRows([]);
+            fetchJobs(true);
+            fetchHistoryJobs(true);
+            fetchQueueSummary(true);
+        } catch (e) { console.error(e); }
     };
 
     const handleResubmit = async (jobId: number) => {
-        try { await api.post(`/jobs/${jobId}/resubmit`); fetchJobs(); } catch (e) { console.error(e); }
+        try { await api.post(`/jobs/${jobId}/resubmit`); fetchJobs(true); fetchHistoryJobs(true); fetchQueueSummary(true); } catch (e) { console.error(e); }
     };
 
     const getThumbnailUrl = (job: Job) => {
@@ -190,6 +308,11 @@ export function JobQueue() {
         const s = rounded % 60;
         if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
         return `${m}:${String(s).padStart(2, '0')}`;
+    };
+    const parseTimeMs = (value?: string | null): number | null => {
+        if (!value) return null;
+        const ms = Date.parse(value);
+        return Number.isFinite(ms) ? ms : null;
     };
 
     const getStatusPillClasses = (status: string): string => {
@@ -262,7 +385,81 @@ const getStatusLabel = (status: string): string => {
     const additionalActiveCount = queueOrder.reduce((sum, q) => sum + activeByQueueExcludingCurrent[q].length, 0);
     const queuedJobs = jobs.filter(j => j.status === 'queued').sort(byAscCreated);
     const pausedJobs = jobs.filter(j => j.status === 'paused').sort(byAscCreated);
-    const historyJobs = jobs.filter(j => ['completed', 'failed'].includes(j.status)).sort(byDescCreated);
+    const historyJobs = historyRows;
+    const completedFunnyJobsByVideo = new Map<number, Job[]>();
+    for (const item of funnyHistoryRows) {
+        const jt = (item.job_type || '').toLowerCase();
+        if (item.status !== 'completed') continue;
+        if (jt !== 'funny_detect' && jt !== 'funny_explain') continue;
+        const arr = completedFunnyJobsByVideo.get(item.video_id) || [];
+        arr.push(item);
+        completedFunnyJobsByVideo.set(item.video_id, arr);
+    }
+    for (const arr of completedFunnyJobsByVideo.values()) {
+        arr.sort((a, b) => {
+            const aMs = parseTimeMs(a.started_at) ?? parseTimeMs(a.created_at) ?? 0;
+            const bMs = parseTimeMs(b.started_at) ?? parseTimeMs(b.created_at) ?? 0;
+            return aMs - bMs;
+        });
+    }
+
+    const getProcessStageSummary = (job: Job): ProcessStageSummary | null => {
+        if ((job.job_type || '').toLowerCase() !== 'process') return null;
+        const payload = getJobPayload(job);
+        const processStartMs = parseTimeMs(job.started_at) ?? parseTimeMs(job.created_at);
+        const processEndMs = parseTimeMs(job.completed_at);
+        const transcribeStartMs =
+            parseTimeMs(String(payload.stage_transcribe_started_at || ''))
+            ?? parseTimeMs(String(payload.stage_transcribing_started_at || ''));
+        const diarizeStartMs =
+            parseTimeMs(String(payload.stage_diarize_started_at || ''))
+            ?? parseTimeMs(String(payload.stage_diarizing_started_at || ''));
+
+        const processDuration = getJobDurationSeconds(job);
+        const transcribeDuration =
+            (transcribeStartMs != null && diarizeStartMs != null && diarizeStartMs >= transcribeStartMs)
+                ? (diarizeStartMs - transcribeStartMs) / 1000
+                : null;
+        const diarizeDuration =
+            (diarizeStartMs != null && processEndMs != null && processEndMs >= diarizeStartMs)
+                ? (processEndMs - diarizeStartMs) / 1000
+                : null;
+
+        let funnyDuration: number | null = null;
+        let totalDuration: number | null = processDuration;
+        let funnyDone = false;
+        const funnyJobs = completedFunnyJobsByVideo.get(job.video_id) || [];
+        let linkedFunny: Job | null = null;
+        if (processStartMs != null) {
+            linkedFunny = funnyJobs.find((f) => {
+                const fStart = parseTimeMs(f.started_at) ?? parseTimeMs(f.created_at);
+                return fStart != null && fStart >= (processStartMs - 1000);
+            }) || null;
+        } else {
+            linkedFunny = funnyJobs[0] || null;
+        }
+        if (linkedFunny) {
+            funnyDone = true;
+            funnyDuration = getJobDurationSeconds(linkedFunny);
+            const funnyCompletedMs = parseTimeMs(linkedFunny.completed_at);
+            if (processStartMs != null && funnyCompletedMs != null && funnyCompletedMs >= processStartMs) {
+                totalDuration = (funnyCompletedMs - processStartMs) / 1000;
+            } else if (processDuration != null && funnyDuration != null) {
+                totalDuration = processDuration + funnyDuration;
+            }
+        }
+
+        return {
+            transcribeDone: job.status === 'completed' || transcribeStartMs != null,
+            diarizeDone: job.status === 'completed' || diarizeStartMs != null,
+            funnyDone,
+            transcribeDuration,
+            diarizeDuration,
+            funnyDuration,
+            processDuration,
+            totalDuration,
+        };
+    };
     const pendingByQueue: Record<QueueName, { queued: Job[]; paused: Job[]; running: Job[] }> = {
         pipeline: { queued: [], paused: [], running: [] },
         funny: { queued: [], paused: [], running: [] },
@@ -292,6 +489,38 @@ const getStatusLabel = (status: string): string => {
         const videoPipelineComplete = job.video?.processed || job.video?.status === 'completed';
         const showFinalizingBadge = job.status === 'diarizing' && (funnyScanActive || videoPipelineComplete);
         const statusBadgeLabel = showFinalizingBadge ? 'finalizing' : job.status;
+        const [stageNowMs, setStageNowMs] = useState(() => Date.now());
+        const jobPayload = getJobPayload(job);
+
+        useEffect(() => {
+            const timerId = window.setInterval(() => setStageNowMs(Date.now()), 1000);
+            return () => window.clearInterval(timerId);
+        }, []);
+
+        const parseIsoTimestamp = (value: unknown): number | null => {
+            if (typeof value !== 'string' || !value.trim()) return null;
+            const ms = Date.parse(value);
+            return Number.isFinite(ms) ? ms : null;
+        };
+
+        const stageStartedAt: Record<'download' | 'transcribe' | 'diarize' | 'funny', number | null> = {
+            download: parseIsoTimestamp(jobPayload.stage_download_started_at ?? jobPayload.stage_downloading_started_at) ?? parseIsoTimestamp(job.started_at),
+            transcribe: parseIsoTimestamp(jobPayload.stage_transcribe_started_at ?? jobPayload.stage_transcribing_started_at),
+            diarize: parseIsoTimestamp(jobPayload.stage_diarize_started_at ?? jobPayload.stage_diarizing_started_at),
+            funny: parseIsoTimestamp(jobPayload.stage_funny_started_at),
+        };
+        const jobCompletedAt = parseIsoTimestamp(job.completed_at);
+
+        const formatStageTimer = (seconds: number | null): string | null => {
+            if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return null;
+            const total = Math.max(0, Math.floor(seconds));
+            const hours = Math.floor(total / 3600);
+            const minutes = Math.floor((total % 3600) / 60);
+            const secs = total % 60;
+            if (hours > 0) return `${hours}h ${minutes}m ${secs}s`;
+            if (minutes > 0) return `${minutes}m ${secs}s`;
+            return `${secs}s`;
+        };
 
         const getStageState = (stage: 'download' | 'transcribe' | 'diarize' | 'funny') => {
             const status = job.status;
@@ -325,10 +554,50 @@ const getStatusLabel = (status: string): string => {
             return 'pending';
         };
 
+        const getStageElapsedSeconds = (stage: 'download' | 'transcribe' | 'diarize' | 'funny', state: 'completed' | 'active' | 'pending' | 'failed'): number | null => {
+            if (state === 'pending' || state === 'failed') return null;
+            if (stage === 'transcribe' && state === 'active' && stageStartedAt.transcribe == null) {
+                return null;
+            }
+
+            const fallbackStart = parseIsoTimestamp(job.started_at);
+            const startMs =
+                stageStartedAt[stage]
+                ?? (stage === 'download'
+                    ? fallbackStart
+                    : stage === 'transcribe'
+                        ? stageStartedAt.transcribe ?? stageStartedAt.download ?? fallbackStart
+                        : stage === 'diarize'
+                            ? stageStartedAt.transcribe ?? stageStartedAt.download ?? fallbackStart
+                            : stageStartedAt.diarize ?? stageStartedAt.transcribe ?? stageStartedAt.download ?? fallbackStart);
+            if (!startMs) return null;
+
+            let endMs: number | null = null;
+            if (state === 'active') {
+                endMs = stageNowMs;
+            } else {
+                if (stage === 'download') {
+                    endMs = stageStartedAt.transcribe ?? stageStartedAt.diarize ?? jobCompletedAt ?? stageNowMs;
+                } else if (stage === 'transcribe') {
+                    endMs = stageStartedAt.diarize ?? jobCompletedAt ?? stageNowMs;
+                } else if (stage === 'diarize') {
+                    endMs = jobCompletedAt ?? stageNowMs;
+                } else {
+                    endMs = jobCompletedAt ?? stageNowMs;
+                }
+            }
+
+            if (!endMs || endMs < startMs) return null;
+            return (endMs - startMs) / 1000;
+        };
+
         const renderProgressBar = (label: string, stage: 'download' | 'transcribe' | 'diarize' | 'funny', Icon: React.ElementType) => {
             const state = getStageState(stage);
-            const percent = state === 'completed' ? 100 : state === 'active' ? job.progress : 0;
-            const isIndeterminate = state === 'active' && ((stage === 'diarize' || stage === 'funny') || percent <= 0);
+            const waitingForTranscriptionStart = stage === 'transcribe' && state === 'active' && stageStartedAt.transcribe == null;
+            const percent = state === 'completed' ? 100 : state === 'active' ? (waitingForTranscriptionStart ? 0 : job.progress) : 0;
+            const isIndeterminate = state === 'active' && !waitingForTranscriptionStart && ((stage === 'diarize' || stage === 'funny') || percent <= 0);
+            const elapsed = getStageElapsedSeconds(stage, state);
+            const elapsedText = formatStageTimer(elapsed);
 
             return (
                 <div className="space-y-1.5">
@@ -337,8 +606,19 @@ const getStatusLabel = (status: string): string => {
                             <Icon size={12} className={state === 'active' ? 'text-blue-500' : ''} />
                             <span>{label}</span>
                         </div>
-                        {state === 'completed' && <CheckCircle2 size={14} className="text-green-500" />}
-                        {state === 'active' && <span className="text-blue-600 animate-pulse">Processing...</span>}
+                        <div className="flex items-center gap-2">
+                            {elapsedText && (
+                                <span className={`tabular-nums normal-case tracking-normal ${state === 'active' ? 'text-blue-600' : 'text-slate-400'}`}>
+                                    {state === 'active' ? elapsedText : `took ${elapsedText}`}
+                                </span>
+                            )}
+                            {state === 'completed' && <CheckCircle2 size={14} className="text-green-500" />}
+                            {state === 'active' && (
+                                <span className="text-blue-600 animate-pulse">
+                                    {waitingForTranscriptionStart ? 'Waiting for model...' : 'Processing...'}
+                                </span>
+                            )}
+                        </div>
                     </div>
                     <div className="h-2 bg-slate-100 rounded-full overflow-hidden relative">
                         {state === 'active' && isIndeterminate ? (
@@ -383,6 +663,9 @@ const getStatusLabel = (status: string): string => {
                             </h4>
                             <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm text-slate-500">
                                 <span className="flex items-center gap-1"><VideoIcon size={14} /> ID: {job.video_id}</span>
+                                {(job.video?.duration ?? 0) > 0 && (
+                                    <span className="flex items-center gap-1"><Clock size={14} /> Length {formatDuration(job.video?.duration ?? 0)}</span>
+                                )}
                                 <span className="font-mono text-xs bg-slate-50 px-2 py-0.5 rounded border border-slate-200">{job.job_type}</span>
                                 {transcriptionEngineUsed && <EngineBadge engine={transcriptionEngineUsed} />}
                                 {job.started_at && (
@@ -482,6 +765,11 @@ const getStatusLabel = (status: string): string => {
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[11px]">
                         <span className="text-slate-500 bg-slate-50 px-2 py-0.5 rounded border border-slate-200">{jobTypeLabel}</span>
+                        {(job.video?.duration ?? 0) > 0 && (
+                            <span className="text-slate-500 bg-slate-50 px-2 py-0.5 rounded border border-slate-200 flex items-center gap-1">
+                                <Clock size={11} /> {formatDuration(job.video?.duration ?? 0)}
+                            </span>
+                        )}
                         {transcriptionEngineUsed && <EngineBadge engine={transcriptionEngineUsed} />}
                         {isPrefetched && (
                             <span className="text-green-700 bg-green-50 px-2 py-0.5 rounded border border-green-200">
@@ -730,6 +1018,13 @@ const getStatusLabel = (status: string): string => {
                                             const qPaused = pendingByQueue[q].paused;
                                             const total = qRunning.length + qQueued.length + qPaused.length;
                                             if (total === 0) return null;
+                                            const runningToRender = qRunning.slice(0, MAX_RENDERED_PENDING_PER_QUEUE);
+                                            const remainingAfterRunning = Math.max(0, MAX_RENDERED_PENDING_PER_QUEUE - runningToRender.length);
+                                            const queuedToRender = qQueued.slice(0, remainingAfterRunning);
+                                            const remainingAfterQueued = Math.max(0, remainingAfterRunning - queuedToRender.length);
+                                            const pausedToRender = qPaused.slice(0, remainingAfterQueued);
+                                            const renderedCount = runningToRender.length + queuedToRender.length + pausedToRender.length;
+                                            const hiddenCount = Math.max(0, total - renderedCount);
                                             const Icon = queueIcon[q];
                                             return (
                                                 <div key={q} className="space-y-1.5">
@@ -740,15 +1035,20 @@ const getStatusLabel = (status: string): string => {
                                                         </div>
                                                         <span className="text-[11px] text-slate-400">{total} job{total === 1 ? '' : 's'}</span>
                                                     </div>
-                                                    {qRunning.map(job => (
+                                                    {runningToRender.map(job => (
                                                         <PendingQueueItem key={job.id} job={job} mode="running" />
                                                     ))}
-                                                    {qQueued.map((job, index) => (
+                                                    {queuedToRender.map((job, index) => (
                                                         <PendingQueueItem key={job.id} job={job} index={index} mode="queued" />
                                                     ))}
-                                                    {qPaused.map(job => (
+                                                    {pausedToRender.map(job => (
                                                         <PendingQueueItem key={job.id} job={job} mode="paused" />
                                                     ))}
+                                                    {hiddenCount > 0 && (
+                                                        <div className="px-2 py-1.5 text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-lg">
+                                                            Showing {renderedCount} of {total} jobs in this queue to keep navigation responsive.
+                                                        </div>
+                                                    )}
                                                 </div>
                                             );
                                         })}
@@ -758,7 +1058,9 @@ const getStatusLabel = (status: string): string => {
                         ) : (
                             <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
                                 {historyJobs.length === 0 ? (
-                                    <div className="p-8 text-center text-slate-400 text-sm">No history available</div>
+                                    <div className="p-8 text-center text-slate-400 text-sm">
+                                        No pipeline history yet. (Only full `process` runs are shown here.)
+                                    </div>
                                 ) : (
                                     <div className="max-h-[44vh] overflow-auto">
                                         <table className="w-full text-sm">
@@ -774,6 +1076,7 @@ const getStatusLabel = (status: string): string => {
                                             <tbody className="divide-y divide-slate-100">
                                                 {historyJobs.map(job => {
                                                     const transcriptionEngineUsed = getTranscriptionEngineUsed(job);
+                                                    const processStageSummary = getProcessStageSummary(job);
                                                     return (
                                                     <tr key={job.id} className="hover:bg-slate-50 transition-colors">
                                                         <td className="p-3">
@@ -797,6 +1100,19 @@ const getStatusLabel = (status: string): string => {
                                                                     {getStatusLabel(job.status)}
                                                                 </span>
                                                             </div>
+                                                            {processStageSummary && job.status === 'completed' && (
+                                                                <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+                                                                    <span className={`px-2 py-0.5 rounded border ${processStageSummary.transcribeDone ? 'bg-green-50 text-green-700 border-green-200' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
+                                                                        Transcribe {processStageSummary.transcribeDuration != null ? formatDuration(processStageSummary.transcribeDuration) : ''}
+                                                                    </span>
+                                                                    <span className={`px-2 py-0.5 rounded border ${processStageSummary.diarizeDone ? 'bg-green-50 text-green-700 border-green-200' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
+                                                                        Diarize {processStageSummary.diarizeDuration != null ? formatDuration(processStageSummary.diarizeDuration) : ''}
+                                                                    </span>
+                                                                    <span className={`px-2 py-0.5 rounded border ${processStageSummary.funnyDone ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                                                                        Funny {processStageSummary.funnyDone ? (processStageSummary.funnyDuration != null ? formatDuration(processStageSummary.funnyDuration) : 'done') : 'pending'}
+                                                                    </span>
+                                                                </div>
+                                                            )}
                                                             {job.status === 'failed' && job.error && (
                                                                 <div className="mt-2 text-xs text-red-600 bg-red-50 p-2 rounded border border-red-100 break-words max-w-xs">
                                                                     {job.error}
@@ -804,18 +1120,36 @@ const getStatusLabel = (status: string): string => {
                                                             )}
                                                         </td>
                                                         <td className="p-3 text-right tabular-nums align-top">
-                                                            <div className="text-slate-700 font-medium">
-                                                                {formatDuration(getJobDurationSeconds(job))}
-                                                            </div>
                                                             {(() => {
                                                                 const runtime = getJobDurationSeconds(job);
                                                                 const elapsed = getJobElapsedSeconds(job);
-                                                                if (runtime == null || elapsed == null) return null;
-                                                                if (elapsed - runtime < 2) return null;
+                                                                const stageTotal = processStageSummary?.totalDuration ?? runtime;
+                                                                const isProcess = (job.job_type || '').toLowerCase() === 'process';
                                                                 return (
-                                                                    <div className="text-[11px] text-slate-400 mt-0.5">
-                                                                        total {formatDuration(elapsed)}
-                                                                    </div>
+                                                                    <>
+                                                                        <div className="text-slate-700 font-medium">
+                                                                            {isProcess ? `all ${formatDuration(stageTotal)}` : formatDuration(runtime)}
+                                                                        </div>
+                                                                        {isProcess && processStageSummary?.processDuration != null && stageTotal != null && Math.abs(stageTotal - processStageSummary.processDuration) >= 1 && (
+                                                                            <div className="text-[11px] text-slate-400 mt-0.5">
+                                                                                pipeline {formatDuration(processStageSummary.processDuration)}
+                                                                            </div>
+                                                                        )}
+                                                                        {isProcess && processStageSummary?.funnyDone && processStageSummary.funnyDuration != null && (
+                                                                            <div className="text-[11px] text-slate-400 mt-0.5">
+                                                                                funny {formatDuration(processStageSummary.funnyDuration)}
+                                                                            </div>
+                                                                        )}
+                                                                        {!isProcess && (() => {
+                                                                            if (runtime == null || elapsed == null) return null;
+                                                                            if (elapsed - runtime < 2) return null;
+                                                                            return (
+                                                                                <div className="text-[11px] text-slate-400 mt-0.5">
+                                                                                    total {formatDuration(elapsed)}
+                                                                                </div>
+                                                                            );
+                                                                        })()}
+                                                                    </>
                                                                 );
                                                             })()}
                                                             {job.started_at && (

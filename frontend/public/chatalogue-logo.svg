@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+
+  <!-- Back folder (upper only) -->
+  <path fill="#E23B35" d="
+      M92 40
+      H236
+      c18 0 26 10 26 26
+      v14
+      h158
+      c28 0 44 16 44 44
+      v130
+      H48
+      V84
+      c0-28 16-44 44-44
+      z
+    "></path>
+
+  <!-- Folder shadow strip -->
+  <rect x="48" y="146" width="416" height="42" fill="#D73731" opacity="0.55"></rect>
+
+  <!-- White paper -->
+  <rect x="88" y="122" width="336" height="180" rx="18" fill="#FFFFFF"></rect>
+
+  <!-- Front speech bubble -->
+  <path fill="#FF544D" d="
+      M92 160
+      H420
+      c28 0 44 16 44 44
+      v164
+      c0 28-16 44-44 44
+      H356
+      v34
+      c0 10-10 14-18 7
+      l-56-41
+      H92
+      c-28 0-44-16-44-44
+      V204
+      c0-28 16-44 44-44
+      z
+    "></path>
+
+  <!-- Play icon -->
+  <path fill="#FFFFFF" d="
+      M228 238
+      c0-10 10-16 19-11
+      l86 49
+      c9 5 9 18 0 23
+      l-86 49
+      c-9 5-19-1-19-11
+      z
+    "></path>
+
+</svg>

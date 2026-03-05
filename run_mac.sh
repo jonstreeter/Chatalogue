@@ -8,10 +8,9 @@ VENV_PYTHON="$BACKEND_DIR/.venv/bin/python"
 BACKEND_PORT="${BACKEND_PORT:-8011}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
-if [ ! -x "$VENV_PYTHON" ]; then
-  echo "[ERROR] Backend venv not found at: $VENV_PYTHON"
-  echo "Run ./install_mac.sh first."
-  exit 1
+if [ ! -x "$VENV_PYTHON" ] || [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+  echo "Dependencies missing. Running install_mac.sh..."
+  "$ROOT_DIR/install_mac.sh"
 fi
 
 if ! command -v node >/dev/null 2>&1; then
@@ -19,9 +18,13 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+if [ ! -x "$VENV_PYTHON" ]; then
+  echo "[ERROR] Backend venv still missing after install."
+  exit 1
+fi
+
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-  echo "[ERROR] Frontend dependencies not found."
-  echo "Run ./install_mac.sh first."
+  echo "[ERROR] Frontend dependencies still missing after install."
   exit 1
 fi
 
@@ -47,6 +50,7 @@ stop_port "$FRONTEND_PORT"
 
 BACKEND_LOG="$BACKEND_DIR/uvicorn.out.log"
 FRONTEND_LOG="$FRONTEND_DIR/vite.out.log"
+BACKEND_READY_URL="http://127.0.0.1:${BACKEND_PORT}/system/worker-status"
 
 echo "Starting backend on http://localhost:$BACKEND_PORT ..."
 (
@@ -54,6 +58,22 @@ echo "Starting backend on http://localhost:$BACKEND_PORT ..."
   exec "$VENV_PYTHON" -m uvicorn src.main:app --app-dir . --host 0.0.0.0 --port "$BACKEND_PORT"
 ) >>"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
+
+echo "Waiting for backend to become ready..."
+backend_ready=0
+for _ in $(seq 1 120); do
+  if curl -fsS --max-time 2 "$BACKEND_READY_URL" >/dev/null 2>&1; then
+    backend_ready=1
+    break
+  fi
+  sleep 1
+done
+
+if [ "$backend_ready" -ne 1 ]; then
+  echo "[ERROR] Backend did not become ready in time."
+  echo "Check backend log: $BACKEND_LOG"
+  exit 1
+fi
 
 echo "Starting frontend on http://localhost:$FRONTEND_PORT ..."
 (

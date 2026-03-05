@@ -5,6 +5,7 @@ import json
 import subprocess
 import threading
 import pickle
+import gc
 from pathlib import Path
 from sqlmodel import Session, select, func
 from datetime import datetime
@@ -74,6 +75,8 @@ class IngestionService:
         self._diarization_load_error = None  # Track actual error for debugging
         self._force_float32 = False  # Set True if GPU doesn't support FP16 cuBLAS ops
         self._whisper_compute_type = None
+        self._gpu_total_vram_bytes = 0
+        self._cuda_memory_fraction_applied = None
         # Coordinate background audio prefetch and normal processing so a video is
         # never downloaded twice concurrently.
         self._download_locks_guard = threading.Lock()
@@ -481,6 +484,23 @@ class IngestionService:
             except Exception as e:
                 log(f"Failed to update job payload_json: {e}")
                 return
+
+    def _record_job_stage_start(self, job_id: int, stage: str):
+        """Record per-stage start timestamps for pipeline timing UI."""
+        if not job_id:
+            return
+        stage_key = (stage or "").strip().lower()
+        if stage_key not in {"download", "transcribe", "diarize", "funny"}:
+            return
+        now_iso = datetime.now().isoformat()
+        fields = {
+            f"stage_{stage_key}_started_at": now_iso,
+            "stage_last": stage_key,
+            "stage_last_started_at": now_iso,
+        }
+        if stage_key == "download":
+            fields["pipeline_started_at"] = now_iso
+        self._upsert_job_payload_fields(job_id, fields)
 
     def _set_funny_task_progress(
         self,
@@ -913,6 +933,182 @@ class IngestionService:
             log(f"Using device: {self.device}")
             if self.device == "cuda":
                 log_verbose(f"  GPU: {torch.cuda.get_device_name(0)}")
+                try:
+                    props = torch.cuda.get_device_properties(0)
+                    self._gpu_total_vram_bytes = int(getattr(props, "total_memory", 0) or 0)
+                    if self._gpu_total_vram_bytes > 0:
+                        log_verbose(f"  VRAM total: {self._gpu_total_vram_bytes / (1024 ** 3):.1f} GB")
+                except Exception:
+                    self._gpu_total_vram_bytes = 0
+
+    def _cuda_memory_snapshot(self) -> dict:
+        """Best-effort snapshot of CUDA memory (bytes)."""
+        snap = {"free": 0, "total": 0, "allocated": 0, "reserved": 0}
+        if self.device != "cuda":
+            return snap
+        try:
+            import torch
+            try:
+                free_b, total_b = torch.cuda.mem_get_info()
+                snap["free"] = int(free_b or 0)
+                snap["total"] = int(total_b or 0)
+            except Exception:
+                snap["free"] = 0
+                snap["total"] = int(self._gpu_total_vram_bytes or 0)
+            snap["allocated"] = int(torch.cuda.memory_allocated(0) or 0)
+            snap["reserved"] = int(torch.cuda.memory_reserved(0) or 0)
+        except Exception:
+            pass
+        return snap
+
+    def _format_gb(self, value_bytes: int) -> str:
+        try:
+            return f"{float(value_bytes) / (1024 ** 3):.1f}GB"
+        except Exception:
+            return "unknown"
+
+    def _is_cuda_oom(self, error: Exception) -> bool:
+        msg = str(error or "").lower()
+        return (
+            ("cuda" in msg and "out of memory" in msg)
+            or ("cudnn_status_alloc_failed" in msg)
+            or ("cuda error: out of memory" in msg)
+        )
+
+    def _clear_cuda_cache(self):
+        if self.device != "cuda":
+            return
+        try:
+            import torch
+            try:
+                # Avoid freeing/recycling CUDA allocations while kernels are still
+                # in flight (can trigger hard native aborts on Windows).
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            gc.collect()
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.ipc_collect()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _apply_cuda_memory_fraction_limit(self):
+        """Cap process CUDA memory to avoid spilling into shared memory on WDDM."""
+        if self.device != "cuda":
+            return
+        raw = (os.getenv("PARAKEET_MAX_GPU_MEMORY_FRACTION", "0.85") or "0.85").strip()
+        try:
+            fraction = float(raw)
+        except Exception:
+            fraction = 0.85
+        fraction = max(0.50, min(fraction, 0.98))
+        if self._cuda_memory_fraction_applied is not None and abs(self._cuda_memory_fraction_applied - fraction) < 1e-6:
+            return
+        try:
+            import torch
+            torch.cuda.set_per_process_memory_fraction(fraction, device=0)
+            self._cuda_memory_fraction_applied = fraction
+            log_verbose(f"Applied CUDA per-process memory fraction limit: {fraction:.2f}")
+        except Exception as e:
+            log_verbose(f"Could not apply CUDA memory fraction limit: {e}")
+
+    def _release_parakeet_model(self, reason: str = ""):
+        if self.parakeet_model is None:
+            return
+        self.parakeet_model = None
+        self._clear_cuda_cache()
+        if reason:
+            log(f"Released Parakeet model from GPU memory ({reason}).")
+        else:
+            log("Released Parakeet model from GPU memory.")
+
+    def _release_diarization_models(self, reason: str = ""):
+        """Release pyannote models/inference objects to recover GPU memory."""
+        had_models = any([
+            self.diarization_pipeline is not None,
+            self.embedding_model is not None,
+            self.embedding_inference is not None,
+        ])
+        self.diarization_pipeline = None
+        self.embedding_model = None
+        self.embedding_inference = None
+        if had_models:
+            self._clear_cuda_cache()
+            if reason:
+                log(f"Released diarization/embedding models from GPU memory ({reason}).")
+            else:
+                log("Released diarization/embedding models from GPU memory.")
+
+    def _resolve_parakeet_batch_size(self, requested_batch_size: int) -> int:
+        requested = max(1, min(int(requested_batch_size or 1), 64))
+        if self.device != "cuda":
+            return requested
+        hard_cap = max(1, min(int(os.getenv("PARAKEET_BATCH_HARD_MAX", "4")), 64))
+        auto_enabled = os.getenv("PARAKEET_BATCH_AUTO", "true").strip().lower() == "true"
+        if not auto_enabled:
+            return min(requested, hard_cap)
+
+        total = int(self._gpu_total_vram_bytes or 0)
+        if total <= 0:
+            snap = self._cuda_memory_snapshot()
+            total = int(snap.get("total") or 0)
+        total_gb = (total / (1024 ** 3)) if total > 0 else 0.0
+
+        if total_gb <= 0:
+            return requested
+        if total_gb <= 6:
+            cap = 1
+        elif total_gb <= 8:
+            cap = 2
+        elif total_gb <= 10:
+            cap = 3
+        elif total_gb <= 12:
+            cap = 4
+        elif total_gb <= 16:
+            cap = 6
+        elif total_gb <= 24:
+            cap = 8
+        elif total_gb <= 32:
+            cap = 12
+        else:
+            cap = 16
+
+        snap = self._cuda_memory_snapshot()
+        free_b = int(snap.get("free") or 0)
+        if total > 0 and free_b > 0:
+            free_ratio = float(free_b) / float(total)
+            if free_ratio < 0.20:
+                cap = min(cap, 2)
+            elif free_ratio < 0.30:
+                cap = min(cap, 4)
+            elif free_ratio < 0.40:
+                cap = min(cap, 6)
+
+        return max(1, min(requested, cap, hard_cap))
+
+    def _should_unload_parakeet_after_transcribe(self) -> bool:
+        mode = (os.getenv("PARAKEET_UNLOAD_AFTER_TRANSCRIBE") or "auto").strip().lower()
+        if mode in {"1", "true", "yes", "on"}:
+            return True
+        if mode in {"0", "false", "no", "off"}:
+            return False
+        # auto: default to unloading on <=16GB VRAM cards to reduce spillover
+        # into shared memory during later stages (especially diarization).
+        # On Windows, keep this enabled by default because long CUDA sessions
+        # with mixed NeMo + pyannote workloads are more crash-prone.
+        if sys.platform == "win32":
+            return True
+        if self.device != "cuda":
+            return False
+        total = int(self._gpu_total_vram_bytes or 0)
+        if total <= 0:
+            total = int(self._cuda_memory_snapshot().get("total") or 0)
+        if total <= 0:
+            return True
+        return (total / (1024 ** 3)) <= 16.0
 
     def _ensure_ctranslate2_pkg_resources(self):
         """Install a pkg_resources shim when setuptools is absent or broken.
@@ -1102,6 +1298,7 @@ class IngestionService:
         parakeet_model = (os.getenv("PARAKEET_MODEL") or "nvidia/parakeet-tdt-0.6b-v2").strip()
         self._update_job_status_detail(job_id, f"Loading Parakeet model ({parakeet_model})...")
         log(f"Loading Parakeet model ({parakeet_model})...")
+        self._apply_cuda_memory_fraction_limit()
         self.parakeet_model = ASRModel.from_pretrained(model_name=parakeet_model)
 
         if self.device == "cuda":
@@ -1210,7 +1407,43 @@ class IngestionService:
         self._load_parakeet_model(job_id)
         parakeet_input, cleanup_input = self._convert_audio_for_parakeet(audio_path)
         try:
-            parakeet_batch_size = max(1, min(int(os.getenv("PARAKEET_BATCH_SIZE", "16")), 64))
+            parakeet_batch_size_requested = max(1, min(int(os.getenv("PARAKEET_BATCH_SIZE", "16")), 64))
+            parakeet_batch_size = self._resolve_parakeet_batch_size(parakeet_batch_size_requested)
+            mem_snap = self._cuda_memory_snapshot()
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "parakeet_batch_size_requested": int(parakeet_batch_size_requested),
+                    "parakeet_batch_size_effective": int(parakeet_batch_size),
+                    "parakeet_batch_auto": os.getenv("PARAKEET_BATCH_AUTO", "true").strip().lower() == "true",
+                },
+            )
+            if self.device == "cuda":
+                mem_line = (
+                    f"CUDA mem free {self._format_gb(int(mem_snap.get('free') or 0))} / "
+                    f"total {self._format_gb(int(mem_snap.get('total') or 0))} "
+                    f"(alloc {self._format_gb(int(mem_snap.get('allocated') or 0))}, "
+                    f"resv {self._format_gb(int(mem_snap.get('reserved') or 0))})"
+                )
+                log_verbose(mem_line)
+                self._upsert_job_payload_fields(
+                    job_id,
+                    {
+                        "parakeet_cuda_free_gb_start": round(float(mem_snap.get("free") or 0) / (1024 ** 3), 2),
+                        "parakeet_cuda_total_gb": round(float(mem_snap.get("total") or 0) / (1024 ** 3), 2),
+                    },
+                )
+                if job_id:
+                    if parakeet_batch_size != parakeet_batch_size_requested:
+                        self._update_job_status_detail(
+                            job_id,
+                            f"Transcribing with Parakeet (batch {parakeet_batch_size}, auto from {parakeet_batch_size_requested})..."
+                        )
+                    else:
+                        self._update_job_status_detail(
+                            job_id,
+                            f"Transcribing with Parakeet (batch {parakeet_batch_size})..."
+                        )
             call_variants = [
                 {"timestamps": True, "return_hypotheses": True},
                 {"timestamps": True},
@@ -1219,22 +1452,59 @@ class IngestionService:
             ]
             last_error = None
             result = None
-            for kwargs in call_variants:
-                try:
-                    result = self.parakeet_model.transcribe(
-                        [str(parakeet_input)],
-                        batch_size=parakeet_batch_size,
-                        **kwargs,
-                    )
-                    break
-                except TypeError as e:
-                    last_error = e
-                    continue
-                except Exception as e:
-                    last_error = e
-                    if "unexpected keyword" in str(e).lower():
+            transcribe_started = False
+            current_batch = parakeet_batch_size
+            while result is None:
+                oom_hit = False
+                for kwargs in call_variants:
+                    try:
+                        if not transcribe_started:
+                            # Start transcribe timer only when model loading/prep is done and
+                            # we're about to execute actual decoder inference.
+                            self._record_job_stage_start(job_id, "transcribe")
+                            transcribe_started = True
+                        import torch
+                        with torch.inference_mode():
+                            result = self.parakeet_model.transcribe(
+                                [str(parakeet_input)],
+                                batch_size=current_batch,
+                                **kwargs,
+                            )
+                        break
+                    except TypeError as e:
+                        last_error = e
                         continue
+                    except Exception as e:
+                        last_error = e
+                        if self._is_cuda_oom(e):
+                            oom_hit = True
+                            break
+                        if "unexpected keyword" in str(e).lower():
+                            continue
+                        break
+
+                if result is not None:
                     break
+                if oom_hit and self.device == "cuda" and current_batch > 1:
+                    next_batch = max(1, current_batch // 2)
+                    log(
+                        f"Parakeet CUDA OOM at batch_size={current_batch}. "
+                        f"Retrying with batch_size={next_batch}."
+                    )
+                    if job_id:
+                        self._update_job_status_detail(
+                            job_id,
+                            f"Parakeet VRAM pressure detected. Retrying with smaller batch ({next_batch})..."
+                        )
+                    self._clear_cuda_cache()
+                    current_batch = next_batch
+                    continue
+                if oom_hit and current_batch <= 1:
+                    raise RuntimeError(
+                        "Parakeet failed due to CUDA OOM even at batch_size=1. "
+                        "Use Whisper or enable lower-VRAM settings."
+                    )
+                break
 
             if result is None:
                 raise RuntimeError(f"Parakeet transcription failed: {last_error}")
@@ -1374,6 +1644,12 @@ class IngestionService:
             "whisper_model": os.getenv("TRANSCRIPTION_MODEL", "medium"),
             "whisper_compute_type": os.getenv("TRANSCRIPTION_COMPUTE_TYPE", "").strip() or None,
             "parakeet_model": (os.getenv("PARAKEET_MODEL") or "nvidia/parakeet-tdt-0.6b-v2").strip(),
+            "parakeet_batch_size_requested": max(1, min(int(os.getenv("PARAKEET_BATCH_SIZE", "16")), 64)),
+            "parakeet_batch_auto": os.getenv("PARAKEET_BATCH_AUTO", "true").strip().lower() == "true",
+            "parakeet_batch_hard_max": max(1, min(int(os.getenv("PARAKEET_BATCH_HARD_MAX", "4")), 64)),
+            "parakeet_max_gpu_memory_fraction": max(0.50, min(float(os.getenv("PARAKEET_MAX_GPU_MEMORY_FRACTION", "0.85")), 0.98)),
+            "parakeet_unload_after_transcribe": os.getenv("PARAKEET_UNLOAD_AFTER_TRANSCRIBE", "auto"),
+            "parakeet_release_other_models_before_transcribe": os.getenv("PARAKEET_RELEASE_OTHER_MODELS_BEFORE_TRANSCRIBE", "false").strip().lower() == "true",
             "fallback_used": False,
             "error": None,
         }
@@ -1384,8 +1660,21 @@ class IngestionService:
             response["whisper_compute_type"] = self._whisper_compute_type or response["whisper_compute_type"]
 
         def _check_parakeet():
+            if self.device == "cuda" and response.get("parakeet_release_other_models_before_transcribe"):
+                self._release_diarization_models("test_before_parakeet")
             self._load_parakeet_model(job_id=None)
             response["resolved_engine"] = "parakeet"
+            response["parakeet_effective_batch_size"] = self._resolve_parakeet_batch_size(
+                int(response.get("parakeet_batch_size_requested") or 16)
+            )
+            if self.device == "cuda":
+                snap = self._cuda_memory_snapshot()
+                response["cuda_memory"] = {
+                    "free_gb": round(float(snap.get("free") or 0) / (1024 ** 3), 2),
+                    "total_gb": round(float(snap.get("total") or 0) / (1024 ** 3), 2),
+                    "allocated_gb": round(float(snap.get("allocated") or 0) / (1024 ** 3), 2),
+                    "reserved_gb": round(float(snap.get("reserved") or 0) / (1024 ** 3), 2),
+                }
 
         try:
             if req == "whisper":
@@ -5159,6 +5448,8 @@ class IngestionService:
             session.expunge(video)
             if video.channel:
                 session.expunge(video.channel)
+
+        self._record_job_stage_start(job_id, "download")
         
         # Download (long running, no DB lock). Serialize per-video download work so
         # the background prefetch worker and the active job cannot race each other.
@@ -5190,7 +5481,7 @@ class IngestionService:
                    j.progress = 0
                    session.add(j)
             session.commit()
-            
+
         log(f"Processing: {video.title}")
         log("Transcribing...")
 
@@ -5379,6 +5670,14 @@ class IngestionService:
         transcribe_engine_used = "whisper"
         self._upsert_job_payload_fields(job_id, {"transcription_engine_requested": selected_engine})
 
+        # Keep Parakeet transcription from oversubscribing VRAM on long-running workers:
+        # release pyannote models before Parakeet transcribe (they will lazy-load again
+        # for diarization phase).
+        if prefer_parakeet and self.device == "cuda":
+            release_before = os.getenv("PARAKEET_RELEASE_OTHER_MODELS_BEFORE_TRANSCRIBE", "false").strip().lower() == "true"
+            if release_before:
+                self._release_diarization_models("before_parakeet_transcribe")
+
         # Read transcription settings
         beam_size = int(os.getenv("TRANSCRIPTION_BEAM_SIZE", "1"))
         vad_filter = os.getenv("TRANSCRIPTION_VAD_FILTER", "true").lower() == "true"
@@ -5424,6 +5723,9 @@ class IngestionService:
                     },
                 )
                 prefer_parakeet = False
+                # Ensure failed Parakeet state does not continue occupying GPU memory
+                # when Whisper fallback begins.
+                self._release_parakeet_model("fallback_to_whisper")
                 # Force fresh run from current checkpoint state.
                 segments = existing_segments
         
@@ -5462,8 +5764,13 @@ class IngestionService:
                         log_verbose(f"Batched transcription failed: {e}")
                 return whisper_model.transcribe(str(transcribe_path_value), **transcribe_params_value)
 
+            def _run_transcribe_with_stage_start(whisper_model, transcribe_path_value, transcribe_params_value, use_batched_value, device):
+                # Start transcribe timer only when decoder inference actually starts.
+                self._record_job_stage_start(job_id, "transcribe")
+                return _run_transcribe(whisper_model, transcribe_path_value, transcribe_params_value, use_batched_value, device)
+
             try:
-                segments_generator, info = _run_transcribe(
+                segments_generator, info = _run_transcribe_with_stage_start(
                     self.whisper_model, transcribe_path, transcribe_params, use_batched, self.device
                 )
             except RuntimeError as e:
@@ -5471,7 +5778,7 @@ class IngestionService:
                     log("cuBLAS error during transcription — reloading model with float32...")
                     self._update_job_status_detail(job_id, "Reloading model (GPU compatibility fallback)...")
                     self._load_whisper_model(job_id=job_id, force_float32=True)
-                    segments_generator, info = _run_transcribe(
+                    segments_generator, info = _run_transcribe_with_stage_start(
                         self.whisper_model, transcribe_path, transcribe_params, use_batched, self.device
                     )
                 else:
@@ -5492,7 +5799,7 @@ class IngestionService:
                     log("cuBLAS error starting transcription generator — reloading with float32...")
                     self._update_job_status_detail(job_id, "Reloading model (GPU compatibility fallback)...")
                     self._load_whisper_model(job_id=job_id, force_float32=True)
-                    segments_generator, info = _run_transcribe(
+                    segments_generator, info = _run_transcribe_with_stage_start(
                         self.whisper_model, transcribe_path, transcribe_params, use_batched, self.device
                     )
                     seg_iter = iter(segments_generator)
@@ -5612,6 +5919,9 @@ class IngestionService:
                 log_verbose(f"Saved raw transcript checkpoint: {raw_path}")
         except Exception as e:
             log(f"Failed to save raw transcript checkpoint: {e}")
+
+        if transcribe_engine_used == "parakeet" and self._should_unload_parakeet_after_transcribe():
+            self._release_parakeet_model("post_transcribe_low_vram")
             
         return segments, total_duration
 
@@ -5631,8 +5941,11 @@ class IngestionService:
                if j:
                    j.status = "diarizing"
                    j.progress = 0
+                   j.status_detail = "Diarizing speakers..."
                    session.add(j)
             session.commit()
+
+        self._record_job_stage_start(job_id, "diarize")
             
         log("Diarizing...")
         # Ensure the speaker-match cache starts fresh for this channel; new embeddings
@@ -6132,6 +6445,8 @@ class IngestionService:
 
         # 1. Get YouTube URL
         log_verbose(f"Extracting frame for {yt_id} at {timestamp}s with crop {crop_coords}")
+        source_w = None
+        source_h = None
         try:
             # Get generic URL
             url = f"https://www.youtube.com/watch?v={yt_id}"
@@ -6146,12 +6461,16 @@ class IngestionService:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 stream_url = info.get('url')
+                source_w = info.get("width")
+                source_h = info.get("height")
                 if not stream_url:
                     # If no direct url, look in formats
                     formats = info.get('formats', [])
                     for f in reversed(formats):
                         if f.get('url') and f.get('vcodec') != 'none':
                             stream_url = f.get('url')
+                            source_w = f.get("width") or source_w
+                            source_h = f.get("height") or source_h
                             break
                 if not stream_url:
                     raise RuntimeError("Could not extract video stream URL")
@@ -6169,6 +6488,46 @@ class IngestionService:
         y = float(crop_coords.get('y', 0) or 0)
         w = float(crop_coords.get('w', 1) or 1)
         h = float(crop_coords.get('h', 1) or 1)
+
+        # Frontend crop overlay is currently rendered in a fixed 16:9 box.
+        # If the actual source stream is not 16:9, map overlay-normalized coords
+        # to source-normalized coords to avoid apparent "over-zoom" / misframing.
+        try:
+            sw = float(source_w) if source_w else 0.0
+            sh = float(source_h) if source_h else 0.0
+            if sw > 0 and sh > 0:
+                overlay_aspect = 16.0 / 9.0
+                source_aspect = sw / sh
+                if source_aspect < overlay_aspect:
+                    # Pillarbox: visible video occupies only the center X range.
+                    visible_w = source_aspect / overlay_aspect
+                    pad_x = (1.0 - visible_w) / 2.0
+                    x = (x - pad_x) / visible_w
+                    w = w / visible_w
+                elif source_aspect > overlay_aspect:
+                    # Letterbox: visible video occupies only the center Y range.
+                    visible_h = overlay_aspect / source_aspect
+                    pad_y = (1.0 - visible_h) / 2.0
+                    y = (y - pad_y) / visible_h
+                    h = h / visible_h
+        except Exception:
+            # If mapping fails, continue with raw coords.
+            pass
+
+        # Add a modest safety margin so thumbnails retain context and do not look
+        # unnaturally zoomed even when the face box is tight.
+        try:
+            pad_ratio = float(os.getenv("SPEAKER_THUMBNAIL_CROP_PADDING", "0.10") or "0.10")
+        except Exception:
+            pad_ratio = 0.10
+        pad_ratio = max(0.0, min(0.5, pad_ratio))
+        if pad_ratio > 0:
+            cx = x + (w / 2.0)
+            cy = y + (h / 2.0)
+            w = w * (1.0 + (2.0 * pad_ratio))
+            h = h * (1.0 + (2.0 * pad_ratio))
+            x = cx - (w / 2.0)
+            y = cy - (h / 2.0)
 
         # Clamp and normalize crop coords defensively. The frontend should already
         # constrain the drag box, but ffmpeg crop will fail if x/y/w/h exceed the
@@ -6262,3 +6621,4 @@ class IngestionService:
             raise RuntimeError(error_msg)
         except Exception as e:
             raise
+

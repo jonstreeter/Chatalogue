@@ -3525,9 +3525,10 @@ def _get_speaker_scope_rows(
     if video_id:
         agg_query = agg_query.where(TranscriptSegment.video_id == video_id)
     if channel_id:
-        agg_query = agg_query.join(Speaker, Speaker.id == TranscriptSegment.speaker_id).where(
-            Speaker.channel_id == channel_id
-        )
+        # Performance critical on large channels: filter transcript rows
+        # via channel video ids so DB can use video_id-oriented indexes.
+        channel_video_ids = select(Video.id).where(Video.channel_id == channel_id)
+        agg_query = agg_query.where(TranscriptSegment.video_id.in_(channel_video_ids))
 
     agg_subq = agg_query.group_by(TranscriptSegment.speaker_id).subquery()
     rows = session.exec(
@@ -4608,6 +4609,7 @@ def _job_queue_name(job_type: str) -> str:
 def read_jobs(
     status: Optional[str] = None,
     channel_id: Optional[int] = None,
+    job_type: Optional[str] = None,
     limit: int = 500,
     session: Session = Depends(get_session)
 ):
@@ -4623,6 +4625,12 @@ def read_jobs(
             case((Job.status.in_(active_like_statuses), 0), else_=1),
             Job.created_at.desc(),
         )
+    if job_type:
+        job_types = [jt.strip() for jt in str(job_type).split(",") if jt.strip()]
+        if len(job_types) == 1:
+            query = query.where(Job.job_type == job_types[0])
+        elif len(job_types) > 1:
+            query = query.where(Job.job_type.in_(job_types))
     if channel_id:
         query = query.join(Video).where(Video.channel_id == channel_id)
     safe_limit = max(1, min(limit, 2000))
@@ -4934,7 +4942,9 @@ class Settings(BaseModel):
     transcription_compute_type: str = "int8_float16"
     parakeet_model: str = "nvidia/parakeet-tdt-0.6b-v2"
     parakeet_batch_size: int = 16
+    parakeet_batch_auto: bool = True
     parakeet_require_word_timestamps: bool = True
+    parakeet_unload_after_transcribe: bool = False
     beam_size: int = 1  # 1=fastest, 5=most accurate
     vad_filter: bool = True  # Skip silent portions for faster processing
     batched_transcription: bool = True  # Process audio in parallel batches
@@ -4999,7 +5009,9 @@ def get_settings():
         transcription_compute_type=os.getenv("TRANSCRIPTION_COMPUTE_TYPE") or "int8_float16",
         parakeet_model=os.getenv("PARAKEET_MODEL") or "nvidia/parakeet-tdt-0.6b-v2",
         parakeet_batch_size=int(os.getenv("PARAKEET_BATCH_SIZE", "16")),
+        parakeet_batch_auto=os.getenv("PARAKEET_BATCH_AUTO", "true").lower() == "true",
         parakeet_require_word_timestamps=os.getenv("PARAKEET_REQUIRE_WORD_TIMESTAMPS", "true").lower() == "true",
+        parakeet_unload_after_transcribe=os.getenv("PARAKEET_UNLOAD_AFTER_TRANSCRIBE", "false").lower() == "true",
         beam_size=int(os.getenv("TRANSCRIPTION_BEAM_SIZE", "1")),
         vad_filter=os.getenv("TRANSCRIPTION_VAD_FILTER", "true").lower() == "true",
         batched_transcription=os.getenv("TRANSCRIPTION_BATCHED", "true").lower() == "true",
@@ -5053,7 +5065,9 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
         normalized_transcription_engine = "auto"
     parakeet_model = (getattr(settings, "parakeet_model", "") or "nvidia/parakeet-tdt-0.6b-v2").strip()
     parakeet_batch_size = max(1, min(int(getattr(settings, "parakeet_batch_size", 16)), 64))
+    parakeet_batch_auto = bool(getattr(settings, "parakeet_batch_auto", True))
     parakeet_require_word_timestamps = bool(getattr(settings, "parakeet_require_word_timestamps", True))
+    parakeet_unload_after_transcribe = bool(getattr(settings, "parakeet_unload_after_transcribe", False))
     llm_enabled = bool(getattr(settings, "llm_enabled", False) or settings.ollama_enabled)
     normalized_provider = _normalize_llm_provider(getattr(settings, "llm_provider", "ollama"))
     allowed_providers = {"ollama", "nvidia_nim", "openai", "anthropic", "gemini", "groq", "openrouter", "xai"}
@@ -5072,7 +5086,9 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     set_key(ENV_PATH, "TRANSCRIPTION_COMPUTE_TYPE", settings.transcription_compute_type)
     set_key(ENV_PATH, "PARAKEET_MODEL", parakeet_model)
     set_key(ENV_PATH, "PARAKEET_BATCH_SIZE", str(parakeet_batch_size))
+    set_key(ENV_PATH, "PARAKEET_BATCH_AUTO", str(parakeet_batch_auto).lower())
     set_key(ENV_PATH, "PARAKEET_REQUIRE_WORD_TIMESTAMPS", str(parakeet_require_word_timestamps).lower())
+    set_key(ENV_PATH, "PARAKEET_UNLOAD_AFTER_TRANSCRIBE", str(parakeet_unload_after_transcribe).lower())
     set_key(ENV_PATH, "TRANSCRIPTION_BEAM_SIZE", str(settings.beam_size))
     set_key(ENV_PATH, "TRANSCRIPTION_VAD_FILTER", str(settings.vad_filter).lower())
     set_key(ENV_PATH, "TRANSCRIPTION_BATCHED", str(settings.batched_transcription).lower())
@@ -5124,7 +5140,9 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     os.environ["TRANSCRIPTION_COMPUTE_TYPE"] = settings.transcription_compute_type
     os.environ["PARAKEET_MODEL"] = parakeet_model
     os.environ["PARAKEET_BATCH_SIZE"] = str(parakeet_batch_size)
+    os.environ["PARAKEET_BATCH_AUTO"] = str(parakeet_batch_auto).lower()
     os.environ["PARAKEET_REQUIRE_WORD_TIMESTAMPS"] = str(parakeet_require_word_timestamps).lower()
+    os.environ["PARAKEET_UNLOAD_AFTER_TRANSCRIBE"] = str(parakeet_unload_after_transcribe).lower()
     os.environ["TRANSCRIPTION_BEAM_SIZE"] = str(settings.beam_size)
     os.environ["TRANSCRIPTION_VAD_FILTER"] = str(settings.vad_filter).lower()
     os.environ["TRANSCRIPTION_BATCHED"] = str(settings.batched_transcription).lower()
