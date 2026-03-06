@@ -30,15 +30,15 @@ By default, repo is installed to `./Chatalogue` relative to the installer script
 
 ### Windows installer
 - Direct `.bat`:  
-  [install_windows.bat](https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/install_windows.bat)
+  [install_windows.bat](./install_windows.bat)
 - Zipped `.bat` (if browser/security policy blocks script download):  
-  [install_windows.zip](https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/installers/install_windows.zip)
+  [install_windows.zip](./installers/install_windows.zip)
 
 ### macOS installer
 - Direct `.sh`:  
-  [install_mac.sh](https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/install_mac.sh)
+  [install_mac.sh](./install_mac.sh)
 - Zipped `.sh` (if needed):  
-  [install_mac.zip](https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/installers/install_mac.zip)
+  [install_mac.zip](./installers/install_mac.zip)
 
 ### Optional installer environment variables
 - `CHATALOGUE_REPO_URL` (default: `https://github.com/jonstreeter/Chatalogue.git`)
