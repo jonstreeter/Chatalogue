@@ -1,5 +1,9 @@
 @echo off
 SETLOCAL EnableDelayedExpansion
+SET "INSTALLER_VERSION=2026-03-06.2"
+
+echo [Chatalogue Installer] Windows bootstrap v%INSTALLER_VERSION%
+echo.
 
 SET "SCRIPT_DIR=%~dp0"
 IF "%SCRIPT_DIR:~-1%"=="\" SET "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
