@@ -61,7 +61,12 @@ install_windows.bat
 
 macOS:
 ```bash
-INSTALL_PARAKEET=1 PRELOAD_ENGINE=auto OLLAMA_MODELS="qwen2.5:7b qwen3.5:27b" ./install_mac.sh
+INSTALL_PARAKEET=1 PRELOAD_ENGINE=auto OLLAMA_MODELS="qwen2.5:7b qwen3.5:27b" bash ./install_mac.sh
+```
+
+If you prefer running with `./install_mac.sh`, make it executable first:
+```bash
+chmod +x install_mac.sh
 ```
 
 ## Run
