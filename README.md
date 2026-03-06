@@ -30,20 +30,21 @@ By default, repo is installed to `./Chatalogue` relative to the installer script
 
 ### Windows installer
 - Direct `.bat`:  
-  `https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/install_windows.bat`
+  [install_windows.bat](https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/install_windows.bat)
 - Zipped `.bat` (if browser/security policy blocks script download):  
-  `https://github.com/jonstreeter/Chatalogue/raw/main/installers/install_windows.zip`
+  [install_windows.zip](https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/installers/install_windows.zip)
 
 ### macOS installer
 - Direct `.sh`:  
-  `https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/install_mac.sh`
+  [install_mac.sh](https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/install_mac.sh)
 - Zipped `.sh` (if needed):  
-  `https://github.com/jonstreeter/Chatalogue/raw/main/installers/install_mac.zip`
+  [install_mac.zip](https://raw.githubusercontent.com/jonstreeter/Chatalogue/main/installers/install_mac.zip)
 
 ### Optional installer environment variables
 - `CHATALOGUE_REPO_URL` (default: `https://github.com/jonstreeter/Chatalogue.git`)
 - `CHATALOGUE_REPO_BRANCH` (default: `main`)
 - `CHATALOGUE_REPO_DIR` (default: `Chatalogue`)
+- `PYTHON_BIN` (macOS/Linux installer only, default: `python3`)
 - `INSTALL_PARAKEET=1|0` (default: `1`)
 - `SKIP_MODEL_PRELOAD=1|0` (default: `0`)
 - `PRELOAD_ENGINE=auto|whisper|parakeet` (default: `auto`)
@@ -100,21 +101,22 @@ Common keys:
 - `HF_TOKEN`
 - `TRANSCRIPTION_ENGINE=auto|whisper|parakeet`
 - `PARAKEET_MODEL` (default `nvidia/parakeet-tdt-0.6b-v2`)
+- `PARAKEET_BATCH_SIZE` (requested batch size before auto-capping)
+- `PARAKEET_OOM_CHUNK_RETRY=true|false`
+- `PARAKEET_OOM_CHUNK_SECONDS` (default `600`)
+- `PARAKEET_OOM_MIN_CHUNK_SECONDS` (default `30`)
+- `PARAKEET_OOM_CHUNK_OVERLAP_SECONDS` (default `0.35`)
 - `DB_PROVIDER=postgres`
 - `DATABASE_URL` (optional explicit DB URL)
+
+## Security
+- Local secret scanning: `pre-commit` + `gitleaks` (`.pre-commit-config.yaml`)
+- CI secret scanning: GitHub Actions workflow (`.github/workflows/gitleaks.yml`)
 
 ## Embedded PostgreSQL defaults
 - Data: `backend/data/postgres`
 - Binaries cache: `backend/bin/postgres`
 - Default DSN: `postgresql+psycopg://chatalogue@127.0.0.1:55432/chatalogue`
-
-## Troubleshooting
-- `No module named 'pkg_resources'`:
-  - `pip install "setuptools<81"` in backend venv.
-- yt-dlp age/cookie errors:
-  - configure YouTube cookies per yt-dlp docs.
-- Backend unreachable:
-  - verify `http://localhost:8011/system/worker-status`.
 
 ## License
 MIT (`LICENSE`).

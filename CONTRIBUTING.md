@@ -34,6 +34,18 @@ Thanks for contributing.
 
 If you change backend APIs, include manual or automated verification notes.
 
+## Pre-commit (required)
+Install local hooks so secret scanning runs before every commit.
+
+1. Install pre-commit:
+   - `pip install pre-commit`
+2. Enable hooks in this repo:
+   - `pre-commit install`
+3. Run once across current files:
+   - `pre-commit run --all-files`
+
+`gitleaks` is configured in `.pre-commit-config.yaml` and will block commits that contain secrets.
+
 ## Coding Guidelines
 - Prefer small, reviewable PRs
 - Preserve existing architecture unless refactor is intentional

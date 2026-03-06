@@ -1,4 +1,4 @@
-import yt_dlp
+﻿import yt_dlp
 import os
 import time
 import json
@@ -76,8 +76,14 @@ class IngestionService:
         self._diarization_load_error = None  # Track actual error for debugging
         self._force_float32 = False  # Set True if GPU doesn't support FP16 cuBLAS ops
         self._whisper_compute_type = None
+        self._whisper_device = None
         self._gpu_total_vram_bytes = 0
         self._cuda_memory_fraction_applied = None
+        self._cuda_unhealthy_reason = None
+        self._cuda_unhealthy_since = None
+        # Dynamic, in-process Parakeet batch cap that ratchets down after CUDA OOMs.
+        # Persists for this backend process lifetime (resets on restart).
+        self._parakeet_dynamic_batch_cap = None
         # Coordinate background audio prefetch and normal processing so a video is
         # never downloaded twice concurrently.
         self._download_locks_guard = threading.Lock()
@@ -940,7 +946,10 @@ class IngestionService:
     def _ensure_device(self):
         import torch
         if self.device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            if self._cuda_unhealthy_reason:
+                self.device = "cpu"
+            else:
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
             log(f"Using device: {self.device}")
             if self.device == "cuda":
                 log_verbose(f"  GPU: {torch.cuda.get_device_name(0)}")
@@ -982,8 +991,50 @@ class IngestionService:
         msg = str(error or "").lower()
         return (
             ("cuda" in msg and "out of memory" in msg)
+            or ("cuda oom" in msg)
+            or ("oom even at batch_size" in msg)
             or ("cudnn_status_alloc_failed" in msg)
             or ("cuda error: out of memory" in msg)
+        )
+
+    def _is_cuda_illegal_access(self, error: Exception) -> bool:
+        msg = str(error or "").lower()
+        return (
+            ("illegal memory access" in msg)
+            or ("cudaerrorillegaladdress" in msg)
+            or ("device-side assert triggered" in msg)
+        )
+
+    def _mark_cuda_unhealthy(self, reason: str, job_id: int = None):
+        """Quarantine CUDA for this worker process after fatal CUDA runtime faults.
+
+        Certain CUDA faults (e.g. illegal memory access) can poison the context until
+        process restart. For stability, force CPU execution for remaining jobs.
+        """
+        if self._cuda_unhealthy_reason:
+            return
+        self._cuda_unhealthy_reason = (reason or "unknown").strip()[:400]
+        self._cuda_unhealthy_since = datetime.now()
+
+        # Drop GPU-bound models and force runtime to CPU.
+        self._release_parakeet_model("cuda_unhealthy")
+        self._release_whisper_model("cuda_unhealthy")
+        self._release_diarization_models("cuda_unhealthy")
+        self.device = "cpu"
+        self._gpu_total_vram_bytes = 0
+        self._cuda_memory_fraction_applied = None
+
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "cuda_unhealthy": True,
+                "cuda_unhealthy_reason": self._cuda_unhealthy_reason,
+                "cuda_unhealthy_since": self._cuda_unhealthy_since.isoformat() if self._cuda_unhealthy_since else None,
+            },
+        )
+        log(
+            f"CUDA marked unhealthy for this worker due to fatal runtime error: "
+            f"{self._cuda_unhealthy_reason}. Forcing CPU fallback until backend restart."
         )
 
     def _clear_cuda_cache(self):
@@ -1036,6 +1087,18 @@ class IngestionService:
         else:
             log("Released Parakeet model from GPU memory.")
 
+    def _release_whisper_model(self, reason: str = ""):
+        if self.whisper_model is None:
+            return
+        self.whisper_model = None
+        self._whisper_compute_type = None
+        self._whisper_device = None
+        self._clear_cuda_cache()
+        if reason:
+            log(f"Released Whisper model from GPU memory ({reason}).")
+        else:
+            log("Released Whisper model from GPU memory.")
+
     def _release_diarization_models(self, reason: str = ""):
         """Release pyannote models/inference objects to recover GPU memory."""
         had_models = any([
@@ -1055,6 +1118,12 @@ class IngestionService:
 
     def _resolve_parakeet_batch_size(self, requested_batch_size: int) -> int:
         requested = max(1, min(int(requested_batch_size or 1), 64))
+        dynamic_cap = self._parakeet_dynamic_batch_cap
+        if dynamic_cap is not None:
+            try:
+                requested = min(requested, max(1, int(dynamic_cap)))
+            except Exception:
+                pass
         if self.device != "cuda":
             return requested
         hard_cap = max(1, min(int(os.getenv("PARAKEET_BATCH_HARD_MAX", "4")), 64))
@@ -1099,6 +1168,27 @@ class IngestionService:
                 cap = min(cap, 6)
 
         return max(1, min(requested, cap, hard_cap))
+
+    def _record_parakeet_oom_batch_cap(self, next_batch: int, job_id: int = None):
+        """Persist a lower Parakeet batch cap for subsequent jobs in this process."""
+        try:
+            new_cap = max(1, min(int(next_batch), 64))
+        except Exception:
+            return
+        prev = self._parakeet_dynamic_batch_cap
+        if prev is None or new_cap < int(prev):
+            self._parakeet_dynamic_batch_cap = new_cap
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "parakeet_dynamic_batch_cap": int(new_cap),
+                    "parakeet_dynamic_batch_cap_source": "oom_backoff",
+                },
+            )
+            if prev is None:
+                log(f"Persisting Parakeet batch cap at {new_cap} after CUDA OOM.")
+            else:
+                log(f"Lowering persisted Parakeet batch cap from {int(prev)} to {new_cap} after CUDA OOM.")
 
     def _resolve_parakeet_keep_loaded_thresholds(self, total_gb: float) -> tuple[float, float]:
         """Return (min_free_gb, min_free_ratio) thresholds for keeping Parakeet loaded."""
@@ -1209,18 +1299,25 @@ class IngestionService:
 
         ctranslate2, pyannote.audio, and NeMo all import pkg_resources on Windows.
         This is called in __init__ so the shim is in sys.modules before any lazy
-        ML import fires — regardless of which transcription engine or code path runs.
+        ML import fires â€” regardless of which transcription engine or code path runs.
         """
         import importlib
         import sys
         import types
+        import warnings
 
         if sys.platform != "win32":
             return
 
         # If a real, functional pkg_resources is present, do nothing.
         try:
-            import pkg_resources as _pkg_resources  # type: ignore
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=".*pkg_resources is deprecated as an API.*",
+                    category=UserWarning,
+                )
+                import pkg_resources as _pkg_resources  # type: ignore
             if hasattr(_pkg_resources, "resource_filename"):
                 return
         except Exception:
@@ -1326,7 +1423,7 @@ class IngestionService:
             requested_compute_type = os.getenv("TRANSCRIPTION_COMPUTE_TYPE", "").strip()
 
         # Keep an already-loaded compatible model.
-        if self.whisper_model is not None and self._whisper_compute_type:
+        if self.whisper_model is not None and self._whisper_compute_type and self._whisper_device:
             if not force_float32 or self._whisper_compute_type == "float32":
                 return
 
@@ -1335,18 +1432,31 @@ class IngestionService:
 
         self.whisper_model = None
         self._whisper_compute_type = None
+        self._whisper_device = None
+        attempted_cuda = (self.device == "cuda")
 
         if requested_compute_type:
             try:
                 self.whisper_model = WhisperModel(model_size, device=self.device, compute_type=requested_compute_type)
                 self._whisper_compute_type = requested_compute_type
+                self._whisper_device = self.device
+                self._upsert_job_payload_fields(
+                    job_id,
+                    {
+                        "whisper_compute_type": requested_compute_type,
+                        "whisper_runtime_device": self.device,
+                        "whisper_fallback_to_cpu": False,
+                    },
+                )
                 log(f"Whisper loaded with compute_type={requested_compute_type}")
                 if requested_compute_type != "float16" and self.device == "cuda":
                     self._force_float32 = True
-                    log("Non-float16 compute type detected — pyannote models will use float32")
+                    log("Non-float16 compute type detected â€” pyannote models will use float32")
                 return
             except Exception as e:
-                if force_float32:
+                if self._is_cuda_illegal_access(e):
+                    self._mark_cuda_unhealthy(str(e), job_id=job_id)
+                if force_float32 and not attempted_cuda:
                     raise
                 log(f"Failed to load Whisper with compute_type={requested_compute_type}: {e}")
                 log("Falling back to auto-detected compute type...")
@@ -1356,17 +1466,51 @@ class IngestionService:
             try:
                 self.whisper_model = WhisperModel(model_size, device=self.device, compute_type=ct)
                 self._whisper_compute_type = ct
+                self._whisper_device = self.device
+                self._upsert_job_payload_fields(
+                    job_id,
+                    {
+                        "whisper_compute_type": ct,
+                        "whisper_runtime_device": self.device,
+                        "whisper_fallback_to_cpu": False,
+                    },
+                )
                 log(f"Whisper loaded with compute_type={ct}")
                 if ct != "float16" and self.device == "cuda":
                     self._force_float32 = True
-                    log("GPU FP16 cuBLAS unsupported — pyannote models will use float32")
+                    log("GPU FP16 cuBLAS unsupported â€” pyannote models will use float32")
                 return
             except Exception as e:
+                if self._is_cuda_illegal_access(e):
+                    self._mark_cuda_unhealthy(str(e), job_id=job_id)
+                    break
                 log(f"compute_type={ct} not supported ({type(e).__name__}), trying next...")
+
+        if attempted_cuda:
+            cpu_candidates = ["int8", "float32"]
+            for ct in cpu_candidates:
+                try:
+                    self.whisper_model = WhisperModel(model_size, device="cpu", compute_type=ct)
+                    self._whisper_compute_type = ct
+                    self._whisper_device = "cpu"
+                    self._upsert_job_payload_fields(
+                        job_id,
+                        {
+                            "whisper_compute_type": ct,
+                            "whisper_runtime_device": "cpu",
+                            "whisper_fallback_to_cpu": True,
+                        },
+                    )
+                    self._update_job_status_detail(job_id, "Whisper CUDA load failed; using CPU fallback.")
+                    log(f"Whisper loaded with compute_type={ct} on CPU fallback")
+                    return
+                except Exception as e:
+                    log(f"CPU fallback compute_type={ct} not supported ({type(e).__name__}), trying next...")
 
         raise RuntimeError(
             f"Could not load Whisper model ({model_size}) on device={self.device}. "
-            f"Tried compute types: {candidates}."
+            f"Tried compute types: {candidates}"
+            + (" plus CPU fallback ['int8', 'float32']." if self.device == "cuda" else ".")
         )
 
     def _parakeet_dependencies_available(self) -> bool:
@@ -1378,6 +1522,10 @@ class IngestionService:
 
     def _load_parakeet_model(self, job_id: int = None):
         self._ensure_device()
+        if self._cuda_unhealthy_reason:
+            raise RuntimeError(
+                f"Parakeet disabled for this worker until restart due to prior CUDA fault: {self._cuda_unhealthy_reason}"
+            )
         if self.parakeet_model is not None:
             self._upsert_job_payload_fields(job_id, {"parakeet_model_cached": True})
             return
@@ -1534,7 +1682,115 @@ class IngestionService:
                 raw_segments = ts
         return text, raw_words, raw_segments
 
-    def _transcribe_with_parakeet(self, audio_path: Path, start_time_offset: float = 0.0, job_id: int = None):
+    def _parakeet_oom_chunk_retry_enabled(self) -> bool:
+        return (os.getenv("PARAKEET_OOM_CHUNK_RETRY", "true").strip().lower() == "true")
+
+    def _resolve_parakeet_oom_chunk_settings(self) -> tuple[int, int, float]:
+        """Return (chunk_seconds, min_chunk_seconds, overlap_seconds) for OOM chunk fallback."""
+        try:
+            chunk_seconds = int(os.getenv("PARAKEET_OOM_CHUNK_SECONDS", "600"))
+        except Exception:
+            chunk_seconds = 600
+        try:
+            min_chunk_seconds = int(os.getenv("PARAKEET_OOM_MIN_CHUNK_SECONDS", "30"))
+        except Exception:
+            min_chunk_seconds = 30
+        try:
+            overlap_seconds = float(os.getenv("PARAKEET_OOM_CHUNK_OVERLAP_SECONDS", "0.35"))
+        except Exception:
+            overlap_seconds = 0.35
+
+        chunk_seconds = max(120, min(chunk_seconds, 3600))
+        min_chunk_seconds = max(30, min(min_chunk_seconds, chunk_seconds))
+        overlap_seconds = max(0.0, min(overlap_seconds, 2.0))
+        return chunk_seconds, min_chunk_seconds, overlap_seconds
+
+    def _transcribe_with_parakeet_in_chunks(self, audio_path: Path, start_time_offset: float = 0.0, job_id: int = None):
+        total_duration = float(self._probe_audio_duration_seconds(audio_path) or 0.0)
+        if total_duration <= 0:
+            raise RuntimeError("Could not determine audio duration for Parakeet chunk fallback.")
+
+        chunk_seconds, min_chunk_seconds, overlap_seconds = self._resolve_parakeet_oom_chunk_settings()
+        log(
+            f"Retrying Parakeet in chunked mode "
+            f"(chunk={chunk_seconds}s, min={min_chunk_seconds}s, overlap={overlap_seconds:.2f}s)."
+        )
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "parakeet_chunk_fallback_used": True,
+                "parakeet_chunk_seconds_initial": int(chunk_seconds),
+                "parakeet_chunk_min_seconds": int(min_chunk_seconds),
+                "parakeet_chunk_overlap_seconds": float(overlap_seconds),
+            },
+        )
+
+        segments = []
+        chunk_start = 0.0
+        chunk_index = 0
+
+        while chunk_start < total_duration - 0.01:
+            chunk_index += 1
+            remaining = max(0.0, total_duration - chunk_start)
+            attempt_chunk_seconds = min(chunk_seconds, remaining)
+
+            while True:
+                chunk_duration_with_overlap = min(remaining, attempt_chunk_seconds + overlap_seconds)
+                if job_id:
+                    self._update_job_status_detail(
+                        job_id,
+                        f"Transcribing with Parakeet (chunk {chunk_index}, {int(chunk_start)}s/{int(total_duration)}s, window {int(attempt_chunk_seconds)}s)..."
+                    )
+
+                chunk_path = self._slice_audio(audio_path, chunk_start, chunk_duration_with_overlap)
+                try:
+                    chunk_segments, _ = self._transcribe_with_parakeet(
+                        chunk_path,
+                        start_time_offset=start_time_offset + chunk_start,
+                        job_id=job_id,
+                        allow_oom_chunk_retry=False,
+                        forced_batch_size=1,
+                    )
+                    if segments and chunk_segments:
+                        prev_end = float(getattr(segments[-1], "end", 0.0))
+                        chunk_segments = [
+                            s for s in chunk_segments
+                            if float(getattr(s, "end", 0.0)) > (prev_end + 0.01)
+                        ]
+                    segments.extend(chunk_segments)
+                    chunk_seconds = min(chunk_seconds, attempt_chunk_seconds)
+                    break
+                except Exception as e:
+                    if self._is_cuda_oom(e) and attempt_chunk_seconds > min_chunk_seconds:
+                        next_chunk = max(min_chunk_seconds, int(attempt_chunk_seconds // 2))
+                        if next_chunk < attempt_chunk_seconds:
+                            log(
+                                f"Parakeet chunk OOM at {int(attempt_chunk_seconds)}s window. "
+                                f"Retrying with {int(next_chunk)}s."
+                            )
+                            self._clear_cuda_cache()
+                            attempt_chunk_seconds = next_chunk
+                            continue
+                    raise
+                finally:
+                    try:
+                        if chunk_path.exists():
+                            chunk_path.unlink()
+                    except Exception:
+                        pass
+
+            chunk_start += attempt_chunk_seconds
+
+        return segments, (start_time_offset + total_duration)
+
+    def _transcribe_with_parakeet(
+        self,
+        audio_path: Path,
+        start_time_offset: float = 0.0,
+        job_id: int = None,
+        allow_oom_chunk_retry: bool = True,
+        forced_batch_size: int = None,
+    ):
         self._load_parakeet_model(job_id)
         parakeet_input, cleanup_input = self._convert_audio_for_parakeet(audio_path)
         try:
@@ -1548,14 +1804,21 @@ class IngestionService:
                 # Keep path-mode as a fallback path if waveform loading fails.
                 log_verbose(f"Parakeet waveform load failed; using path input fallback: {e}")
 
-            parakeet_batch_size_requested = max(1, min(int(os.getenv("PARAKEET_BATCH_SIZE", "16")), 64))
-            parakeet_batch_size = self._resolve_parakeet_batch_size(parakeet_batch_size_requested)
+            if forced_batch_size is not None:
+                parakeet_batch_size_requested = max(1, min(int(forced_batch_size), 64))
+                parakeet_batch_size = parakeet_batch_size_requested
+            else:
+                parakeet_batch_size_requested = max(1, min(int(os.getenv("PARAKEET_BATCH_SIZE", "16")), 64))
+                parakeet_batch_size = self._resolve_parakeet_batch_size(parakeet_batch_size_requested)
             mem_snap = self._cuda_memory_snapshot()
             self._upsert_job_payload_fields(
                 job_id,
                 {
                     "parakeet_batch_size_requested": int(parakeet_batch_size_requested),
                     "parakeet_batch_size_effective": int(parakeet_batch_size),
+                    "parakeet_dynamic_batch_cap": (
+                        int(self._parakeet_dynamic_batch_cap) if self._parakeet_dynamic_batch_cap is not None else None
+                    ),
                     "parakeet_batch_auto": os.getenv("PARAKEET_BATCH_AUTO", "true").strip().lower() == "true",
                     "parakeet_input_mode": parakeet_input_mode,
                 },
@@ -1632,6 +1895,7 @@ class IngestionService:
                     break
                 if oom_hit and self.device == "cuda" and current_batch > 1:
                     next_batch = max(1, current_batch // 2)
+                    self._record_parakeet_oom_batch_cap(next_batch, job_id=job_id)
                     log(
                         f"Parakeet CUDA OOM at batch_size={current_batch}. "
                         f"Retrying with batch_size={next_batch}."
@@ -1645,6 +1909,16 @@ class IngestionService:
                     current_batch = next_batch
                     continue
                 if oom_hit and current_batch <= 1:
+                    if allow_oom_chunk_retry and self._parakeet_oom_chunk_retry_enabled():
+                        self._clear_cuda_cache()
+                        if job_id:
+                            self._update_job_status_detail(
+                                job_id,
+                                "Parakeet hit VRAM limit. Retrying in adaptive chunked mode..."
+                            )
+                        return self._transcribe_with_parakeet_in_chunks(
+                            audio_path, start_time_offset=start_time_offset, job_id=job_id
+                        )
                     raise RuntimeError(
                         "Parakeet failed due to CUDA OOM even at batch_size=1. "
                         "Use Whisper or enable lower-VRAM settings."
@@ -1766,6 +2040,8 @@ class IngestionService:
         pref = (os.getenv("TRANSCRIPTION_ENGINE") or "auto").strip().lower()
         if pref not in {"auto", "whisper", "parakeet"}:
             pref = "auto"
+        if self._cuda_unhealthy_reason:
+            return "whisper"
         if pref == "whisper":
             return "whisper"
         if pref == "parakeet":
@@ -1785,6 +2061,9 @@ class IngestionService:
             "requested_engine": req,
             "resolved_engine": None,
             "device": self.device,
+            "whisper_runtime_device": None,
+            "cuda_unhealthy": bool(self._cuda_unhealthy_reason),
+            "cuda_unhealthy_reason": self._cuda_unhealthy_reason,
             "parakeet_dependencies_available": self._parakeet_dependencies_available(),
             "whisper_model": os.getenv("TRANSCRIPTION_MODEL", "medium"),
             "whisper_compute_type": os.getenv("TRANSCRIPTION_COMPUTE_TYPE", "").strip() or None,
@@ -1792,6 +2071,9 @@ class IngestionService:
             "parakeet_batch_size_requested": max(1, min(int(os.getenv("PARAKEET_BATCH_SIZE", "16")), 64)),
             "parakeet_batch_auto": os.getenv("PARAKEET_BATCH_AUTO", "true").strip().lower() == "true",
             "parakeet_batch_hard_max": max(1, min(int(os.getenv("PARAKEET_BATCH_HARD_MAX", "4")), 64)),
+            "parakeet_dynamic_batch_cap": (
+                int(self._parakeet_dynamic_batch_cap) if self._parakeet_dynamic_batch_cap is not None else None
+            ),
             "parakeet_max_gpu_memory_fraction": max(0.50, min(float(os.getenv("PARAKEET_MAX_GPU_MEMORY_FRACTION", "0.85")), 0.98)),
             "parakeet_unload_after_transcribe": os.getenv("PARAKEET_UNLOAD_AFTER_TRANSCRIBE", "auto"),
             "parakeet_release_other_models_before_transcribe": os.getenv("PARAKEET_RELEASE_OTHER_MODELS_BEFORE_TRANSCRIBE", "false").strip().lower() == "true",
@@ -1812,6 +2094,7 @@ class IngestionService:
             self._load_whisper_model(job_id=None, force_float32=False)
             response["resolved_engine"] = "whisper"
             response["whisper_compute_type"] = self._whisper_compute_type or response["whisper_compute_type"]
+            response["whisper_runtime_device"] = self._whisper_device or self.device
 
         def _check_parakeet():
             if self.device == "cuda" and response.get("parakeet_release_other_models_before_transcribe"):
@@ -2008,7 +2291,7 @@ class IngestionService:
                         if self._update_channel_metadata_from_ydl(channel, result):
                             session.add(channel)
 
-                        # entries can be a generator — materialize it to a list
+                        # entries can be a generator â€” materialize it to a list
                         raw_entries = result.get('entries')
                         if raw_entries is None:
                             log(f"  WARNING: No 'entries' key in result for {url}")
@@ -4275,7 +4558,7 @@ class IngestionService:
             elif status == 'finished':
                 log_verbose(f"Post-processing finished: {pp_name}")
 
-        # Prefer opus/webm over m4a — YouTube live stream VODs often have corrupt
+        # Prefer opus/webm over m4a â€” YouTube live stream VODs often have corrupt
         # AAC streams in m4a, while opus is consistently clean. Since we convert
         # to WAV for transcription anyway, the container format doesn't matter.
 
@@ -4824,21 +5107,26 @@ class IngestionService:
             "segments": segments,
         }
 
-    def _slice_audio(self, input_path: Path, start_time: float) -> Path:
-        """Create a temp audio file starting from start_time"""
-        output_path = TEMP_DIR / f"temp_slice_{start_time}_{input_path.name}"
+    def _slice_audio(self, input_path: Path, start_time: float, duration: float = None) -> Path:
+        """Create a temp audio file starting from start_time, optionally capped to duration seconds."""
+        start_ms = int(max(0.0, float(start_time)) * 1000)
+        if duration is None:
+            dur_tag = "full"
+        else:
+            try:
+                dur_tag = str(int(max(0.0, float(duration)) * 1000))
+            except Exception:
+                dur_tag = "full"
+        output_path = TEMP_DIR / f"temp_slice_{start_ms}_{dur_tag}_{threading.get_ident()}_{input_path.name}"
         
         # Determine ffmpeg location (copied from download_audio logic)
         ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
         ffmpeg_cmd = str(ffmpeg_bin / "ffmpeg.exe") if (ffmpeg_bin / "ffmpeg.exe").exists() else "ffmpeg"
 
-        cmd = [
-            ffmpeg_cmd, "-y",
-            "-i", str(input_path),
-            "-ss", str(start_time),
-            "-c", "copy",
-            str(output_path)
-        ]
+        cmd = [ffmpeg_cmd, "-y", "-ss", str(start_time), "-i", str(input_path)]
+        if duration is not None:
+            cmd.extend(["-t", str(duration)])
+        cmd.extend(["-c", "copy", str(output_path)])
         
         log_verbose(f"Slicing audio: {' '.join(cmd)}")
         try:
@@ -5623,7 +5911,7 @@ class IngestionService:
                         break
 
             if not new_file or not new_file.exists():
-                raise RuntimeError("Fallback download also failed — no audio file produced")
+                raise RuntimeError("Fallback download also failed â€” no audio file produced")
 
             # Validate the fallback download
             probe2 = subprocess.run(
@@ -5641,7 +5929,7 @@ class IngestionService:
             return new_file
 
         except subprocess.TimeoutExpired:
-            return audio_path  # Probe timed out — proceed with what we have
+            return audio_path  # Probe timed out â€” proceed with what we have
         except RuntimeError:
             raise
         except Exception as e:
@@ -5923,6 +6211,8 @@ class IngestionService:
         # release pyannote models before Parakeet transcribe (they will lazy-load again
         # for diarization phase).
         if prefer_parakeet and self.device == "cuda":
+            if self.whisper_model is not None:
+                self._release_whisper_model("before_parakeet_transcribe")
             release_before = os.getenv("PARAKEET_RELEASE_OTHER_MODELS_BEFORE_TRANSCRIBE", "false").strip().lower() == "true"
             if release_before:
                 self._release_diarization_models("before_parakeet_transcribe")
@@ -5966,6 +6256,8 @@ class IngestionService:
                 duration_info = parakeet_duration or video.duration or 0
             except Exception as e:
                 log(f"Parakeet unavailable/failed: {e}. Falling back to Whisper.")
+                if self._is_cuda_illegal_access(e):
+                    self._mark_cuda_unhealthy(str(e), job_id=job_id)
                 fallback_reason = str(e).strip().splitlines()[0] if str(e).strip() else "unknown error"
                 fallback_reason = fallback_reason[:220]
                 self._update_job_status_detail(
@@ -6027,17 +6319,19 @@ class IngestionService:
                 self._record_job_stage_start(job_id, "transcribe")
                 return _run_transcribe(whisper_model, transcribe_path_value, transcribe_params_value, use_batched_value, device)
 
+            whisper_runtime_device = self._whisper_device or self.device
             try:
                 segments_generator, info = _run_transcribe_with_stage_start(
-                    self.whisper_model, transcribe_path, transcribe_params, use_batched, self.device
+                    self.whisper_model, transcribe_path, transcribe_params, use_batched, whisper_runtime_device
                 )
             except RuntimeError as e:
                 if "CUBLAS" in str(e).upper():
-                    log("cuBLAS error during transcription — reloading model with float32...")
+                    log("cuBLAS error during transcription â€” reloading model with float32...")
                     self._update_job_status_detail(job_id, "Reloading model (GPU compatibility fallback)...")
                     self._load_whisper_model(job_id=job_id, force_float32=True)
+                    whisper_runtime_device = self._whisper_device or self.device
                     segments_generator, info = _run_transcribe_with_stage_start(
-                        self.whisper_model, transcribe_path, transcribe_params, use_batched, self.device
+                        self.whisper_model, transcribe_path, transcribe_params, use_batched, whisper_runtime_device
                     )
                 else:
                     raise
@@ -6054,11 +6348,12 @@ class IngestionService:
                 seg_iter = iter(segments_generator)
             except RuntimeError as e:
                 if "CUBLAS" in str(e).upper():
-                    log("cuBLAS error starting transcription generator — reloading with float32...")
+                    log("cuBLAS error starting transcription generator â€” reloading with float32...")
                     self._update_job_status_detail(job_id, "Reloading model (GPU compatibility fallback)...")
                     self._load_whisper_model(job_id=job_id, force_float32=True)
+                    whisper_runtime_device = self._whisper_device or self.device
                     segments_generator, info = _run_transcribe_with_stage_start(
-                        self.whisper_model, transcribe_path, transcribe_params, use_batched, self.device
+                        self.whisper_model, transcribe_path, transcribe_params, use_batched, whisper_runtime_device
                     )
                     seg_iter = iter(segments_generator)
                 else:
@@ -6110,7 +6405,7 @@ class IngestionService:
                         self._save_partial_transcript(video.id, segments, total_duration)
             except RuntimeError as e:
                 if "CUBLAS" in str(e).upper():
-                    log("cuBLAS error during transcription iteration — reloading model with float32...")
+                    log("cuBLAS error during transcription iteration â€” reloading model with float32...")
                     self._update_job_status_detail(job_id, "Reloading model (GPU compatibility fallback)...")
                     if segments:
                         self._save_partial_transcript(video.id, segments, total_duration)
@@ -6252,10 +6547,10 @@ class IngestionService:
             # Configure diarization sensitivity from settings
             sensitivity = os.getenv("DIARIZATION_SENSITIVITY", "balanced")
             if sensitivity == "aggressive":
-                # More sensitive to speaker changes — splits more aggressively
+                # More sensitive to speaker changes â€” splits more aggressively
                 self.diarization_pipeline.segmentation.min_duration_off = 0.1
             elif sensitivity == "conservative":
-                # Less sensitive — merges more, fewer but longer segments
+                # Less sensitive â€” merges more, fewer but longer segments
                 self.diarization_pipeline.segmentation.min_duration_off = 1.0
             else:
                 # "balanced" uses pyannote default
@@ -6266,7 +6561,7 @@ class IngestionService:
             except RuntimeError as e:
                 if "CUBLAS" in str(e).upper() and not self._force_float32:
                     import torch
-                    log("cuBLAS error during diarization — reloading pipeline in float32...")
+                    log("cuBLAS error during diarization â€” reloading pipeline in float32...")
                     self._force_float32 = True
                     torch.set_float32_matmul_precision('high')
                     self._cast_pipeline_to_float32(self.diarization_pipeline)
@@ -6465,7 +6760,7 @@ class IngestionService:
                         }
                         log_verbose(f"    -> Created new {new_name}")
 
-            # Map Transcript — split Whisper segments at speaker boundaries
+            # Map Transcript â€” split Whisper segments at speaker boundaries
             # using word-level timestamps so each DB segment has a single speaker.
             final_segments = []
             processed_segments = 0
@@ -6572,7 +6867,7 @@ class IngestionService:
                 words = list(seg.words) if seg.words else []
 
                 if not words:
-                    # No word-level timestamps — fall back to whole-segment overlap
+                    # No word-level timestamps â€” fall back to whole-segment overlap
                     best_speaker_label = None
                     max_overlap = 0
                     seg_pyannote = Segment(seg.start, seg.end)
@@ -6899,4 +7194,5 @@ class IngestionService:
             raise RuntimeError(error_msg)
         except Exception as e:
             raise
+
 
