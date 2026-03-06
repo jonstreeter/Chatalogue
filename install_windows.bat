@@ -1,4 +1,11 @@
 @echo off
+if "%~1"=="--internal" goto :core_install
+
+echo [Chatalogue] Initializing installer with logging ^(saving to install.log^)...
+powershell -NoProfile -Command "& '%~f0' --internal *>&1 | Tee-Object -FilePath 'install_%DATE:~-4,4%%DATE:~-10,2%%DATE:~-7,2%.log' -Append"
+exit /b %ERRORLEVEL%
+
+:core_install
 SETLOCAL EnableDelayedExpansion
 SET "INSTALLER_VERSION=2026-03-06.2"
 

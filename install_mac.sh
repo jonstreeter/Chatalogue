@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ "${1:-}" != "--internal" ]; then
+    echo "[Chatalogue] Initializing installer with logging (saving to install.log)..."
+    bash "$0" --internal 2>&1 | tee "install_$(date +%Y%m%d%H%M).log"
+    exit ${PIPESTATUS[0]}
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 REPO_URL="${CHATALOGUE_REPO_URL:-https://github.com/jonstreeter/Chatalogue.git}"
