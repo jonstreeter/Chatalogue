@@ -18,7 +18,7 @@ IF EXIST "%PROJECT_ROOT%\backend\src\main.py" IF EXIST "%PROJECT_ROOT%\frontend\
 
 echo [Bootstrap] Local repo not detected in "%SCRIPT_DIR%".
 where git >nul 2>&1
-IF %ERRORLEVEL% NEQ 0 (
+IF ERRORLEVEL 1 (
   echo [ERROR] Git is required for bootstrap install. Please install Git and retry.
   EXIT /B 1
 )
@@ -28,7 +28,7 @@ IF EXIST "%CLONE_TARGET%\.git" (
   echo [Bootstrap] Existing repo found at "%CLONE_TARGET%". Pulling latest %REPO_BRANCH%...
   git -C "%CLONE_TARGET%" checkout "%REPO_BRANCH%" >nul 2>&1
   git -C "%CLONE_TARGET%" pull --ff-only origin "%REPO_BRANCH%"
-  IF %ERRORLEVEL% NEQ 0 (
+  IF ERRORLEVEL 1 (
     echo [WARN] git pull failed. Continuing with existing checkout.
   )
 ) ELSE (
@@ -37,9 +37,9 @@ IF EXIST "%CLONE_TARGET%\.git" (
     echo Delete it or set CHATALOGUE_REPO_DIR to a different folder name.
     EXIT /B 1
   )
-  echo [Bootstrap] Cloning %REPO_URL% (%REPO_BRANCH%)...
+  echo [Bootstrap] Cloning %REPO_URL% ^(%REPO_BRANCH%^)...
   git clone --branch "%REPO_BRANCH%" --depth 1 "%REPO_URL%" "%CLONE_TARGET%"
-  IF %ERRORLEVEL% NEQ 0 (
+  IF ERRORLEVEL 1 (
     echo [ERROR] Failed to clone repository.
     EXIT /B 1
   )
@@ -73,13 +73,13 @@ IF "!PYTHON_CMD!"=="" (
 )
 
 where node >nul 2>&1
-IF %ERRORLEVEL% NEQ 0 (
+IF ERRORLEVEL 1 (
   echo [ERROR] Node.js 18+ is required and was not found in PATH.
   EXIT /B 1
 )
 
 where ffmpeg >nul 2>&1
-IF %ERRORLEVEL% NEQ 0 (
+IF ERRORLEVEL 1 (
   echo [WARN] ffmpeg was not found in PATH. Download/extract will work, but media conversion may fail until ffmpeg is installed.
 )
 
@@ -94,7 +94,7 @@ echo [2/8] Upgrading pip tooling...
 
 echo [3/8] Installing PyTorch nightly cu128 (RTX 50xx friendly)...
 "%PIP_CMD%" install --pre torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
-IF %ERRORLEVEL% NEQ 0 (
+IF ERRORLEVEL 1 (
   echo [WARN] Nightly cu128 install failed. Falling back to default torch wheels...
   "%PIP_CMD%" install torch torchaudio
 )
@@ -110,7 +110,7 @@ IF /I "%INSTALL_PARAKEET%"=="1" (
   echo [6/8] Installing optional Parakeet dependencies...
   "%PIP_CMD%" install -r "%BACKEND_DIR%\requirements-parakeet.txt"
 ) ELSE (
-  echo [6/8] Skipping Parakeet dependencies (INSTALL_PARAKEET=%INSTALL_PARAKEET%).
+  echo [6/8] Skipping Parakeet dependencies ^(INSTALL_PARAKEET=%INSTALL_PARAKEET%^).
 )
 
 echo [7/8] Installing frontend dependencies...
@@ -118,23 +118,23 @@ cd /d "%FRONTEND_DIR%"
 npm install
 
 IF "%SKIP_MODEL_PRELOAD%"=="1" (
-  echo [8/8] Skipping model preload (SKIP_MODEL_PRELOAD=1).
+  echo [8/8] Skipping model preload ^(SKIP_MODEL_PRELOAD=1^).
 ) ELSE (
-  echo [8/8] Preloading ASR models (engine=%PRELOAD_ENGINE%)...
+  echo [8/8] Preloading ASR models ^(engine=%PRELOAD_ENGINE%^)...
   cd /d "%BACKEND_DIR%"
   "%VENV_PYTHON%" preload_models.py --engine "%PRELOAD_ENGINE%"
 )
 
 IF DEFINED OLLAMA_MODELS (
   where ollama >nul 2>&1
-  IF %ERRORLEVEL% EQU 0 (
+  IF ERRORLEVEL 1 (
+    echo [WARN] OLLAMA_MODELS was provided but `ollama` was not found in PATH.
+  ) ELSE (
     echo Pulling Ollama models from OLLAMA_MODELS...
     FOR %%M IN (%OLLAMA_MODELS%) DO (
       echo   ollama pull %%M
       ollama pull %%M
     )
-  ) ELSE (
-    echo [WARN] OLLAMA_MODELS was provided but `ollama` was not found in PATH.
   )
 )
 
