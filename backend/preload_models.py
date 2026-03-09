@@ -1,11 +1,11 @@
 import argparse
 import os
-import sys
 import time
 
-# Prevent huggingface_hub from blocking on interactive login prompts
+# Prevent huggingface_hub and wandb from blocking on interactive login prompts
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 os.environ.setdefault("HF_NO_ADVISORY_WARNINGS", "1")
+os.environ.setdefault("WANDB_MODE", "disabled")
 
 from src.services.ingestion import IngestionService
 
