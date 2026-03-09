@@ -1,6 +1,10 @@
 import argparse
 import os
 
+# Prevent huggingface_hub from blocking on interactive login prompts
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+os.environ.setdefault("HF_NO_ADVISORY_WARNINGS", "1")
+
 from src.services.ingestion import IngestionService
 
 

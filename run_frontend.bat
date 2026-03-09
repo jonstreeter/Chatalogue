@@ -12,7 +12,7 @@ if %ERRORLEVEL% NEQ 0 (
 if not exist "%FRONTEND_DIR%\node_modules" (
   echo Frontend dependencies missing. Running npm install...
   cd /d "%FRONTEND_DIR%"
-  npm install
+  call npm install
 )
 
 cd /d "%FRONTEND_DIR%"

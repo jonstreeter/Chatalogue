@@ -34,3 +34,8 @@
 - Incorporate visual lip-reading signals alongside audio ASR to improve transcription robustness in noisy/crosstalk conditions.
 - Detect and track speaker faces during playback to improve speaker identity linkage and auto-generate better speaker thumbnails.
 - Aggregate speaker face crops across multiple videos to build a curated dataset for optional AI LoRA model training workflows.
+
+## 8. Secure External Access Mode (Gradio-Style Sharing)
+- Add an opt-in way to expose the local Chatalogue server externally, similar to Gradio share links.
+- Support short-lived public URLs/tunnels with clear status, manual stop control, and expiry defaults.
+- Include access controls (token/password/IP allowlist), audit logging, and explicit warning banners while sharing is enabled.
