@@ -1,11 +1,17 @@
 import argparse
 import os
+import sys
+import time
 
 # Prevent huggingface_hub from blocking on interactive login prompts
 os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
 os.environ.setdefault("HF_NO_ADVISORY_WARNINGS", "1")
 
 from src.services.ingestion import IngestionService
+
+
+def log(msg: str):
+    print(msg, flush=True)
 
 
 def main():
@@ -19,27 +25,30 @@ def main():
     os.environ["TRANSCRIPTION_MODEL"] = args.whisper_model
     os.environ["PARAKEET_MODEL"] = args.parakeet_model
 
+    log("Initializing IngestionService...")
     svc = IngestionService()
     svc._ensure_device()
 
-    print(f"Device: {svc.device}")
+    log(f"Device: {svc.device}")
 
     if args.engine in {"auto", "whisper"}:
-        print(f"Preloading Whisper model: {args.whisper_model}")
+        log(f"Preloading Whisper model: {args.whisper_model} (this may download ~1 GB on first run)...")
+        t0 = time.time()
         svc._load_whisper_model(job_id=None)
-        print("Whisper model ready.")
+        log(f"Whisper model ready. ({time.time() - t0:.1f}s)")
 
     if args.engine in {"auto", "parakeet"}:
         try:
-            print(f"Preloading Parakeet model: {args.parakeet_model}")
+            log(f"Preloading Parakeet model: {args.parakeet_model} (this may download ~2 GB on first run)...")
+            t0 = time.time()
             svc._load_parakeet_model(job_id=None)
-            print("Parakeet model ready.")
+            log(f"Parakeet model ready. ({time.time() - t0:.1f}s)")
         except Exception as e:
-            print(f"Parakeet preload skipped: {e}")
+            log(f"Parakeet preload skipped: {e}")
             if args.engine == "parakeet":
                 raise
 
-    print("Done.")
+    log("Done.")
 
 
 if __name__ == "__main__":

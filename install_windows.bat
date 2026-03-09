@@ -134,7 +134,7 @@ IF "%SKIP_MODEL_PRELOAD%"=="1" (
 ) ELSE (
   echo [8/8] Preloading ASR models ^(engine=%PRELOAD_ENGINE%^)...
   cd /d "%BACKEND_DIR%"
-  "%VENV_PYTHON%" preload_models.py --engine "%PRELOAD_ENGINE%"
+  "%VENV_PYTHON%" -u preload_models.py --engine "%PRELOAD_ENGINE%"
 )
 
 IF DEFINED OLLAMA_MODELS (

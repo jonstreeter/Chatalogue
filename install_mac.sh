@@ -104,7 +104,7 @@ else
   echo "[8/8] Preloading ASR models (engine=$PRELOAD_ENGINE)..."
   (
     cd "$BACKEND_DIR"
-    "$VENV_PYTHON" preload_models.py --engine "$PRELOAD_ENGINE"
+    "$VENV_PYTHON" -u preload_models.py --engine "$PRELOAD_ENGINE"
   )
 fi
 
