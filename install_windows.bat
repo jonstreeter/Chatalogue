@@ -1,9 +1,27 @@
 @echo off
+if "%~1"=="--internal" goto :core_install
+
+SET "LOGFILE=install_%DATE:~-4,4%%DATE:~-10,2%%DATE:~-7,2%.log"
+echo [Chatalogue] Installing with log: %LOGFILE%
+REM Use Python for unbuffered tee (PowerShell Tee-Object buffers and causes hangs)
+where py >nul 2>&1 && (
+  cmd /c ""%~f0" --internal" 2>&1 | py -3 -u -c "import sys; f=open('%LOGFILE%','w',encoding='utf-8'); [((sys.stdout.write(l),sys.stdout.flush(),f.write(l),f.flush()) if l else None) for l in sys.stdin]; f.close()"
+  exit /b %ERRORLEVEL%
+)
+where python >nul 2>&1 && (
+  cmd /c ""%~f0" --internal" 2>&1 | python -u -c "import sys; f=open('%LOGFILE%','w',encoding='utf-8'); [((sys.stdout.write(l),sys.stdout.flush(),f.write(l),f.flush()) if l else None) for l in sys.stdin]; f.close()"
+  exit /b %ERRORLEVEL%
+)
+REM Fallback: no Python available yet, run without logging
+echo [WARN] Python not found in PATH. Install log will not be created.
+call "%~f0" --internal
+exit /b %ERRORLEVEL%
+
+:core_install
 SETLOCAL EnableDelayedExpansion
-SET "INSTALLER_VERSION=2026-03-09.1"
+SET "INSTALLER_VERSION=2026-03-09.2"
 
 echo [Chatalogue Installer] Windows bootstrap v%INSTALLER_VERSION%
-echo To save a log: install_windows.bat ^> install.log 2^>^&1
 echo.
 
 SET "SCRIPT_DIR=%~dp0"

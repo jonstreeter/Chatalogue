@@ -217,6 +217,7 @@ def ensure_embedded_postgres() -> None:
     pg_ctl_bin = _binary_path(bin_dir, "pg_ctl")
 
     if not (data_dir / "PG_VERSION").exists():
+        print(f"[postgres] Initializing database cluster in {data_dir} ...", flush=True)
         env = os.environ.copy()
         if password:
             env["PGPASSWORD"] = password
@@ -235,8 +236,10 @@ def ensure_embedded_postgres() -> None:
             env=env,
             timeout_seconds=180,
         )
+        print("[postgres] Database cluster initialized.", flush=True)
 
     log_path = RUNTIME_DIR / "postgres.log"
+    print(f"[postgres] Starting PostgreSQL on {host}:{port} ...", flush=True)
     start_cmd = [
         str(pg_ctl_bin),
         "-D",
@@ -255,6 +258,7 @@ def ensure_embedded_postgres() -> None:
     if not _wait_for_port(host, port, timeout_seconds=30):
         raise EmbeddedPostgresError(f"Embedded PostgreSQL did not open {host}:{port} in time.")
 
+    print(f"[postgres] PostgreSQL is ready on port {port}.", flush=True)
     _ensure_database_exists(host, port, user, database)
 
 
