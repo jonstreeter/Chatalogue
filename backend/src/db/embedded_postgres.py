@@ -102,6 +102,7 @@ def _download_and_extract_binaries(bin_dir: Path) -> None:
     if marker.exists() and _binary_path(bin_dir, "postgres").exists():
         return
 
+    print(f"[postgres] Downloading embedded PostgreSQL binaries from {jar_url} ...", flush=True)
     with tempfile.TemporaryDirectory(prefix="chatalogue-pg-") as tmp:
         tmp_dir = Path(tmp)
         jar_path = tmp_dir / "postgres-binaries.jar"
@@ -109,6 +110,7 @@ def _download_and_extract_binaries(bin_dir: Path) -> None:
 
         with urlopen(jar_url, timeout=120) as resp, open(jar_path, "wb") as out:
             out.write(resp.read())
+        print("[postgres] Download complete. Extracting...", flush=True)
 
         with zipfile.ZipFile(jar_path, "r") as zf:
             txz_entries = [n for n in zf.namelist() if n.endswith(".txz")]
@@ -136,6 +138,7 @@ def _download_and_extract_binaries(bin_dir: Path) -> None:
                     path.chmod(path.stat().st_mode | 0o111)
 
         marker.write_text(f"{artifact}:{version}", encoding="utf-8")
+        print("[postgres] Binaries extracted.", flush=True)
 
 
 def _ensure_binaries() -> Path:

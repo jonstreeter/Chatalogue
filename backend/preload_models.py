@@ -14,15 +14,10 @@ os.environ.setdefault("WANDB_MODE", "disabled")
 # Disable NeMo/NV telemetry that can stall on first run
 os.environ.setdefault("NEMO_TELEMETRY_ENABLED", "0")
 os.environ.setdefault("NV_ONE_LOGGER_ENABLED", "0")
+# Skip embedded postgres during preload — models don't need a database
+os.environ.setdefault("EMBEDDED_PG_ENABLED", "false")
 
 print("[preload] Loading modules...", flush=True)
-print("[preload]   importing yt_dlp...", flush=True)
-import yt_dlp  # noqa: F401
-print("[preload]   importing sqlmodel...", flush=True)
-import sqlmodel  # noqa: F401
-print("[preload]   importing dotenv...", flush=True)
-import dotenv  # noqa: F401
-print("[preload]   importing IngestionService...", flush=True)
 from src.services.ingestion import IngestionService
 print("[preload] Modules loaded.", flush=True)
 
