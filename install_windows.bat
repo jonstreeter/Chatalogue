@@ -3,10 +3,8 @@ if "%~1"=="--internal" goto :core_install
 
 SET "LOGFILE=install_%DATE:~-4,4%%DATE:~-10,2%%DATE:~-7,2%.log"
 echo [Chatalogue] Initializing installer with logging ^(saving to %LOGFILE%^)...
-call "%~f0" --internal > "%LOGFILE%" 2>&1
-SET "EXIT_CODE=%ERRORLEVEL%"
-type "%LOGFILE%"
-exit /b %EXIT_CODE%
+powershell -NoProfile -Command "cmd /c '\"%~f0\" --internal' 2>&1 | Tee-Object -FilePath '%LOGFILE%'; exit $LASTEXITCODE"
+exit /b %ERRORLEVEL%
 
 :core_install
 SETLOCAL EnableDelayedExpansion
