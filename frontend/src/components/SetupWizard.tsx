@@ -2,13 +2,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { X, Eye, EyeOff, CheckCircle2, AlertTriangle, Loader2, ExternalLink, ChevronRight, ChevronLeft, Cpu, Zap, Globe, Server, Download } from 'lucide-react';
 import api from '../lib/api';
 
-type WizardStep = 'welcome' | 'hf_token' | 'transcription' | 'llm' | 'complete';
+type WizardStep = 'welcome' | 'transcription' | 'hf_token' | 'llm' | 'complete';
 
-const STEPS: WizardStep[] = ['welcome', 'hf_token', 'transcription', 'llm', 'complete'];
+const STEPS: WizardStep[] = ['welcome', 'transcription', 'hf_token', 'llm', 'complete'];
 const STEP_LABELS: Record<WizardStep, string> = {
   welcome: 'Welcome',
-  hf_token: 'Diarization',
   transcription: 'Transcription',
+  hf_token: 'Diarization',
   llm: 'LLM',
   complete: 'Done',
 };
@@ -107,6 +107,8 @@ export function SetupWizard({ onClose, onComplete }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const [maxVisitedIndex, setMaxVisitedIndex] = useState(0);
+
   // Step-specific state
   const [gpuInfo, setGpuInfo] = useState<{ gpu_name?: string; vram_gb?: number } | null>(null);
   const [hwRecommendation, setHwRecommendation] = useState<HwRecommendation | null>(null);
@@ -199,12 +201,21 @@ export function SetupWizard({ onClose, onComplete }: Props) {
   };
 
   const goNext = () => {
-    const next = STEPS[currentIndex + 1];
-    if (next) setStep(next);
+    const nextIdx = currentIndex + 1;
+    const next = STEPS[nextIdx];
+    if (next) {
+      setStep(next);
+      setMaxVisitedIndex(prev => Math.max(prev, nextIdx));
+    }
   };
   const goBack = () => {
     const prev = STEPS[currentIndex - 1];
     if (prev) setStep(prev);
+  };
+  const goToStep = (idx: number) => {
+    if (idx <= maxVisitedIndex && idx >= 0 && idx < STEPS.length) {
+      setStep(STEPS[idx]);
+    }
   };
 
   const handleValidateToken = async () => {
@@ -434,23 +445,41 @@ export function SetupWizard({ onClose, onComplete }: Props) {
             </button>
           </div>
           <div className="flex items-center gap-1">
-            {STEPS.map((s, i) => (
-              <div key={s} className="flex items-center flex-1">
-                <div className={`flex items-center justify-center w-7 h-7 rounded-full text-xs font-semibold transition-colors ${
-                  i < currentIndex ? 'bg-green-500 text-white' :
-                  i === currentIndex ? 'bg-rose-500 text-white' :
-                  'bg-slate-200 text-slate-500'
-                }`}>
-                  {i < currentIndex ? <CheckCircle2 size={16} /> : i + 1}
+            {STEPS.map((s, i) => {
+              const canNavigate = i <= maxVisitedIndex && i !== currentIndex;
+              return (
+                <div key={s} className="flex items-center flex-1">
+                  <button
+                    type="button"
+                    onClick={() => canNavigate && goToStep(i)}
+                    disabled={!canNavigate}
+                    className={`flex items-center justify-center w-7 h-7 rounded-full text-xs font-semibold transition-colors ${
+                      i < currentIndex ? 'bg-green-500 text-white' :
+                      i === currentIndex ? 'bg-rose-500 text-white' :
+                      i <= maxVisitedIndex ? 'bg-green-500 text-white' :
+                      'bg-slate-200 text-slate-500'
+                    } ${canNavigate ? 'cursor-pointer hover:ring-2 hover:ring-offset-1 hover:ring-rose-300' : i === currentIndex ? '' : 'cursor-default'}`}
+                  >
+                    {i < currentIndex || (i <= maxVisitedIndex && i !== currentIndex) ? <CheckCircle2 size={16} /> : i + 1}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => canNavigate && goToStep(i)}
+                    disabled={!canNavigate}
+                    className={`ml-1.5 text-xs font-medium hidden sm:inline ${
+                      i === currentIndex ? 'text-rose-600' :
+                      canNavigate ? 'text-slate-500 hover:text-rose-600 cursor-pointer' :
+                      'text-slate-400'
+                    }`}
+                  >
+                    {STEP_LABELS[s]}
+                  </button>
+                  {i < STEPS.length - 1 && (
+                    <div className={`flex-1 h-0.5 mx-2 rounded ${i < currentIndex || i < maxVisitedIndex ? 'bg-green-300' : 'bg-slate-200'}`} />
+                  )}
                 </div>
-                <span className={`ml-1.5 text-xs font-medium hidden sm:inline ${
-                  i === currentIndex ? 'text-rose-600' : 'text-slate-400'
-                }`}>{STEP_LABELS[s]}</span>
-                {i < STEPS.length - 1 && (
-                  <div className={`flex-1 h-0.5 mx-2 rounded ${i < currentIndex ? 'bg-green-300' : 'bg-slate-200'}`} />
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 
@@ -909,6 +938,16 @@ export function SetupWizard({ onClose, onComplete }: Props) {
 
               <div className="text-left max-w-sm mx-auto space-y-3 mb-6">
                 <div className="flex items-center gap-3 p-3 rounded-lg bg-slate-50">
+                  <CheckCircle2 size={20} className="text-green-600 flex-shrink-0" />
+                  <div>
+                    <div className="text-sm font-medium text-slate-900">Transcription</div>
+                    <div className="text-xs text-slate-500">
+                      Engine: {engine}{engine === 'whisper' || engine === 'auto' ? ` / Model: ${whisperModel}` : ''}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 p-3 rounded-lg bg-slate-50">
                   {hfToken && !hfSkipped ? (
                     <CheckCircle2 size={20} className="text-green-600 flex-shrink-0" />
                   ) : (
@@ -918,16 +957,6 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                     <div className="text-sm font-medium text-slate-900">Speaker Diarization</div>
                     <div className="text-xs text-slate-500">
                       {hfToken && !hfSkipped ? 'HuggingFace token configured' : 'Skipped — single speaker mode'}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3 p-3 rounded-lg bg-slate-50">
-                  <CheckCircle2 size={20} className="text-green-600 flex-shrink-0" />
-                  <div>
-                    <div className="text-sm font-medium text-slate-900">Transcription</div>
-                    <div className="text-xs text-slate-500">
-                      Engine: {engine}{engine === 'whisper' || engine === 'auto' ? ` / Model: ${whisperModel}` : ''}
                     </div>
                   </div>
                 </div>
