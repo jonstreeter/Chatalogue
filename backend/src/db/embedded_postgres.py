@@ -163,13 +163,25 @@ def _ensure_binaries() -> Path:
     return bin_dir
 
 
-def _run(cmd: list[str], *, env: Optional[dict[str, str]] = None, timeout_seconds: int = 120) -> None:
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout_seconds)
+def _run(cmd: list[str], *, env: Optional[dict[str, str]] = None, timeout_seconds: int = 120, detach_child: bool = False) -> None:
+    kwargs: dict[str, object] = {"text": True, "env": env, "timeout": timeout_seconds}
+    if detach_child and _is_windows():
+        # On Windows, pg_ctl start spawns postgres as a child that inherits
+        # stdout/stderr pipes. capture_output keeps the pipes open waiting for
+        # ALL child processes to close them, causing subprocess.run to hang
+        # even after pg_ctl itself exits. Use CREATE_NEW_PROCESS_GROUP and
+        # redirect to DEVNULL so the pipe isn't inherited.
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["capture_output"] = True
+    result = subprocess.run(cmd, **kwargs)
     if result.returncode != 0:
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
+        stdout = getattr(result, "stdout", "") or ""
+        stderr = getattr(result, "stderr", "") or ""
         raise EmbeddedPostgresError(
-            f"Command failed ({result.returncode}): {' '.join(cmd)}\nstdout: {stdout}\nstderr: {stderr}"
+            f"Command failed ({result.returncode}): {' '.join(cmd)}\nstdout: {stdout.strip()}\nstderr: {stderr.strip()}"
         )
 
 
@@ -253,7 +265,7 @@ def ensure_embedded_postgres() -> None:
         f"-h {host} -p {port}",
         "start",
     ]
-    _run(start_cmd, timeout_seconds=120)
+    _run(start_cmd, timeout_seconds=120, detach_child=True)
 
     if not _wait_for_port(host, port, timeout_seconds=30):
         raise EmbeddedPostgresError(f"Embedded PostgreSQL did not open {host}:{port} in time.")
