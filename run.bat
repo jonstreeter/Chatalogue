@@ -22,6 +22,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 :: Kill frontend dev server wrappers/processes by command line (vite/npm dev)
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$frontend='%FRONTEND_DIR%'; Get-CimInstance Win32_Process | Where-Object { (($_.Name -ieq 'node.exe') -or ($_.Name -ieq 'cmd.exe')) -and $_.CommandLine -like ('*' + $frontend + '*') -and ($_.CommandLine -like '*vite*' -or $_.CommandLine -like '*npm*run*dev*') } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }" >nul 2>&1
+:: Kill stale embedded postgres processes tied to this repo data dir
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$pgData='%BACKEND_DIR%\data\postgres'; $pgDataFwd=($pgData -replace '\\','/'); Get-CimInstance Win32_Process | Where-Object { $_.Name -ieq 'postgres.exe' -and (($_.CommandLine -like ('*' + $pgData + '*')) -or ($_.CommandLine -like ('*' + $pgDataFwd + '*')) -or ($_.CommandLine -like '*embedded-postgres-binaries*')) } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }" >nul 2>&1
 :: Also kill by port in case window titles don't match
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":%BACKEND_PORT%.*LISTENING" 2^>nul') do (
     taskkill /F /T /PID %%a >nul 2>&1
@@ -66,9 +69,15 @@ start /B "" cmd.exe /c ""%VENV_PYTHON%" -m uvicorn src.main:app --app-dir "%BACK
 :: Wait for backend readiness before starting frontend
 echo Waiting for backend to become ready (first run may take a few minutes to set up PostgreSQL)...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$url='http://127.0.0.1:%BACKEND_PORT%/system/worker-status'; $deadline=(Get-Date).AddSeconds(300); $ok=$false; while((Get-Date)-lt $deadline){ try { $r=Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 300){ $ok=$true; break } } catch {} Start-Sleep -Milliseconds 800 }; if(-not $ok){ exit 1 }"
+  "$url='http://127.0.0.1:%BACKEND_PORT%/system/worker-status'; $log='%BACKEND_LOG%'; $deadline=(Get-Date).AddSeconds(420); $ok=$false; $fatal=$false; while((Get-Date)-lt $deadline){ try { $r=Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 300){ $ok=$true; break } } catch {}; if(Test-Path $log){ try { $tail=((Get-Content -Path $log -Tail 120 -ErrorAction SilentlyContinue) -join [Environment]::NewLine); if(($tail -match 'Traceback \\(most recent call last\\)') -or ($tail -match 'ConnectionTimeout') -or ($tail -match 'connection timeout expired') -or ($tail -match 'did not become query-ready in time') -or ($tail -match 'pre-existing shared memory block is still in use')){ $fatal=$true; break } } catch {} }; Start-Sleep -Milliseconds 800 }; if($ok){ exit 0 }; if($fatal){ exit 2 }; exit 1"
 IF !ERRORLEVEL! NEQ 0 (
-    echo Backend did not become ready in time.
+    IF !ERRORLEVEL! EQU 2 (
+        echo Backend failed during startup.
+        echo Recent backend log:
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "if(Test-Path '%BACKEND_LOG%'){ Get-Content -Path '%BACKEND_LOG%' -Tail 80 }"
+    ) ELSE (
+        echo Backend did not become ready in time.
+    )
     echo Check backend logs/terminal, then re-run this script.
     pause
     exit /b 1

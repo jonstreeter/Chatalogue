@@ -345,13 +345,17 @@ export function SetupWizard({ onClose, onComplete }: Props) {
         res = await api.post('/settings/test-hosted-llm');
       }
       const d = res.data;
+      const status = String(d?.status || '').toLowerCase();
+      const success = Boolean(d?.success) || status === 'ok';
+      const errorText = String(d?.error || d?.detail || '').trim();
       setLlmTest({
-        success: d.success || d.status === 'ok',
+        success,
         model: d.model || d.model_used,
-        error: d.success === false ? (d.error || 'Connection failed') : undefined,
+        error: success ? undefined : (errorText || 'Connection test failed. Check provider settings and server logs.'),
       });
     } catch (e: any) {
-      setLlmTest({ success: false, error: e.response?.data?.detail || 'Test failed' });
+      const detail = String(e?.response?.data?.error || e?.response?.data?.detail || e?.message || '').trim();
+      setLlmTest({ success: false, error: detail || 'Test failed' });
     } finally {
       setTestingLlm(false);
     }

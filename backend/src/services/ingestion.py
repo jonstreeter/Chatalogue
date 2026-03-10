@@ -1116,6 +1116,43 @@ class IngestionService:
             else:
                 log("Released diarization/embedding models from GPU memory.")
 
+    def purge_loaded_models(self, reason: str = "manual"):
+        """Best-effort runtime purge of loaded ML models and CUDA fault state.
+
+        This is used by restart/reload controls so a user can recover GPU memory
+        and allow Parakeet retries without needing a full machine reboot.
+        """
+        had_whisper = self.whisper_model is not None
+        had_parakeet = self.parakeet_model is not None
+        had_diar = any([
+            self.diarization_pipeline is not None,
+            self.embedding_model is not None,
+            self.embedding_inference is not None,
+        ])
+
+        self._release_parakeet_model(reason)
+        self._release_whisper_model(reason)
+        self._release_diarization_models(reason)
+
+        # Reset runtime state so next job re-detects device and can attempt
+        # Parakeet again after a previous CUDA unhealthy fallback.
+        self._force_float32 = False
+        self._whisper_compute_type = None
+        self._whisper_device = None
+        self._parakeet_dynamic_batch_cap = None
+        self._cuda_unhealthy_reason = None
+        self._cuda_unhealthy_since = None
+        self.device = None
+        self._gpu_total_vram_bytes = 0
+        self._cuda_memory_fraction_applied = None
+        gc.collect()
+
+        return {
+            "purged_whisper": had_whisper,
+            "purged_parakeet": had_parakeet,
+            "purged_diarization": had_diar,
+        }
+
     def _resolve_parakeet_batch_size(self, requested_batch_size: int) -> int:
         requested = max(1, min(int(requested_batch_size or 1), 64))
         dynamic_cap = self._parakeet_dynamic_batch_cap
@@ -1685,10 +1722,54 @@ class IngestionService:
     def _parakeet_oom_chunk_retry_enabled(self) -> bool:
         return (os.getenv("PARAKEET_OOM_CHUNK_RETRY", "true").strip().lower() == "true")
 
-    def _resolve_parakeet_oom_chunk_settings(self) -> tuple[int, int, float]:
+    def _resolve_parakeet_initial_chunk_seconds(self, total_duration_seconds: float | None = None) -> int:
+        """Choose a safer initial Parakeet chunk size for long episodes.
+
+        The default env chunk can be too aggressive on long-form videos, which increases
+        the chance of repeated OOM/backoff churn and eventual CUDA instability.
+        """
+        try:
+            base_chunk = int(os.getenv("PARAKEET_OOM_CHUNK_SECONDS", "600"))
+        except Exception:
+            base_chunk = 600
+        base_chunk = max(120, min(base_chunk, 3600))
+
+        duration = float(total_duration_seconds or 0.0)
+        if duration <= 0:
+            return base_chunk
+
+        # Conservative defaults for long content.
+        if duration >= 7200:
+            target = 150
+        elif duration >= 5400:
+            target = 180
+        elif duration >= 3600:
+            target = 240
+        elif duration >= 1800:
+            target = 300
+        else:
+            target = base_chunk
+
+        # Under tighter free-memory headroom, bias lower.
+        if self.device == "cuda":
+            snap = self._cuda_memory_snapshot()
+            free_b = int(snap.get("free") or 0)
+            total_b = int(snap.get("total") or 0)
+            if total_b > 0 and free_b > 0:
+                free_ratio = float(free_b) / float(total_b)
+                if free_ratio < 0.22:
+                    target = min(target, 120)
+                elif free_ratio < 0.30:
+                    target = min(target, 150)
+                elif free_ratio < 0.40:
+                    target = min(target, 180)
+
+        return max(120, min(base_chunk, int(target)))
+
+    def _resolve_parakeet_oom_chunk_settings(self, total_duration_seconds: float | None = None) -> tuple[int, int, float]:
         """Return (chunk_seconds, min_chunk_seconds, overlap_seconds) for OOM chunk fallback."""
         try:
-            chunk_seconds = int(os.getenv("PARAKEET_OOM_CHUNK_SECONDS", "600"))
+            chunk_seconds = int(self._resolve_parakeet_initial_chunk_seconds(total_duration_seconds))
         except Exception:
             chunk_seconds = 600
         try:
@@ -1705,12 +1786,37 @@ class IngestionService:
         overlap_seconds = max(0.0, min(overlap_seconds, 2.0))
         return chunk_seconds, min_chunk_seconds, overlap_seconds
 
+    def _resolve_parakeet_chunk_recycle_every(self, total_duration_seconds: float) -> int:
+        """Return chunk cadence for Parakeet model recycle during long chunked runs.
+
+        Recycling periodically reduces cumulative CUDA fragmentation/state drift on
+        long episodes without forcing unloads between every episode.
+        """
+        raw = (os.getenv("PARAKEET_CHUNK_MODEL_RECYCLE_EVERY") or "").strip()
+        if raw:
+            try:
+                return max(0, min(int(raw), 200))
+            except Exception:
+                pass
+        if self.device != "cuda":
+            return 0
+        if total_duration_seconds >= 7200:
+            return 6
+        if total_duration_seconds >= 5400:
+            return 8
+        if total_duration_seconds >= 3600:
+            return 10
+        if total_duration_seconds >= 1800:
+            return 14
+        return 0
+
     def _transcribe_with_parakeet_in_chunks(self, audio_path: Path, start_time_offset: float = 0.0, job_id: int = None):
         total_duration = float(self._probe_audio_duration_seconds(audio_path) or 0.0)
         if total_duration <= 0:
             raise RuntimeError("Could not determine audio duration for Parakeet chunk fallback.")
 
-        chunk_seconds, min_chunk_seconds, overlap_seconds = self._resolve_parakeet_oom_chunk_settings()
+        chunk_seconds, min_chunk_seconds, overlap_seconds = self._resolve_parakeet_oom_chunk_settings(total_duration)
+        recycle_every = self._resolve_parakeet_chunk_recycle_every(total_duration)
         log(
             f"Retrying Parakeet in chunked mode "
             f"(chunk={chunk_seconds}s, min={min_chunk_seconds}s, overlap={overlap_seconds:.2f}s)."
@@ -1722,6 +1828,7 @@ class IngestionService:
                 "parakeet_chunk_seconds_initial": int(chunk_seconds),
                 "parakeet_chunk_min_seconds": int(min_chunk_seconds),
                 "parakeet_chunk_overlap_seconds": float(overlap_seconds),
+                "parakeet_chunk_recycle_every": int(recycle_every),
             },
         )
 
@@ -1731,6 +1838,18 @@ class IngestionService:
 
         while chunk_start < total_duration - 0.01:
             chunk_index += 1
+
+            if recycle_every > 0 and chunk_index > 1 and ((chunk_index - 1) % recycle_every == 0):
+                if job_id:
+                    est_chunks = max(1, int(total_duration // max(1, chunk_seconds)) + 1)
+                    self._update_job_status_detail(
+                        job_id,
+                        f"Refreshing Parakeet model for stability (chunk {chunk_index}/{est_chunks})..."
+                    )
+                self._release_parakeet_model("chunk_recycle")
+                self._clear_cuda_cache()
+                gc.collect()
+
             remaining = max(0.0, total_duration - chunk_start)
             attempt_chunk_seconds = min(chunk_seconds, remaining)
 
@@ -1759,6 +1878,9 @@ class IngestionService:
                         ]
                     segments.extend(chunk_segments)
                     chunk_seconds = min(chunk_seconds, attempt_chunk_seconds)
+                    # Keep GPU memory pressure stable over long chunk loops.
+                    self._clear_cuda_cache()
+                    gc.collect()
                     break
                 except Exception as e:
                     if self._is_cuda_oom(e) and attempt_chunk_seconds > min_chunk_seconds:
@@ -6239,9 +6361,33 @@ class IngestionService:
                 if self.parakeet_model is None:
                     self._record_job_stage_start(job_id, "model_load")
                 self._update_job_status_detail(job_id, "Transcribing with NVIDIA Parakeet...")
-                parakeet_segments, parakeet_duration = self._transcribe_with_parakeet(
-                    transcribe_path, start_time_offset=start_time_offset, job_id=job_id
+                remaining_duration = float(self._probe_audio_duration_seconds(transcribe_path) or 0.0)
+                force_chunked_for_long = (
+                    os.getenv("PARAKEET_LONG_AUDIO_FORCE_CHUNKED", "true").strip().lower() == "true"
                 )
+                if (
+                    force_chunked_for_long
+                    and self.device == "cuda"
+                    and remaining_duration >= float(os.getenv("PARAKEET_LONG_AUDIO_SECONDS", "1800"))
+                ):
+                    self._upsert_job_payload_fields(
+                        job_id,
+                        {
+                            "parakeet_long_audio_chunked": True,
+                            "parakeet_long_audio_seconds": int(round(remaining_duration)),
+                        },
+                    )
+                    self._update_job_status_detail(
+                        job_id,
+                        "Long audio detected. Using stable Parakeet chunk mode..."
+                    )
+                    parakeet_segments, parakeet_duration = self._transcribe_with_parakeet_in_chunks(
+                        transcribe_path, start_time_offset=start_time_offset, job_id=job_id
+                    )
+                else:
+                    parakeet_segments, parakeet_duration = self._transcribe_with_parakeet(
+                        transcribe_path, start_time_offset=start_time_offset, job_id=job_id
+                    )
                 transcribe_engine_used = "parakeet"
                 self._upsert_job_payload_fields(job_id, {"transcription_engine_used": "parakeet"})
                 est_total_duration = (

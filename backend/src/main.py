@@ -5197,13 +5197,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     # 4. Reload models in ingestion service
     if ingestion_service:
         print("Reloading models with new settings...")
-        ingestion_service.diarization_pipeline = None
-        ingestion_service.embedding_model = None
-        ingestion_service.embedding_inference = None
-        ingestion_service.whisper_model = None
-        ingestion_service.parakeet_model = None
-        ingestion_service._whisper_compute_type = None
-        ingestion_service._force_float32 = False
+        _purge_runtime_models(reason="settings_updated")
         
     return {"status": "updated"}
 
@@ -6032,6 +6026,34 @@ def _safe_stderr(proc: subprocess.CompletedProcess) -> str:
     return (proc.stderr or "").strip()
 
 
+def _purge_runtime_models(reason: str = "manual_restart") -> dict:
+    if not ingestion_service:
+        return {"ok": False, "detail": "ingestion service unavailable"}
+    try:
+        if hasattr(ingestion_service, "purge_loaded_models"):
+            details = ingestion_service.purge_loaded_models(reason=reason)
+            return {"ok": True, **(details or {})}
+    except Exception as e:
+        return {"ok": False, "detail": str(e)}
+
+    # Backward-compatible fallback path.
+    try:
+        ingestion_service.diarization_pipeline = None
+        ingestion_service.embedding_model = None
+        ingestion_service.embedding_inference = None
+        ingestion_service.whisper_model = None
+        ingestion_service.parakeet_model = None
+        ingestion_service._whisper_compute_type = None
+        ingestion_service._force_float32 = False
+        ingestion_service._cuda_unhealthy_reason = None
+        ingestion_service._cuda_unhealthy_since = None
+        ingestion_service._parakeet_dynamic_batch_cap = None
+        ingestion_service.device = None
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "detail": str(e)}
+
+
 def _get_system_version_info(check_remote: bool = True) -> dict:
     repo_root = _repo_root_path()
     info = {
@@ -6139,11 +6161,18 @@ def get_system_version(check_remote: bool = True):
 
 @app.post("/system/restart")
 def restart_server():
-    """Trigger a server restart by touching main.py so StatReload picks it up."""
+    """Purge loaded models and trigger a server restart when reload mode is active."""
     import time as _time
+
+    purge_result = _purge_runtime_models(reason="system_restart")
     main_file = Path(__file__)
     main_file.touch()
-    return {"status": "restarting", "touched": str(main_file), "timestamp": _time.time()}
+    return {
+        "status": "restarting",
+        "model_purge": purge_result,
+        "touched": str(main_file),
+        "timestamp": _time.time(),
+    }
 
 
 @app.post("/system/update")
@@ -6173,12 +6202,15 @@ def update_and_restart_server():
     new_head = _safe_stdout(new_head_p) if new_head_p.returncode == 0 else old_head
     updated = bool(new_head and old_head and new_head != old_head)
 
+    purge_result = _purge_runtime_models(reason="system_update")
+
     # Trigger existing restart mechanism.
     main_file = Path(__file__)
     main_file.touch()
     return {
         "status": "restarting",
         "updated": updated,
+        "model_purge": purge_result,
         "old_head": old_head or None,
         "new_head": new_head or None,
         "branch": branch,
