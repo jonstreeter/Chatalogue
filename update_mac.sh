@@ -43,14 +43,15 @@ if [ ! -x "$VENV_PYTHON" ]; then
   echo "[WARN] Backend venv not found. Run install_mac.sh first."
   exit 1
 fi
-"$PIP_CMD" install --upgrade fastapi uvicorn yt-dlp python-dotenv sqlmodel aiosqlite psycopg[binary] "setuptools<81" faster-whisper "ctranslate2<4.6" python-multipart sympy
+"$PIP_CMD" install --upgrade --quiet fastapi uvicorn yt-dlp python-dotenv sqlmodel aiosqlite psycopg[binary] "setuptools<81" faster-whisper "ctranslate2<4.6" python-multipart sympy
+echo "   Backend dependencies up to date."
 
 # Update frontend dependencies
 echo
 echo "[3/4] Updating frontend dependencies..."
 (
   cd "$FRONTEND_DIR"
-  npm install
+  npm install --fund=false --audit=false --loglevel=warn
 )
 
 # Done
