@@ -703,7 +703,7 @@ export function VideoDetailPage() {
         let i = text.toLowerCase().indexOf(searchLower, lastIdx);
         while (i !== -1) {
             if (i > lastIdx) parts.push(text.slice(lastIdx, i));
-            parts.push(<mark key={i} className="bg-yellow-200 text-yellow-900 rounded px-0.5">{text.slice(i, i + searchLower.length)}</mark>);
+            parts.push(<mark key={i} className="bg-yellow-200 text-yellow-900 rounded-sm">{text.slice(i, i + searchLower.length)}</mark>);
             lastIdx = i + searchLower.length;
             i = text.toLowerCase().indexOf(searchLower, lastIdx);
         }
@@ -2033,7 +2033,7 @@ export function VideoDetailPage() {
                                                 id={`seg-${seg.id}`}
                                                 data-start={seg.start_time}
                                                 data-end={seg.end_time}
-                                                className={`p-3 rounded-lg text-sm transition-all cursor-pointer border relative group ${isActiveMatch
+                                                className={`p-3 rounded-lg text-sm transition-colors cursor-pointer border relative group ${isActiveMatch
                                                     ? 'bg-yellow-50 border-yellow-300 ring-1 ring-yellow-200 shadow-sm'
                                                     : isActiveSegment
                                                         ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100'
@@ -2172,20 +2172,21 @@ export function VideoDetailPage() {
                                                         </div>
                                                     </div>
                                                 ) : (
-                                                    <p className="text-slate-700 leading-relaxed">
-                                                        {wordsFn.length > 0 && isActiveSegment ? (
+                                                    <p className="text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
+                                                        {wordsFn.length > 0 ? (
                                                             wordsFn.map((w: any, idx: number) => {
                                                                 const isWordActive = currentTime >= w.start && currentTime < w.end;
                                                                 return (
                                                                     <span
                                                                         key={idx}
-                                                                        className={`inline-block mr-1 px-0.5 rounded transition-colors duration-100 ${isWordActive ? 'bg-blue-200/90 text-blue-900 shadow-[inset_0_0_0_1px_rgba(59,130,246,0.35)]' : 'hover:bg-slate-200'}`}
+                                                                        className={`inline align-baseline transition-colors duration-100 ${isWordActive ? 'bg-blue-200/80 text-blue-900 rounded-sm' : ''}`}
                                                                         onClick={(e) => {
                                                                             e.stopPropagation();
                                                                             handleSeek(w.start);
                                                                         }}
                                                                     >
                                                                         {searchLower ? highlightText(w.word) : w.word}
+                                                                        {idx < wordsFn.length - 1 ? ' ' : ''}
                                                                     </span>
                                                                 );
                                                             })
