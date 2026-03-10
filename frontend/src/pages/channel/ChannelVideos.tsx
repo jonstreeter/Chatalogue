@@ -121,22 +121,13 @@ export function ChannelVideos() {
             );
         }
 
-        // 2. Filter by status (progressive — "downloaded" means "at least downloaded")
+        // 2. Filter by status categories
         if (statusFilters.size > 0) {
-            const statusRank: Record<string, number> = {
-                pending: 0, downloading: 1, downloaded: 2,
-                transcribing: 3, diarizing: 4, completed: 5,
-            };
             result = result.filter(v => {
                 const effective = v.processed ? 'completed' : (v.status || 'pending');
-                const rank = statusRank[effective] ?? -1;
-                // "failed" is a special case — exact match only
+                if (statusFilters.has('completed') && v.processed) return true;
                 if (statusFilters.has('failed') && effective === 'failed') return true;
-                // For progressive statuses, include if video has reached at least that stage
-                for (const f of statusFilters) {
-                    if (f === 'failed') continue;
-                    if (rank >= (statusRank[f] ?? 0)) return true;
-                }
+                if (statusFilters.has('unprocessed') && !v.processed && effective !== 'failed') return true;
                 return false;
             });
         }
@@ -349,19 +340,13 @@ export function ChannelVideos() {
                     <div className="flex items-center gap-2">
                         <Filter size={14} className="text-slate-400 shrink-0" />
                         {[
-                            { key: 'pending', label: 'Pending', color: 'slate' },
-                            { key: 'downloaded', label: 'Downloaded', color: 'cyan' },
-                            { key: 'transcribing', label: 'Transcribing', color: 'amber' },
-                            { key: 'diarizing', label: 'Diarizing', color: 'purple' },
+                            { key: 'unprocessed', label: 'Unprocessed', color: 'slate' },
                             { key: 'completed', label: 'Completed', color: 'green' },
                             { key: 'failed', label: 'Failed', color: 'red' },
                         ].map(({ key, label, color }) => {
                             const active = statusFilters.has(key);
                             const colorMap: Record<string, string> = {
                                 slate: active ? 'bg-slate-500 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200',
-                                cyan: active ? 'bg-cyan-500 text-white' : 'bg-cyan-50 text-cyan-600 hover:bg-cyan-100',
-                                amber: active ? 'bg-amber-500 text-white' : 'bg-amber-50 text-amber-600 hover:bg-amber-100',
-                                purple: active ? 'bg-purple-500 text-white' : 'bg-purple-50 text-purple-600 hover:bg-purple-100',
                                 green: active ? 'bg-green-500 text-white' : 'bg-green-50 text-green-600 hover:bg-green-100',
                                 red: active ? 'bg-red-500 text-white' : 'bg-red-50 text-red-600 hover:bg-red-100',
                             };
@@ -390,7 +375,7 @@ export function ChannelVideos() {
                         <div className="flex items-center gap-4">
                             <p className="text-sm text-slate-500">
                                 {(searchQuery || statusFilters.size > 0) ? `${processedVideos.length} of ${videos.length}` : `${videos.length}`} video{videos.length !== 1 ? 's' : ''}
-                                {unprocessedCount > 0 && !searchQuery && ` • ${unprocessedCount} ready`}
+                                {unprocessedCount > 0 && !searchQuery && ` | ${unprocessedCount} ready`}
                             </p>
                             {/* View toggle */}
                             <div className="flex items-center bg-slate-100 rounded-lg p-0.5">
