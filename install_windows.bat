@@ -138,7 +138,7 @@ IF /I "%INSTALL_PARAKEET%"=="1" (
 
 echo [7/8] Installing frontend dependencies...
 cd /d "%FRONTEND_DIR%"
-call npm install
+call npm install --fund=false --audit=false --loglevel=warn
 
 IF "%SKIP_MODEL_PRELOAD%"=="1" (
   echo [8/8] Skipping model preload ^(SKIP_MODEL_PRELOAD=1^).

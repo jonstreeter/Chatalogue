@@ -54,7 +54,7 @@ IF !ERRORLEVEL! NEQ 0 (
 IF NOT EXIST "%FRONTEND_DIR%\node_modules" (
     echo Installing frontend dependencies...
     cd /d "%FRONTEND_DIR%"
-    call npm install
+    call npm install --fund=false --audit=false --loglevel=warn
 )
 
 :: Start Backend (worker thread starts automatically inside the API server)

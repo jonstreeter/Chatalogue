@@ -95,7 +95,7 @@ fi
 echo "[7/8] Installing frontend dependencies..."
 (
   cd "$FRONTEND_DIR"
-  npm install
+  npm install --fund=false --audit=false --loglevel=warn
 )
 
 if [ "$SKIP_MODEL_PRELOAD" = "1" ]; then
