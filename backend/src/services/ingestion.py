@@ -1,4 +1,4 @@
-﻿import yt_dlp
+import yt_dlp
 import os
 import time
 import json
@@ -4571,7 +4571,9 @@ class IngestionService:
                 downloaded_file[0] = d.get('filename')
 
         ydl_opts = {
-            'format': 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best',
+            # Prefer 'best' (mixed A/V) to avoid pacing/padding drift between YouTube's separate audio streams 
+            # and the iframe player. If unavailable or too large, fallback to bestaudio.
+            'format': 'best[ext=mp4]/best/bestaudio[ext=webm]/bestaudio[ext=m4a]',
             'outtmpl': str(new_output_path.with_suffix('')) + '.%(ext)s',
             'quiet': not is_verbose(),
             'verbose': is_verbose(),
@@ -5870,7 +5872,9 @@ class IngestionService:
             log(f"Deleted corrupt audio file. Retrying with fallback format...")
             self._update_job_status_detail(job_id, "Re-downloading (corrupt audio detected)...")
 
-            # Determine which format to try as fallback
+            # Determine which format to try as fallback. Now that we default to 'best', 
+            # if that is corrupt, we fall back to audio-only streams as a last resort,
+            # accepting potential timing drift if it means getting the file at all.
             current_ext = audio_path.suffix.lower()
             if current_ext == '.m4a':
                 fallback_format = 'bestaudio[ext=webm]/bestaudio/best'
