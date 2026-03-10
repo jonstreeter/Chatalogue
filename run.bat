@@ -9,6 +9,8 @@ SET "FRONTEND_DIR=%PROJECT_ROOT%frontend"
 SET "VENV_DIR=%BACKEND_DIR%\.venv"
 SET "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 SET "BACKEND_PORT=8011"
+SET "BACKEND_LOG=%BACKEND_DIR%\uvicorn.out.log"
+SET "FRONTEND_LOG=%FRONTEND_DIR%\vite.out.log"
 
 :: Kill any existing instances
 echo Stopping any existing servers...
@@ -59,7 +61,7 @@ IF NOT EXIST "%FRONTEND_DIR%\node_modules" (
 
 :: Start Backend (worker thread starts automatically inside the API server)
 echo Starting Backend Server on http://localhost:%BACKEND_PORT% ...
-start "%PROJECT_NAME% Backend" "%VENV_PYTHON%" -m uvicorn src.main:app --app-dir "%BACKEND_DIR%" --host 0.0.0.0 --port %BACKEND_PORT%
+start /B "" cmd.exe /c ""%VENV_PYTHON%" -m uvicorn src.main:app --app-dir "%BACKEND_DIR%" --host 0.0.0.0 --port %BACKEND_PORT% 1>"%BACKEND_LOG%" 2>&1"
 
 :: Wait for backend readiness before starting frontend
 echo Waiting for backend to become ready (first run may take a few minutes to set up PostgreSQL)...
@@ -74,15 +76,32 @@ IF !ERRORLEVEL! NEQ 0 (
 
 :: Start Frontend
 echo Starting Frontend on http://localhost:5173 ...
-start "%PROJECT_NAME% Frontend" cmd /c "cd /d "%FRONTEND_DIR%" && npm run dev"
+start /B "" cmd.exe /c "cd /d "%FRONTEND_DIR%" && npm run dev 1>"%FRONTEND_LOG%" 2>&1"
 
 :: Wait for frontend dev server to bind, then open browser
 timeout /t 2 /nobreak >nul
 start http://localhost:5173
 
 echo.
-echo Backend:  http://localhost:%BACKEND_PORT%
-echo Frontend: http://localhost:5173
+echo ===================================================
+echo   %PROJECT_NAME% is running
 echo.
-echo Close this window to stop both servers.
-pause
+echo   Frontend: http://localhost:5173
+echo   Backend:  http://localhost:%BACKEND_PORT%
+echo.
+echo   Logs:
+echo     Backend:  %BACKEND_LOG%
+echo     Frontend: %FRONTEND_LOG%
+echo ===================================================
+echo.
+echo Press any key to stop all servers...
+pause >nul
+echo.
+echo Stopping servers...
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":%BACKEND_PORT%.*LISTENING" 2^>nul') do (
+    taskkill /F /T /PID %%a >nul 2>&1
+)
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":5173.*LISTENING" 2^>nul') do (
+    taskkill /F /T /PID %%a >nul 2>&1
+)
+echo Done.
