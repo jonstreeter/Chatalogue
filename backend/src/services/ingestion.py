@@ -5119,7 +5119,10 @@ class IngestionService:
                 dur_tag = str(int(max(0.0, float(duration)) * 1000))
             except Exception:
                 dur_tag = "full"
-        output_path = TEMP_DIR / f"temp_slice_{start_ms}_{dur_tag}_{threading.get_ident()}_{input_path.name}"
+        
+        # Output as precise 16kHz mono WAV to avoid -c copy keyframe snapping 
+        # which pulls in older audio and causes timestamp drift.
+        output_path = TEMP_DIR / f"temp_slice_{start_ms}_{dur_tag}_{threading.get_ident()}_{input_path.stem}.wav"
         
         # Determine ffmpeg location (copied from download_audio logic)
         ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
@@ -5128,7 +5131,8 @@ class IngestionService:
         cmd = [ffmpeg_cmd, "-y", "-ss", str(start_time), "-i", str(input_path)]
         if duration is not None:
             cmd.extend(["-t", str(duration)])
-        cmd.extend(["-c", "copy", str(output_path)])
+        
+        cmd.extend(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(output_path)])
         
         log_verbose(f"Slicing audio: {' '.join(cmd)}")
         try:
