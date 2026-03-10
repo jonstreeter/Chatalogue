@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { X, Eye, EyeOff, CheckCircle2, AlertTriangle, Loader2, ExternalLink, ChevronRight, ChevronLeft, Cpu, Zap, Globe, Server } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { X, Eye, EyeOff, CheckCircle2, AlertTriangle, Loader2, ExternalLink, ChevronRight, ChevronLeft, Cpu, Zap, Globe, Server, Download } from 'lucide-react';
 import api from '../lib/api';
 
 type WizardStep = 'welcome' | 'hf_token' | 'transcription' | 'llm' | 'complete';
@@ -15,16 +15,31 @@ const STEP_LABELS: Record<WizardStep, string> = {
 
 type LlmProvider = 'ollama' | 'nvidia_nim' | 'openai' | 'anthropic' | 'gemini' | 'groq' | 'openrouter' | 'xai';
 
-const PROVIDER_INFO: Record<LlmProvider, { label: string; icon: typeof Server; local: boolean; keyUrl: string }> = {
-  ollama: { label: 'Ollama', icon: Server, local: true, keyUrl: 'https://ollama.com/download' },
-  nvidia_nim: { label: 'NVIDIA NIM', icon: Zap, local: false, keyUrl: 'https://build.nvidia.com/' },
-  openai: { label: 'OpenAI', icon: Globe, local: false, keyUrl: 'https://platform.openai.com/api-keys' },
-  anthropic: { label: 'Anthropic', icon: Globe, local: false, keyUrl: 'https://console.anthropic.com/settings/keys' },
-  gemini: { label: 'Google Gemini', icon: Globe, local: false, keyUrl: 'https://aistudio.google.com/apikey' },
-  groq: { label: 'Groq', icon: Zap, local: false, keyUrl: 'https://console.groq.com/keys' },
-  openrouter: { label: 'OpenRouter', icon: Globe, local: false, keyUrl: 'https://openrouter.ai/keys' },
-  xai: { label: 'xAI (Grok)', icon: Globe, local: false, keyUrl: 'https://console.x.ai/' },
+const PROVIDER_INFO: Record<LlmProvider, { label: string; icon: typeof Server; local: boolean; keyUrl: string; keyLabel: string }> = {
+  ollama: { label: 'Ollama', icon: Server, local: true, keyUrl: 'https://ollama.com/download', keyLabel: 'Install Ollama' },
+  nvidia_nim: { label: 'NVIDIA NIM', icon: Zap, local: false, keyUrl: 'https://build.nvidia.com/', keyLabel: 'Get NVIDIA API key' },
+  openai: { label: 'OpenAI', icon: Globe, local: false, keyUrl: 'https://platform.openai.com/api-keys', keyLabel: 'Get OpenAI API key' },
+  anthropic: { label: 'Anthropic', icon: Globe, local: false, keyUrl: 'https://console.anthropic.com/settings/keys', keyLabel: 'Get Anthropic API key' },
+  gemini: { label: 'Google Gemini', icon: Globe, local: false, keyUrl: 'https://aistudio.google.com/apikey', keyLabel: 'Get Gemini API key' },
+  groq: { label: 'Groq', icon: Zap, local: false, keyUrl: 'https://console.groq.com/keys', keyLabel: 'Get Groq API key' },
+  openrouter: { label: 'OpenRouter', icon: Globe, local: false, keyUrl: 'https://openrouter.ai/keys', keyLabel: 'Get OpenRouter API key' },
+  xai: { label: 'xAI (Grok)', icon: Globe, local: false, keyUrl: 'https://console.x.ai/', keyLabel: 'Get xAI API key' },
 };
+
+interface OllamaModel {
+  name: string;
+  size_bytes: number;
+  parameter_size?: string;
+  quantization_level?: string;
+}
+
+interface HwRecommendation {
+  base_model: string;
+  model_tag: string;
+  tier: string;
+  reason: string;
+  estimated_size_gb?: number | null;
+}
 
 interface Settings {
   hf_token: string;
@@ -94,6 +109,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
 
   // Step-specific state
   const [gpuInfo, setGpuInfo] = useState<{ gpu_name?: string; vram_gb?: number } | null>(null);
+  const [hwRecommendation, setHwRecommendation] = useState<HwRecommendation | null>(null);
   const [hfToken, setHfToken] = useState('');
   const [showToken, setShowToken] = useState(false);
   const [tokenValidation, setTokenValidation] = useState<{ valid?: boolean; error?: string; models?: Record<string, any> } | null>(null);
@@ -114,6 +130,13 @@ export function SetupWizard({ onClose, onComplete }: Props) {
   const [llmTest, setLlmTest] = useState<{ success?: boolean; error?: string; model?: string } | null>(null);
   const [testingLlm, setTestingLlm] = useState(false);
 
+  // Ollama-specific state
+  const [ollamaInstalled, setOllamaInstalled] = useState<boolean | null>(null);
+  const [ollamaModels, setOllamaModels] = useState<OllamaModel[]>([]);
+  const [loadingOllamaModels, setLoadingOllamaModels] = useState(false);
+  const [pullingModel, setPullingModel] = useState<string | null>(null);
+  const [pullStatus, setPullStatus] = useState<string | null>(null);
+
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -131,11 +154,40 @@ export function SetupWizard({ onClose, onComplete }: Props) {
       if (hw?.hardware) {
         setGpuInfo({
           gpu_name: hw.hardware.gpu_name,
-          vram_gb: hw.hardware.vram_total_gb,
+          vram_gb: hw.hardware.gpu_vram_gb,
         });
+      }
+      if (hw?.recommendation) {
+        setHwRecommendation(hw.recommendation);
       }
     }).finally(() => setLoading(false));
   }, []);
+
+  const loadOllamaModels = useCallback(async (url?: string) => {
+    setLoadingOllamaModels(true);
+    try {
+      const res = await api.get('/settings/ollama/models', { params: { url: url || ollamaUrl } });
+      if (res.data.status === 'ok') {
+        setOllamaInstalled(true);
+        setOllamaModels(res.data.models || []);
+      } else {
+        setOllamaInstalled(false);
+        setOllamaModels([]);
+      }
+    } catch {
+      setOllamaInstalled(false);
+      setOllamaModels([]);
+    } finally {
+      setLoadingOllamaModels(false);
+    }
+  }, [ollamaUrl]);
+
+  // Load Ollama models when entering LLM step with Ollama selected
+  useEffect(() => {
+    if (step === 'llm' && llmProvider === 'ollama' && llmEnabled) {
+      void loadOllamaModels();
+    }
+  }, [step, llmProvider, llmEnabled, loadOllamaModels]);
 
   const currentIndex = STEPS.indexOf(step);
 
@@ -283,6 +335,45 @@ export function SetupWizard({ onClose, onComplete }: Props) {
     }
   };
 
+  const handlePullModel = async (model: string) => {
+    setPullingModel(model);
+    setPullStatus('Starting download...');
+    try {
+      await api.post('/settings/ollama/pull-model', { url: ollamaUrl, model });
+      // Poll for completion
+      const poll = async () => {
+        for (let i = 0; i < 300; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const res = await api.get('/settings/ollama/pull-status', { params: { url: ollamaUrl, model } });
+            const job = res.data.job || {};
+            const status = job.status || res.data.job_status || '';
+            if (status === 'completed') {
+              setPullStatus('Download complete!');
+              setPullingModel(null);
+              void loadOllamaModels();
+              setLlmModel(model);
+              return;
+            }
+            if (status === 'failed') {
+              setPullStatus(`Download failed: ${job.error || 'Unknown error'}`);
+              setPullingModel(null);
+              return;
+            }
+            setPullStatus(`Downloading ${model}...`);
+          } catch {
+            break;
+          }
+        }
+        setPullingModel(null);
+      };
+      void poll();
+    } catch (e: any) {
+      setPullStatus(e.response?.data?.detail || 'Pull failed');
+      setPullingModel(null);
+    }
+  };
+
   const handleFinish = async () => {
     setSaving(true);
     try {
@@ -314,6 +405,11 @@ export function SetupWizard({ onClose, onComplete }: Props) {
     } finally {
       setSaving(false);
     }
+  };
+
+  const formatSize = (bytes: number): string => {
+    const gb = bytes / (1024 * 1024 * 1024);
+    return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`;
   };
 
   if (loading) {
@@ -396,11 +492,16 @@ export function SetupWizard({ onClose, onComplete }: Props) {
 
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4 text-sm text-blue-800 space-y-1">
                 <p className="font-semibold">Three steps to enable diarization:</p>
-                <ol className="list-decimal ml-5 space-y-1">
+                <ol className="list-decimal ml-5 space-y-1.5">
                   <li>
                     <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer" className="underline inline-flex items-center gap-1">
                       Create a HuggingFace token <ExternalLink size={12} />
                     </a>
+                    <div className="text-xs text-blue-700 mt-0.5 ml-0.5">
+                      Token type: select <strong>"Fine-grained"</strong> or <strong>"Read"</strong>.
+                      No special permissions are needed &mdash; just the default read access.
+                      Give it any name (e.g. "chatalogue").
+                    </div>
                   </li>
                   <li>
                     Accept the{' '}
@@ -408,6 +509,9 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                       speaker-diarization-3.1 <ExternalLink size={12} />
                     </a>{' '}
                     model agreement
+                    <div className="text-xs text-blue-700 mt-0.5 ml-0.5">
+                      Click "Agree and access repository" on the model page
+                    </div>
                   </li>
                   <li>
                     Accept the{' '}
@@ -415,6 +519,9 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                       embedding <ExternalLink size={12} />
                     </a>{' '}
                     model agreement
+                    <div className="text-xs text-blue-700 mt-0.5 ml-0.5">
+                      Same as above &mdash; click "Agree and access repository"
+                    </div>
                   </li>
                 </ol>
               </div>
@@ -493,7 +600,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                 {([
                   { value: 'auto' as const, label: 'Auto (Recommended)', desc: 'Automatically picks the best available engine' },
                   { value: 'whisper' as const, label: 'Whisper', desc: 'OpenAI Whisper — reliable, well-tested, supports many languages' },
-                  { value: 'parakeet' as const, label: 'Parakeet', desc: 'NVIDIA NeMo — fast with word-level timestamps, English-focused' },
+                  { value: 'parakeet' as const, label: 'Parakeet', desc: 'NVIDIA NeMo — significantly faster transcription, English-focused' },
                 ]).map(opt => (
                   <label
                     key={opt.value}
@@ -515,6 +622,12 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                     </div>
                   </label>
                 ))}
+              </div>
+
+              <div className="mb-4 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
+                Both Whisper and Parakeet support word-level timestamps.
+                Parakeet is typically 2&ndash;5x faster but currently English-only.
+                Whisper supports 90+ languages.
               </div>
 
               {(engine === 'whisper' || engine === 'auto') && (
@@ -576,7 +689,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                   return (
                     <button
                       key={key}
-                      onClick={() => handleProviderSelect(key)}
+                      onClick={() => { handleProviderSelect(key); if (!llmEnabled) { setLlmEnabled(true); setLlmSkipped(false); } }}
                       className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border text-center transition-colors ${
                         llmProvider === key && llmEnabled ? 'border-rose-300 bg-rose-50' : 'border-slate-200 hover:border-slate-300'
                       }`}
@@ -590,37 +703,136 @@ export function SetupWizard({ onClose, onComplete }: Props) {
               </div>
 
               {!llmEnabled && (
-                <button
-                  onClick={() => { setLlmEnabled(true); setLlmSkipped(false); handleProviderSelect(llmProvider); }}
-                  className="w-full mb-4 px-4 py-2 text-sm font-medium text-rose-600 border border-rose-300 rounded-lg hover:bg-rose-50 transition-colors"
-                >
-                  Enable LLM Features
-                </button>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-600">
+                  Select a provider above to enable LLM features. You can also enable them later from the Settings page.
+                </div>
               )}
 
               {llmEnabled && (
                 <div className="space-y-3">
                   {llmProvider === 'ollama' ? (
                     <>
+                      {/* Ollama install status */}
+                      <div className={`flex items-center gap-2 p-2 rounded-lg text-sm ${
+                        ollamaInstalled === true ? 'bg-green-50 border border-green-200 text-green-800' :
+                        ollamaInstalled === false ? 'bg-amber-50 border border-amber-200 text-amber-800' :
+                        'bg-slate-50 border border-slate-200 text-slate-600'
+                      }`}>
+                        {loadingOllamaModels ? (
+                          <><Loader2 size={14} className="animate-spin" /> Checking Ollama...</>
+                        ) : ollamaInstalled ? (
+                          <><CheckCircle2 size={14} className="text-green-600" /> Ollama is running ({ollamaModels.length} model{ollamaModels.length !== 1 ? 's' : ''} installed)</>
+                        ) : (
+                          <>
+                            <AlertTriangle size={14} />
+                            <span>Ollama not detected.</span>
+                            <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" className="underline inline-flex items-center gap-0.5 font-medium">
+                              Install Ollama <ExternalLink size={10} />
+                            </a>
+                          </>
+                        )}
+                      </div>
+
                       <div>
                         <label className="block text-sm font-medium text-slate-700 mb-1">Ollama URL</label>
                         <input
                           type="text"
                           value={ollamaUrl}
-                          onChange={e => { setOllamaUrl(e.target.value); setLlmTest(null); }}
+                          onChange={e => { setOllamaUrl(e.target.value); setLlmTest(null); setOllamaInstalled(null); }}
+                          onBlur={() => void loadOllamaModels()}
                           className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-rose-500"
                         />
                       </div>
+
                       <div>
                         <label className="block text-sm font-medium text-slate-700 mb-1">Model</label>
-                        <input
-                          type="text"
-                          value={llmModel}
-                          onChange={e => { setLlmModel(e.target.value); setLlmTest(null); }}
-                          placeholder="mistral"
-                          className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-rose-500"
-                        />
+                        {ollamaModels.length > 0 ? (
+                          <select
+                            value={llmModel}
+                            onChange={e => { setLlmModel(e.target.value); setLlmTest(null); }}
+                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-rose-500"
+                          >
+                            {!ollamaModels.some(m => m.name === llmModel) && llmModel && (
+                              <option value={llmModel}>{llmModel} (not installed)</option>
+                            )}
+                            {ollamaModels.map(m => (
+                              <option key={m.name} value={m.name}>
+                                {m.name} ({formatSize(m.size_bytes)}{m.parameter_size ? ` / ${m.parameter_size}` : ''})
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <input
+                            type="text"
+                            value={llmModel}
+                            onChange={e => { setLlmModel(e.target.value); setLlmTest(null); }}
+                            placeholder="mistral"
+                            className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-rose-500"
+                          />
+                        )}
                       </div>
+
+                      {/* Recommended models */}
+                      {ollamaInstalled && (
+                        <div>
+                          <div className="text-xs font-medium text-slate-600 mb-1.5">
+                            Recommended for your system{gpuInfo?.vram_gb ? ` (${gpuInfo.vram_gb.toFixed(0)} GB VRAM)` : ''}:
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {hwRecommendation ? (
+                              <button
+                                onClick={() => {
+                                  if (ollamaModels.some(m => m.name === hwRecommendation.model_tag)) {
+                                    setLlmModel(hwRecommendation.model_tag);
+                                  } else {
+                                    void handlePullModel(hwRecommendation.model_tag);
+                                  }
+                                }}
+                                disabled={pullingModel !== null}
+                                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 disabled:opacity-50 inline-flex items-center gap-1"
+                                title={hwRecommendation.reason}
+                              >
+                                {ollamaModels.some(m => m.name === hwRecommendation.model_tag) ? (
+                                  <><CheckCircle2 size={12} className="text-green-600" /> {hwRecommendation.model_tag}</>
+                                ) : (
+                                  <><Download size={12} /> {hwRecommendation.model_tag}</>
+                                )}
+                                {hwRecommendation.estimated_size_gb && <span className="text-[10px] opacity-70">({hwRecommendation.estimated_size_gb.toFixed(1)} GB)</span>}
+                              </button>
+                            ) : null}
+                            {/* Common good models */}
+                            {['mistral', 'llama3.2', 'gemma3'].filter(m =>
+                              m !== hwRecommendation?.model_tag && m !== hwRecommendation?.base_model
+                            ).map(m => {
+                              const installed = ollamaModels.some(om => om.name === m || om.name.startsWith(m + ':'));
+                              return (
+                                <button
+                                  key={m}
+                                  onClick={() => {
+                                    if (installed) {
+                                      const match = ollamaModels.find(om => om.name === m || om.name.startsWith(m + ':'));
+                                      setLlmModel(match?.name || m);
+                                    } else {
+                                      void handlePullModel(m);
+                                    }
+                                  }}
+                                  disabled={pullingModel !== null}
+                                  className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 inline-flex items-center gap-1"
+                                >
+                                  {installed ? <CheckCircle2 size={12} className="text-green-600" /> : <Download size={12} />}
+                                  {m}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          {pullingModel && (
+                            <div className="mt-2 flex items-center gap-2 text-xs text-slate-600">
+                              <Loader2 size={12} className="animate-spin" />
+                              {pullStatus}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </>
                   ) : (
                     <>
@@ -628,7 +840,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                         <label className="block text-sm font-medium text-slate-700 mb-1">
                           API Key
                           <a href={PROVIDER_INFO[llmProvider].keyUrl} target="_blank" rel="noopener noreferrer" className="ml-2 text-rose-500 text-xs inline-flex items-center gap-0.5 hover:underline">
-                            Get key <ExternalLink size={10} />
+                            {PROVIDER_INFO[llmProvider].keyLabel} <ExternalLink size={10} />
                           </a>
                         </label>
                         <input
@@ -683,12 +895,6 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                   >
                     Disable LLM features
                   </button>
-                </div>
-              )}
-
-              {!llmEnabled && (
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-600">
-                  LLM features are disabled. You can enable them later from the Settings page.
                 </div>
               )}
             </div>
