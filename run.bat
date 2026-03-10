@@ -62,9 +62,9 @@ echo Starting Backend Server on http://localhost:%BACKEND_PORT% ...
 start "%PROJECT_NAME% Backend" "%VENV_PYTHON%" -m uvicorn src.main:app --app-dir "%BACKEND_DIR%" --host 0.0.0.0 --port %BACKEND_PORT%
 
 :: Wait for backend readiness before starting frontend
-echo Waiting for backend to become ready...
+echo Waiting for backend to become ready (first run may take a few minutes to set up PostgreSQL)...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$url='http://127.0.0.1:%BACKEND_PORT%/system/worker-status'; $deadline=(Get-Date).AddSeconds(120); $ok=$false; while((Get-Date)-lt $deadline){ try { $r=Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 300){ $ok=$true; break } } catch {} Start-Sleep -Milliseconds 800 }; if(-not $ok){ exit 1 }"
+  "$url='http://127.0.0.1:%BACKEND_PORT%/system/worker-status'; $deadline=(Get-Date).AddSeconds(300); $ok=$false; while((Get-Date)-lt $deadline){ try { $r=Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 300){ $ok=$true; break } } catch {} Start-Sleep -Milliseconds 800 }; if(-not $ok){ exit 1 }"
 IF !ERRORLEVEL! NEQ 0 (
     echo Backend did not become ready in time.
     echo Check backend logs/terminal, then re-run this script.

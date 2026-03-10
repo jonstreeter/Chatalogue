@@ -16,6 +16,8 @@ os.environ.setdefault("NEMO_TELEMETRY_ENABLED", "0")
 os.environ.setdefault("NV_ONE_LOGGER_ENABLED", "0")
 # Skip embedded postgres during preload — models don't need a database
 os.environ.setdefault("EMBEDDED_PG_ENABLED", "false")
+# Use SQLite for preload so database.py doesn't try to connect to postgres
+os.environ.setdefault("DB_PROVIDER", "sqlite")
 
 print("[preload] Loading modules...", flush=True)
 from src.services.ingestion import IngestionService
