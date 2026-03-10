@@ -2038,14 +2038,10 @@ export function VideoDetailPage() {
                                                     : isActiveSegment
                                                         ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100'
                                                         : 'bg-white border-transparent hover:border-slate-200 hover:bg-white'}`}
-                                                onClick={(e) => {
-                                                    // If clicking the container (not a word span), seek to segment start
-                                                    // But check if selection exists
+                                                onClick={() => {
+                                                    // Seek to segment start on click (word spans use stopPropagation so they won't trigger this)
                                                     if (window.getSelection()?.toString().length === 0) {
-                                                        // Only seek if target wasn't a specific word (handled by word click)
-                                                        if ((e.target as HTMLElement).tagName !== 'SPAN') {
-                                                            handleSeek(seg.start_time);
-                                                        }
+                                                        handleSeek(seg.start_time);
                                                     }
                                                 }}
                                             >
