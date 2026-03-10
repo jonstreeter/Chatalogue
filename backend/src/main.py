@@ -6007,6 +6007,136 @@ def get_setup_status():
         "hf_token_set": bool((os.getenv("HF_TOKEN") or "").strip()),
     }
 
+
+def _repo_root_path() -> Path:
+    # backend/src/main.py -> project root (../../)
+    return Path(__file__).resolve().parents[2]
+
+
+def _run_git(args: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _safe_stdout(proc: subprocess.CompletedProcess) -> str:
+    return (proc.stdout or "").strip()
+
+
+def _safe_stderr(proc: subprocess.CompletedProcess) -> str:
+    return (proc.stderr or "").strip()
+
+
+def _get_system_version_info(check_remote: bool = True) -> dict:
+    repo_root = _repo_root_path()
+    info = {
+        "status": "ok",
+        "app_version": os.getenv("CHATALOGUE_VERSION", "").strip() or None,
+        "repo_path": str(repo_root),
+        "git": {
+            "available": False,
+            "is_repo": False,
+            "branch": None,
+            "head": None,
+            "head_short": None,
+            "remote_head": None,
+            "remote_head_short": None,
+            "ahead_count": 0,
+            "behind_count": 0,
+            "dirty": False,
+            "update_available": False,
+            "error": None,
+            "checked_remote": bool(check_remote),
+        },
+    }
+
+    # Ensure git binary is available.
+    git_v = _run_git(["--version"], repo_root, timeout=5)
+    if git_v.returncode != 0:
+        info["git"]["error"] = "git is not available in PATH"
+        return info
+    info["git"]["available"] = True
+
+    # Ensure this directory is a git repo.
+    inside = _run_git(["rev-parse", "--is-inside-work-tree"], repo_root, timeout=5)
+    if inside.returncode != 0 or _safe_stdout(inside).lower() != "true":
+        info["git"]["error"] = "not a git work tree"
+        return info
+    info["git"]["is_repo"] = True
+
+    branch_p = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_root, timeout=5)
+    if branch_p.returncode == 0:
+        info["git"]["branch"] = _safe_stdout(branch_p) or None
+
+    head_p = _run_git(["rev-parse", "HEAD"], repo_root, timeout=5)
+    if head_p.returncode == 0:
+        info["git"]["head"] = _safe_stdout(head_p) or None
+
+    head_short_p = _run_git(["rev-parse", "--short", "HEAD"], repo_root, timeout=5)
+    if head_short_p.returncode == 0:
+        info["git"]["head_short"] = _safe_stdout(head_short_p) or None
+
+    dirty_p = _run_git(["status", "--porcelain"], repo_root, timeout=8)
+    if dirty_p.returncode == 0:
+        info["git"]["dirty"] = bool(_safe_stdout(dirty_p))
+
+    if not check_remote:
+        return info
+
+    branch = info["git"]["branch"] or "main"
+    fetch_p = _run_git(["fetch", "--quiet", "origin", branch], repo_root, timeout=20)
+    if fetch_p.returncode != 0:
+        info["git"]["error"] = _safe_stderr(fetch_p) or "git fetch failed"
+        return info
+
+    remote_ref = f"origin/{branch}"
+    remote_head_p = _run_git(["rev-parse", remote_ref], repo_root, timeout=5)
+    if remote_head_p.returncode == 0:
+        info["git"]["remote_head"] = _safe_stdout(remote_head_p) or None
+
+    remote_head_short_p = _run_git(["rev-parse", "--short", remote_ref], repo_root, timeout=5)
+    if remote_head_short_p.returncode == 0:
+        info["git"]["remote_head_short"] = _safe_stdout(remote_head_short_p) or None
+
+    behind_p = _run_git(["rev-list", "--count", f"HEAD..{remote_ref}"], repo_root, timeout=8)
+    if behind_p.returncode == 0:
+        try:
+            info["git"]["behind_count"] = int(_safe_stdout(behind_p) or "0")
+        except Exception:
+            info["git"]["behind_count"] = 0
+
+    ahead_p = _run_git(["rev-list", "--count", f"{remote_ref}..HEAD"], repo_root, timeout=8)
+    if ahead_p.returncode == 0:
+        try:
+            info["git"]["ahead_count"] = int(_safe_stdout(ahead_p) or "0")
+        except Exception:
+            info["git"]["ahead_count"] = 0
+
+    info["git"]["update_available"] = bool(info["git"]["behind_count"] > 0)
+    return info
+
+
+@app.get("/system/version")
+def get_system_version(check_remote: bool = True):
+    try:
+        return _get_system_version_info(check_remote=check_remote)
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "git": {
+                "update_available": False,
+                "behind_count": 0,
+                "ahead_count": 0,
+                "error": str(e),
+            },
+        }
+
 @app.post("/system/restart")
 def restart_server():
     """Trigger a server restart by touching main.py so StatReload picks it up."""
@@ -6014,6 +6144,47 @@ def restart_server():
     main_file = Path(__file__)
     main_file.touch()
     return {"status": "restarting", "touched": str(main_file), "timestamp": _time.time()}
+
+
+@app.post("/system/update")
+def update_and_restart_server():
+    """Pull latest code from origin/<branch> (fast-forward only) and trigger restart."""
+    import time as _time
+
+    info = _get_system_version_info(check_remote=True)
+    git = info.get("git", {}) if isinstance(info, dict) else {}
+
+    if not git.get("available") or not git.get("is_repo"):
+        raise HTTPException(status_code=400, detail=f"Update unavailable: {git.get('error') or 'git not ready'}")
+
+    if git.get("dirty"):
+        raise HTTPException(status_code=409, detail="Local repository has uncommitted changes; refusing auto-update.")
+
+    branch = str(git.get("branch") or "main")
+    repo_root = _repo_root_path()
+    old_head = str(git.get("head") or "")
+    pull_p = _run_git(["pull", "--ff-only", "origin", branch], repo_root, timeout=45)
+    if pull_p.returncode != 0:
+        detail = _safe_stderr(pull_p) or _safe_stdout(pull_p) or "git pull failed"
+        raise HTTPException(status_code=500, detail=f"Update failed: {detail[:500]}")
+
+    # Re-read HEAD after pull.
+    new_head_p = _run_git(["rev-parse", "HEAD"], repo_root, timeout=5)
+    new_head = _safe_stdout(new_head_p) if new_head_p.returncode == 0 else old_head
+    updated = bool(new_head and old_head and new_head != old_head)
+
+    # Trigger existing restart mechanism.
+    main_file = Path(__file__)
+    main_file.touch()
+    return {
+        "status": "restarting",
+        "updated": updated,
+        "old_head": old_head or None,
+        "new_head": new_head or None,
+        "branch": branch,
+        "touched": str(main_file),
+        "timestamp": _time.time(),
+    }
 
 @app.get("/system/worker-status")
 def get_worker_status():

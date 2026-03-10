@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Home, ListTodo, Settings as SettingsIcon, Users, Menu, X } from 'lucide-react';
+import { Home, ListTodo, Settings as SettingsIcon, Users, Menu, X, RefreshCw, Download } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import api from '../lib/api';
 
@@ -10,6 +10,18 @@ interface QueueStatus {
     total_active: number;
 }
 
+interface SystemVersionInfo {
+    status?: string;
+    app_version?: string | null;
+    git?: {
+        branch?: string | null;
+        head_short?: string | null;
+        update_available?: boolean;
+        behind_count?: number;
+        error?: string | null;
+    };
+}
+
 export function Layout({ children }: { children: React.ReactNode }) {
     const location = useLocation();
     const isHome = location.pathname === '/';
@@ -18,6 +30,11 @@ export function Layout({ children }: { children: React.ReactNode }) {
     const isSettings = location.pathname === '/settings';
     const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
+    const [backendOnline, setBackendOnline] = useState(false);
+    const [versionInfo, setVersionInfo] = useState<SystemVersionInfo | null>(null);
+    const [checkingVersion, setCheckingVersion] = useState(false);
+    const [updating, setUpdating] = useState(false);
+    const [updateMessage, setUpdateMessage] = useState<string | null>(null);
 
     useEffect(() => {
         setMobileNavOpen(false);
@@ -28,8 +45,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
             try {
                 const res = await api.get<QueueStatus>('/jobs/status');
                 setQueueStatus(res.data);
+                setBackendOnline(true);
             } catch (e) {
                 // Ignore errors - backend might not be running
+                setBackendOnline(false);
             }
         };
 
@@ -37,6 +56,78 @@ export function Layout({ children }: { children: React.ReactNode }) {
         const interval = setInterval(fetchQueueStatus, 5000);
         return () => clearInterval(interval);
     }, []);
+
+    useEffect(() => {
+        const fetchVersionInfo = async (checkRemote = true) => {
+            setCheckingVersion(true);
+            try {
+                const res = await api.get<SystemVersionInfo>('/system/version', { params: { check_remote: checkRemote } });
+                setVersionInfo(res.data);
+            } catch {
+                // Keep existing version panel info if request fails.
+            } finally {
+                setCheckingVersion(false);
+            }
+        };
+
+        fetchVersionInfo(true);
+        const interval = setInterval(() => {
+            void fetchVersionInfo(true);
+        }, 120000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const handleCheckUpdates = async () => {
+        setUpdateMessage(null);
+        setCheckingVersion(true);
+        try {
+            const res = await api.get<SystemVersionInfo>('/system/version', { params: { check_remote: true } });
+            setVersionInfo(res.data);
+            const available = Boolean(res.data?.git?.update_available);
+            setUpdateMessage(available ? 'Update available.' : 'Already up to date.');
+        } catch (e: any) {
+            setUpdateMessage(String(e?.response?.data?.detail || 'Failed to check updates.'));
+        } finally {
+            setCheckingVersion(false);
+        }
+    };
+
+    const handleUpdateAndRestart = async () => {
+        if (updating) return;
+        setUpdating(true);
+        setUpdateMessage('Updating and restarting backend...');
+        try {
+            await api.post('/system/update');
+        } catch (e: any) {
+            setUpdating(false);
+            setUpdateMessage(String(e?.response?.data?.detail || 'Update failed.'));
+            return;
+        }
+
+        // Wait for backend to come back and refresh version data.
+        for (let i = 0; i < 30; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            try {
+                const res = await api.get<SystemVersionInfo>('/system/version', { params: { check_remote: true } });
+                setVersionInfo(res.data);
+                setUpdateMessage('Updated and restarted.');
+                setUpdating(false);
+                return;
+            } catch {
+                // keep polling while backend restarts
+            }
+        }
+
+        setUpdating(false);
+        setUpdateMessage('Restart timed out. Check backend logs and refresh.');
+    };
+
+    const versionLabel = versionInfo?.app_version
+        || versionInfo?.git?.head_short
+        || 'unknown';
+    const branchLabel = versionInfo?.git?.branch || 'main';
+    const updateAvailable = Boolean(versionInfo?.git?.update_available);
+    const behindCount = Number(versionInfo?.git?.behind_count || 0);
 
     return (
         <div className="flex h-screen overflow-hidden bg-slate-50">
@@ -179,8 +270,49 @@ export function Layout({ children }: { children: React.ReactNode }) {
                 </div>
                 <div className="p-4 pt-0">
                     <div className="bg-slate-50/50 rounded-xl p-4 text-xs text-slate-400 border border-slate-100/50">
-                        <p>System Status: <span className="text-green-500 font-medium">Online</span></p>
-                        <p className="mt-1">v0.1.0-alpha</p>
+                        <p>
+                            System Status:{' '}
+                            <span className={backendOnline ? 'text-green-500 font-medium' : 'text-red-500 font-medium'}>
+                                {backendOnline ? 'Online' : 'Offline'}
+                            </span>
+                        </p>
+                        <p className="mt-1">
+                            {branchLabel} • {versionLabel}
+                        </p>
+                        <div className="mt-2 flex items-center gap-2">
+                            {updateAvailable ? (
+                                <span className="text-amber-600 font-medium">
+                                    Update available{behindCount > 0 ? ` (${behindCount})` : ''}
+                                </span>
+                            ) : (
+                                <span className="text-slate-500">{versionInfo?.git?.error ? 'Update check unavailable' : 'Up to date'}</span>
+                            )}
+                        </div>
+                        <div className="mt-2 flex items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={handleCheckUpdates}
+                                disabled={checkingVersion || updating}
+                                className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                                title="Check for updates"
+                            >
+                                <RefreshCw size={11} className={checkingVersion ? 'animate-spin' : ''} />
+                                Check
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleUpdateAndRestart}
+                                disabled={updating || checkingVersion || !updateAvailable}
+                                className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                                title="Pull latest code and restart backend"
+                            >
+                                <Download size={11} />
+                                {updating ? 'Updating...' : 'Update + Restart'}
+                            </button>
+                        </div>
+                        {updateMessage && (
+                            <p className="mt-2 text-[11px] text-slate-500">{updateMessage}</p>
+                        )}
                     </div>
                 </div>
             </aside>
