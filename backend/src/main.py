@@ -4988,6 +4988,7 @@ class Settings(BaseModel):
     speaker_match_threshold: float = 0.5  # Cosine distance threshold for speaker matching
     funny_moments_max_saved: int = 25  # Top-ranked moments kept after detection
     funny_moments_explain_batch_limit: int = 12  # Max moments explained per click/run
+    setup_wizard_completed: bool = False
 
 class OllamaPullRequest(BaseModel):
     url: Optional[str] = None
@@ -5055,6 +5056,7 @@ def get_settings():
         speaker_match_threshold=float(os.getenv("SPEAKER_MATCH_THRESHOLD", "0.5")),
         funny_moments_max_saved=int(os.getenv("FUNNY_MOMENTS_MAX_SAVED", "25")),
         funny_moments_explain_batch_limit=int(os.getenv("FUNNY_MOMENTS_EXPLAIN_BATCH_LIMIT", "12")),
+        setup_wizard_completed=os.getenv("SETUP_WIZARD_COMPLETED", "false").lower() == "true",
     )
 
 @app.post("/settings")
@@ -5132,6 +5134,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     set_key(ENV_PATH, "SPEAKER_MATCH_THRESHOLD", str(settings.speaker_match_threshold))
     set_key(ENV_PATH, "FUNNY_MOMENTS_MAX_SAVED", str(funny_moments_max_saved))
     set_key(ENV_PATH, "FUNNY_MOMENTS_EXPLAIN_BATCH_LIMIT", str(funny_moments_explain_batch_limit))
+    set_key(ENV_PATH, "SETUP_WIZARD_COMPLETED", str(bool(getattr(settings, "setup_wizard_completed", False))).lower())
 
     # 2. Update current environment
     os.environ["HF_TOKEN"] = settings.hf_token
@@ -5186,6 +5189,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     os.environ["SPEAKER_MATCH_THRESHOLD"] = str(settings.speaker_match_threshold)
     os.environ["FUNNY_MOMENTS_MAX_SAVED"] = str(funny_moments_max_saved)
     os.environ["FUNNY_MOMENTS_EXPLAIN_BATCH_LIMIT"] = str(funny_moments_explain_batch_limit)
+    os.environ["SETUP_WIZARD_COMPLETED"] = str(bool(getattr(settings, "setup_wizard_completed", False))).lower()
     
     # 3. Reconfigure logging based on new verbose_logging setting
     configure_logging()
@@ -5993,6 +5997,14 @@ def get_ollama_hardware_recommendation(objective: str = "balanced"):
         "status": "ok",
         "hardware": hardware,
         "recommendation": recommendation,
+    }
+
+@app.get("/system/setup-status")
+def get_setup_status():
+    """Check if initial setup wizard has been completed."""
+    return {
+        "setup_completed": os.getenv("SETUP_WIZARD_COMPLETED", "false").lower() == "true",
+        "hf_token_set": bool((os.getenv("HF_TOKEN") or "").strip()),
     }
 
 @app.post("/system/restart")

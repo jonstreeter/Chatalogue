@@ -1,5 +1,7 @@
+import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from './components/Layout';
+import { SetupWizard } from './components/SetupWizard';
 import { Channels } from './pages/Channels';
 import { ChannelDetail } from './pages/ChannelDetail';
 import { ChannelVideos } from './pages/channel/ChannelVideos';
@@ -11,10 +13,28 @@ import { Settings } from './pages/Settings';
 import { Speakers } from './pages/Speakers';
 import { SpeakerDetailPage } from './pages/SpeakerDetailPage';
 import { VideoDetailPage } from './pages/video/VideoDetailPage';
+import api from './lib/api';
 
 function App() {
+  const [showWizard, setShowWizard] = useState(false);
+
+  useEffect(() => {
+    api.get('/system/setup-status')
+      .then(res => {
+        if (!res.data.setup_completed) {
+          setShowWizard(true);
+        }
+      })
+      .catch(() => {
+        // If endpoint fails, don't block the app
+      });
+  }, []);
+
   return (
     <BrowserRouter>
+      {showWizard && (
+        <SetupWizard onClose={() => setShowWizard(false)} onComplete={() => setShowWizard(false)} />
+      )}
       <Layout>
         <Routes>
           <Route path="/" element={<Channels />} />

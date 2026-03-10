@@ -1,6 +1,7 @@
 ﻿import { useState, useEffect, type FormEvent } from 'react';
-import { Save, Key, CheckCircle2, AlertCircle, Zap, ExternalLink, Loader2, RefreshCw, Terminal, Bot, AudioLines, Power, Mic, Smile, Link2, Database } from 'lucide-react';
+import { Save, Key, CheckCircle2, AlertCircle, Zap, ExternalLink, Loader2, RefreshCw, Terminal, Bot, AudioLines, Power, Mic, Smile, Link2, Database, Wand2 } from 'lucide-react';
 import api from '../lib/api';
+import { SetupWizard } from '../components/SetupWizard';
 
 interface ModelStatus {
     accessible: boolean;
@@ -323,6 +324,7 @@ function estimateUnslothSizeGb(familyKey: UnslothFamilyKey, quant: UnslothQuant)
 }
 
 export function Settings() {
+    const [showSetupWizard, setShowSetupWizard] = useState(false);
     const [activeTab, setActiveTab] = useState<SettingsTab>('transcription');
     const [token, setToken] = useState('');
     const [transcriptionEngine, setTranscriptionEngine] = useState<TranscriptionEngine>('auto');
@@ -1149,6 +1151,10 @@ export function Settings() {
     ];
 
     return (
+        <>
+        {showSetupWizard && (
+            <SetupWizard onClose={() => setShowSetupWizard(false)} onComplete={() => { setShowSetupWizard(false); void loadSettings(); }} />
+        )}
         <div className="max-w-2xl">
             <h1 className="text-2xl font-bold mb-6 flex items-center gap-2">
                 <div className="p-2 bg-slate-100 rounded-lg">
@@ -2681,6 +2687,23 @@ export function Settings() {
                                 </div>
 
                                 <div className="pt-4 border-t border-slate-100">
+                                    <h3 className="font-semibold text-slate-800 mb-4">Setup</h3>
+                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowSetupWizard(true)}
+                                            className="px-4 py-2.5 rounded-lg text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 font-semibold transition-colors inline-flex items-center gap-2"
+                                        >
+                                            <Wand2 size={16} />
+                                            Re-run Setup Wizard
+                                        </button>
+                                        <p className="text-xs text-slate-500 mt-2">
+                                            Walk through initial configuration again: HuggingFace token, transcription engine, and LLM provider.
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="pt-4 border-t border-slate-100">
                                     <h3 className="font-semibold text-slate-800 mb-4">Server</h3>
                                     <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2752,6 +2775,7 @@ export function Settings() {
                 </div>
             </form>
         </div>
+        </>
     );
 }
 
