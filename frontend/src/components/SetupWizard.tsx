@@ -120,7 +120,13 @@ export function SetupWizard({ onClose, onComplete }: Props) {
 
   const [engine, setEngine] = useState<'auto' | 'whisper' | 'parakeet'>('auto');
   const [whisperModel, setWhisperModel] = useState('medium');
-  const [engineTest, setEngineTest] = useState<{ success?: boolean; error?: string; device?: string } | null>(null);
+  const [engineTest, setEngineTest] = useState<{
+    success?: boolean;
+    error?: string;
+    device?: string;
+    resolvedEngine?: string;
+    fallbackUsed?: boolean;
+  } | null>(null);
   const [testingEngine, setTestingEngine] = useState(false);
 
   const [llmProvider, setLlmProvider] = useState<LlmProvider>('ollama');
@@ -242,10 +248,15 @@ export function SetupWizard({ onClose, onComplete }: Props) {
         transcription_model: whisperModel,
       });
       const res = await api.post('/settings/test-transcription-engine', { engine });
+      const data = res.data || {};
+      const status = String(data.status || '').toLowerCase();
+      const success = status ? status === 'ok' : Boolean(data.available);
       setEngineTest({
-        success: res.data.available,
-        device: res.data.device,
-        error: res.data.available ? undefined : res.data.error || 'Engine not available',
+        success,
+        device: data.device,
+        resolvedEngine: data.resolved_engine || data.engine || engine,
+        fallbackUsed: Boolean(data.fallback_used),
+        error: success ? undefined : (data.error || data.detail || 'Engine not available'),
       });
     } catch (e: any) {
       setEngineTest({ success: false, error: e.response?.data?.detail || 'Test failed' });
@@ -690,7 +701,11 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                   {engineTest.success ? (
                     <div className="flex items-center gap-2">
                       <CheckCircle2 size={16} className="text-green-600" />
-                      <span>Engine ready! Device: <strong>{engineTest.device || 'detected'}</strong></span>
+                      <span>
+                        Engine ready! Device: <strong>{engineTest.device || 'detected'}</strong>
+                        {engineTest.resolvedEngine ? <> • Engine: <strong>{engineTest.resolvedEngine}</strong></> : null}
+                        {engineTest.fallbackUsed ? <> • fallback used</> : null}
+                      </span>
                     </div>
                   ) : (
                     <div className="flex items-start gap-2">
