@@ -81,6 +81,8 @@ class IngestionService:
         self._cuda_memory_fraction_applied = None
         self._cuda_unhealthy_reason = None
         self._cuda_unhealthy_since = None
+        self._cuda_recovery_pending = False
+        self._cuda_fault_count = 0
         # Dynamic, in-process Parakeet batch cap that ratchets down after CUDA OOMs.
         # Persists for this backend process lifetime (resets on restart).
         self._parakeet_dynamic_batch_cap = None
@@ -1006,20 +1008,21 @@ class IngestionService:
         )
 
     def _mark_cuda_unhealthy(self, reason: str, job_id: int = None):
-        """Quarantine CUDA for this worker process after fatal CUDA runtime faults.
+        """Quarantine only the current job after a fatal CUDA runtime fault.
 
         Certain CUDA faults (e.g. illegal memory access) can poison the context until
-        process restart. For stability, force CPU execution for remaining jobs.
+        process restart. We isolate the current job onto CPU fallback, then attempt
+        an explicit GPU recovery before the next queued job is claimed.
         """
-        if self._cuda_unhealthy_reason:
-            return
         self._cuda_unhealthy_reason = (reason or "unknown").strip()[:400]
         self._cuda_unhealthy_since = datetime.now()
+        self._cuda_recovery_pending = True
+        self._cuda_fault_count += 1
 
-        # Drop GPU-bound models and force runtime to CPU.
-        self._release_parakeet_model("cuda_unhealthy")
-        self._release_whisper_model("cuda_unhealthy")
-        self._release_diarization_models("cuda_unhealthy")
+        # Drop GPU-bound models and force this job onto CPU fallback.
+        self._release_parakeet_model("cuda_fault_job_quarantine")
+        self._release_whisper_model("cuda_fault_job_quarantine")
+        self._release_diarization_models("cuda_fault_job_quarantine")
         self.device = "cpu"
         self._gpu_total_vram_bytes = 0
         self._cuda_memory_fraction_applied = None
@@ -1030,12 +1033,68 @@ class IngestionService:
                 "cuda_unhealthy": True,
                 "cuda_unhealthy_reason": self._cuda_unhealthy_reason,
                 "cuda_unhealthy_since": self._cuda_unhealthy_since.isoformat() if self._cuda_unhealthy_since else None,
+                "cuda_job_quarantined": True,
+                "cuda_recovery_pending": True,
+                "cuda_fault_count_this_worker": int(self._cuda_fault_count),
             },
         )
         log(
-            f"CUDA marked unhealthy for this worker due to fatal runtime error: "
-            f"{self._cuda_unhealthy_reason}. Forcing CPU fallback until backend restart."
+            f"Parakeet abandoned for job {job_id or 'unknown'} due to fatal CUDA runtime error: "
+            f"{self._cuda_unhealthy_reason}. Quarantining this job to Whisper/CPU and scheduling "
+            f"GPU recovery before the next job."
         )
+
+    def _recover_cuda_after_fault_if_needed(self):
+        """Try to restore GPU execution after a job-local CUDA fault quarantine."""
+        if not self._cuda_recovery_pending:
+            return True
+
+        previous_reason = self._cuda_unhealthy_reason or "unknown CUDA fault"
+        log(
+            "Attempting CUDA recovery after job-local Parakeet fault. "
+            f"Previous reason: {previous_reason}"
+        )
+
+        try:
+            self._release_parakeet_model("post_fault_recovery")
+            self._release_whisper_model("post_fault_recovery")
+            self._release_diarization_models("post_fault_recovery")
+            gc.collect()
+
+            self.device = None
+            self._gpu_total_vram_bytes = 0
+            self._cuda_memory_fraction_applied = None
+            self._cuda_unhealthy_reason = None
+            self._cuda_unhealthy_since = None
+            self._ensure_device()
+
+            if self.device != "cuda":
+                self._cuda_recovery_pending = False
+                log("CUDA recovery result: GPU not available after reset probe. Continuing on CPU.")
+                return False
+
+            self._apply_cuda_memory_fraction_limit()
+
+            import torch
+
+            probe = torch.empty((1,), device="cuda")
+            del probe
+            self._clear_cuda_cache()
+            self._cuda_recovery_pending = False
+            log("CUDA recovery succeeded. Parakeet GPU execution re-enabled for subsequent jobs.")
+            return True
+        except Exception as e:
+            self._cuda_unhealthy_reason = f"{previous_reason} | recovery failed: {str(e)[:220]}"
+            self._cuda_unhealthy_since = datetime.now()
+            self._cuda_recovery_pending = True
+            self.device = "cpu"
+            self._gpu_total_vram_bytes = 0
+            self._cuda_memory_fraction_applied = None
+            log(
+                "CUDA recovery failed after a fatal Parakeet fault. "
+                f"Keeping this worker on CPU until a later recovery attempt or backend restart. Reason: {e}"
+            )
+            return False
 
     def _clear_cuda_cache(self):
         if self.device != "cuda":
@@ -1142,6 +1201,8 @@ class IngestionService:
         self._parakeet_dynamic_batch_cap = None
         self._cuda_unhealthy_reason = None
         self._cuda_unhealthy_since = None
+        self._cuda_recovery_pending = False
+        self._cuda_fault_count = 0
         self.device = None
         self._gpu_total_vram_bytes = 0
         self._cuda_memory_fraction_applied = None
@@ -1260,6 +1321,17 @@ class IngestionService:
     def _should_unload_parakeet_after_transcribe(self, job_id: int = None) -> bool:
         mode = (os.getenv("PARAKEET_UNLOAD_AFTER_TRANSCRIBE") or "auto").strip().lower()
         decision = {"parakeet_unload_mode": mode}
+        if self._cuda_fault_count > 0 or self._cuda_recovery_pending:
+            decision.update(
+                {
+                    "parakeet_unload_after_transcribe": True,
+                    "parakeet_unload_reason": "post_fault_conservative",
+                    "parakeet_cuda_fault_count": int(self._cuda_fault_count),
+                    "parakeet_cuda_recovery_pending": bool(self._cuda_recovery_pending),
+                }
+            )
+            self._upsert_job_payload_fields(job_id, decision)
+            return True
         if mode in {"1", "true", "yes", "on"}:
             decision.update({"parakeet_unload_after_transcribe": True, "parakeet_unload_reason": "forced_true"})
             self._upsert_job_payload_fields(job_id, decision)
@@ -1330,6 +1402,34 @@ class IngestionService:
             f"ratio {free_ratio:.2f}, thresholds {keep_min_free_gb:.1f}GB/{keep_min_free_ratio:.2f})."
         )
         return True
+
+    def _should_release_parakeet_before_diarize(self, job_id: int = None) -> bool:
+        """Diarization should not compete with a retained Parakeet model for VRAM."""
+        if self.parakeet_model is None:
+            return False
+        if self.device != "cuda":
+            return True
+
+        snap = self._cuda_memory_snapshot()
+        total = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
+        free_b = int(snap.get("free") or 0)
+        total_gb = float(total) / (1024 ** 3) if total > 0 else 0.0
+        free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
+
+        release = True
+        reason = "always_release_before_diarize"
+        if self._cuda_fault_count > 0 or self._cuda_recovery_pending:
+            reason = "post_fault_conservative"
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "parakeet_release_before_diarize": bool(release),
+                "parakeet_release_before_diarize_reason": reason,
+                "parakeet_release_before_diarize_free_gb": round(free_gb, 2),
+                "parakeet_release_before_diarize_total_gb": round(total_gb, 2),
+            },
+        )
+        return release
 
     def _ensure_ctranslate2_pkg_resources(self):
         """Install a pkg_resources shim when setuptools is absent or broken.
@@ -2396,10 +2496,10 @@ class IngestionService:
                 except Exception as e:
                     log_verbose(f"  Channel artwork metadata fetch skipped: {e}")
 
-            # Collect entries from both videos and streams tabs
+            # Collect entries from videos, streams, and shorts tabs.
             all_entries = []
             seen_ids = set()
-            tabs_to_fetch = [f"{base_url}/videos", f"{base_url}/streams"]
+            tabs_to_fetch = [f"{base_url}/videos", f"{base_url}/streams", f"{base_url}/shorts"]
 
             for url in tabs_to_fetch:
                 try:
@@ -4882,6 +4982,9 @@ class IngestionService:
 
         while True:
             try:
+                if self._cuda_recovery_pending:
+                    self._recover_cuda_after_fault_if_needed()
+
                 # 1. Claim a job
                 with Session(engine) as session:
                     # Pipeline queue (process jobs) is intentionally serialized due to
@@ -5310,6 +5413,11 @@ class IngestionService:
             # Bubble up with traceback tail so queue job.error is actionable even
             # when worker-level traceback logging is unavailable.
             raise RuntimeError(f"{e}\n{tb[-3200:]}") from e
+        finally:
+            if self.device == "cuda":
+                self._release_diarization_models("process_video_finally")
+                self._clear_cuda_cache()
+            gc.collect()
 
     def _format_timestamp(self, seconds: float) -> str:
         """Convert seconds to SRT timestamp format: HH:MM:SS,mmm"""
@@ -6412,18 +6520,22 @@ class IngestionService:
                 log(f"Parakeet unavailable/failed: {e}. Falling back to Whisper.")
                 if self._is_cuda_illegal_access(e):
                     self._mark_cuda_unhealthy(str(e), job_id=job_id)
-                fallback_reason = str(e).strip().splitlines()[0] if str(e).strip() else "unknown error"
-                fallback_reason = fallback_reason[:220]
-                self._update_job_status_detail(
-                    job_id,
-                    f"Parakeet failed ({fallback_reason}); falling back to Whisper..."
-                )
+                    fallback_reason = (
+                        "Parakeet hit a fatal CUDA illegal-memory-access fault; "
+                        "this job is quarantined to Whisper/CPU."
+                    )
+                else:
+                    fallback_reason = str(e).strip().splitlines()[0] if str(e).strip() else "unknown error"
+                    fallback_reason = fallback_reason[:220]
+                    fallback_reason = f"Parakeet failed ({fallback_reason}); falling back to Whisper..."
+                self._update_job_status_detail(job_id, fallback_reason)
                 transcribe_engine_used = "whisper"
                 self._upsert_job_payload_fields(
                     job_id,
                     {
                         "transcription_engine_used": "whisper",
                         "transcription_engine_fallback_reason": str(e)[:500],
+                        "transcription_engine_fallback_detail": fallback_reason,
                     },
                 )
                 prefer_parakeet = False
@@ -6656,6 +6768,10 @@ class IngestionService:
         self._record_job_stage_start(job_id, "diarize")
             
         log("Diarizing...")
+        if self.device == "cuda" and self.whisper_model is not None:
+            self._release_whisper_model("before_diarize")
+        if self._should_release_parakeet_before_diarize(job_id=job_id):
+            self._release_parakeet_model("before_diarize")
         # Ensure the speaker-match cache starts fresh for this channel; new embeddings
         # created during this run are appended incrementally.
         self._invalidate_speaker_match_cache(video.channel_id)
@@ -7153,6 +7269,8 @@ class IngestionService:
             video_attached.processed = True
             session.add(video_attached)
             session.commit()
+        if self.device == "cuda":
+            self._release_diarization_models("post_diarize")
 
     def extract_frame_and_crop(self, video_id: int, timestamp: float, crop_coords: dict) -> str:
         """

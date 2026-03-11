@@ -5,6 +5,26 @@ Provides clean mode (essential output only) vs verbose mode (detailed debug outp
 Control via VERBOSE_LOGGING environment variable.
 """
 import os
+import sys
+
+
+def _safe_print(message: str, flush: bool) -> None:
+    try:
+        print(message, flush=flush)
+        return
+    except UnicodeEncodeError:
+        # Windows terminals often default to cp1252. Fall back to replacement
+        # output so logging never aborts ingest or queue work.
+        try:
+            text = str(message)
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            safe = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+            print(safe, flush=flush)
+            return
+        except Exception:
+            pass
+    except (OSError, AttributeError, IOError):
+        pass
 
 
 def log(message: str, flush: bool = True):
@@ -15,10 +35,7 @@ def log(message: str, flush: bool = True):
     - Stage transitions (downloading, transcribing, diarizing)
     - Errors and warnings
     """
-    try:
-        print(message, flush=flush)
-    except (OSError, AttributeError, IOError):
-        pass # Silently fail if stdout is unavailable
+    _safe_print(message, flush)
 
 
 def log_verbose(message: str, flush: bool = False):
@@ -31,10 +48,7 @@ def log_verbose(message: str, flush: bool = False):
     - Debug/diagnostic output
     """
     if os.getenv("VERBOSE_LOGGING", "false").lower() == "true":
-        try:
-            print(message, flush=flush)
-        except (OSError, AttributeError, IOError):
-            pass # Silently fail
+        _safe_print(message, flush)
 
 
 

@@ -1145,6 +1145,7 @@ class ChannelOverviewRead(BaseModel):
     video_count: int = 0
     processed_count: int = 0
     speaker_count: int = 0
+    total_duration_seconds: int = 0
 
 @app.post("/channels", response_model=Channel)
 def create_channel(url: str, background_tasks: BackgroundTasks):
@@ -1169,6 +1170,7 @@ def read_channels_overview(session: Session = Depends(get_session)):
             Video.channel_id.label("channel_id"),
             func.count(Video.id).label("video_count"),
             func.sum(case((Video.processed.is_(True), 1), else_=0)).label("processed_count"),
+            func.sum(func.coalesce(Video.duration, 0)).label("total_duration_seconds"),
         )
         .group_by(Video.channel_id)
         .subquery()
@@ -1187,6 +1189,7 @@ def read_channels_overview(session: Session = Depends(get_session)):
             Channel,
             func.coalesce(video_stats.c.video_count, 0).label("video_count"),
             func.coalesce(video_stats.c.processed_count, 0).label("processed_count"),
+            func.coalesce(video_stats.c.total_duration_seconds, 0).label("total_duration_seconds"),
             func.coalesce(speaker_stats.c.speaker_count, 0).label("speaker_count"),
         )
         .outerjoin(video_stats, video_stats.c.channel_id == Channel.id)
@@ -1205,9 +1208,10 @@ def read_channels_overview(session: Session = Depends(get_session)):
             status=channel.status,
             video_count=int(video_count or 0),
             processed_count=int(processed_count or 0),
+            total_duration_seconds=int(total_duration_seconds or 0),
             speaker_count=int(speaker_count or 0),
         )
-        for channel, video_count, processed_count, speaker_count in rows
+        for channel, video_count, processed_count, total_duration_seconds, speaker_count in rows
     ]
 
 @app.get("/channels/{channel_id}", response_model=Channel)

@@ -8,6 +8,7 @@ interface ChannelStats {
     video_count: number;
     processed_count: number;
     speaker_count: number;
+    total_duration_seconds: number;
 }
 
 interface ChannelOverview extends Channel, ChannelStats {}
@@ -23,6 +24,24 @@ export function Channels() {
     const [importing, setImporting] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    const formatRuntime = (totalSeconds: number) => {
+        const seconds = Math.max(0, Math.floor(totalSeconds || 0));
+        const hours = Math.floor(seconds / 3600);
+        if (hours >= 1000) {
+            return `${(hours / 1000).toFixed(1)}k hrs`;
+        }
+        if (hours >= 100) {
+            return `${hours} hrs`;
+        }
+        const days = Math.floor(hours / 24);
+        const remHours = hours % 24;
+        if (days >= 1) {
+            return `${days}d ${remHours}h`;
+        }
+        const minutes = Math.floor((seconds % 3600) / 60);
+        return `${hours}h ${minutes}m`;
+    };
+
     const fetchChannels = async () => {
         setLoadError(null);
         try {
@@ -34,6 +53,7 @@ export function Channels() {
                     video_count: channel.video_count ?? 0,
                     processed_count: channel.processed_count ?? 0,
                     speaker_count: channel.speaker_count ?? 0,
+                    total_duration_seconds: channel.total_duration_seconds ?? 0,
                 };
             }
             setChannelStats(statsByChannel);
@@ -287,6 +307,12 @@ export function Channels() {
                                         <span className="text-slate-500">Last Updated</span>
                                         <span className="text-slate-700 font-medium">{new Date(channel.last_updated).toLocaleDateString()}</span>
                                     </div>
+                                    {stats && (
+                                        <div className="flex items-center justify-between text-sm">
+                                            <span className="text-slate-500">Runtime</span>
+                                            <span className="text-slate-700 font-medium">{formatRuntime(stats.total_duration_seconds)}</span>
+                                        </div>
+                                    )}
                                 </div>
 
                                 <div className="flex gap-2 mt-auto">
