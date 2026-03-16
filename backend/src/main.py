@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from typing import List, Optional, Literal
+from typing import List, Optional
 from datetime import datetime, timedelta
-from sqlmodel import Session, select, SQLModel
+from sqlmodel import Session, select
 from sqlalchemy import func, text
 from pathlib import Path
 import shutil
@@ -25,8 +25,19 @@ import urllib.parse
 import urllib.request
 import urllib.error
 import numpy as np
-from pydantic import BaseModel
 from dotenv import set_key, load_dotenv
+from .schemas import (
+    ChannelOverviewRead, ChannelBatchPublishRequest,
+    VideoListItemRead,
+    TranscriptSearchPage, TranscriptSearchItemRead,
+    AssignSpeakerRequest, SegmentTextUpdateRequest, SplitSegmentProfileRequest,
+    ClipCreate, ClipRead, ChannelClipRead, ClipCaptionExportRequest, ClipExportPresetRequest,
+    ClipYoutubeUploadRequest, ClipBatchYoutubeUploadRequest,
+    SpeakerRead, SpeakerCountsRead, SpeakerEpisodeAppearanceRead, SpeakerVoiceProfileRead,
+    MoveSpeakerProfileRequest, SpeakerSample, ExtractThumbnailRequest, MergeRequest,
+    JobRead, PipelineFocusRead, PipelineFocusUpdate,
+    Settings, OllamaPullRequest, TranscriptionEngineTestRequest,
+)
 from filelock import FileLock, Timeout as FileLockTimeout
 
 # Load .env before configuring logging
@@ -50,12 +61,17 @@ def configure_logging():
 
 configure_logging()
 
-from .db.database import create_db_and_tables, engine, get_db_metrics_snapshot, IS_POSTGRES, Channel, Video, Speaker, SpeakerEmbedding, TranscriptSegment, TranscriptSegmentRead, TranscriptSegmentRevision, TranscriptSegmentRevisionRead, Job, JobBase, Clip, ClipExportArtifact, ClipExportArtifactRead, FunnyMoment, FunnyMomentRead, VideoDescriptionRevision, VideoDescriptionRevisionRead
+from .db.database import create_db_and_tables, engine, get_db_metrics_snapshot, IS_POSTGRES, Channel, Video, Speaker, SpeakerEmbedding, TranscriptSegment, TranscriptSegmentRead, TranscriptSegmentRevision, TranscriptSegmentRevisionRead, Job, Clip, ClipExportArtifact, ClipExportArtifactRead, FunnyMoment, FunnyMomentRead, VideoDescriptionRevision, VideoDescriptionRevisionRead
 from .services.ingestion import IngestionService
 
 ingestion_service = None
 worker_threads: dict[str, threading.Thread] = {}
 prefetch_thread = None
+
+# Canonical list of job statuses considered "active" in the pipeline.
+PIPELINE_ACTIVE_STATUSES = ["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]
+# Subset without waiting_diarize, for contexts where that status isn't relevant.
+PIPELINE_ACTIVE_STATUSES_CORE = ["queued", "running", "downloading", "transcribing", "diarizing"]
 youtube_oauth_pending_states: dict[str, float] = {}
 backend_instance_lock: FileLock | None = None
 BACKEND_RUNTIME_DIR = Path(__file__).parent.parent / "runtime"
@@ -1199,19 +1215,6 @@ def _youtube_channel_ownership_check_for_app_channel(channel: Channel) -> dict:
 
 # --- Channels ---
 
-class ChannelOverviewRead(BaseModel):
-    id: int
-    url: str
-    name: str
-    icon_url: Optional[str] = None
-    header_image_url: Optional[str] = None
-    last_updated: Optional[datetime] = None
-    status: str
-    video_count: int = 0
-    processed_count: int = 0
-    speaker_count: int = 0
-    total_duration_seconds: int = 0
-
 @app.post("/channels", response_model=Channel)
 def create_channel(url: str, background_tasks: BackgroundTasks):
     try:
@@ -1412,7 +1415,7 @@ def delete_channel_preview(channel_id: int, session: Session = Depends(get_sessi
         clip_count = session.exec(select(func.count(Clip.id)).where(Clip.video_id.in_(video_ids))).one()
         active_jobs = session.exec(select(func.count(Job.id)).where(
             Job.video_id.in_(video_ids),
-            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
+            Job.status.in_(PIPELINE_ACTIVE_STATUSES)
         )).one()
     speaker_count = session.exec(select(func.count(Speaker.id)).where(Speaker.channel_id == channel_id)).one()
 
@@ -1447,7 +1450,7 @@ def delete_channel(channel_id: int, session: Session = Depends(get_session)):
     if video_ids:
         active = session.exec(select(Job).where(
             Job.video_id.in_(video_ids),
-            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
+            Job.status.in_(PIPELINE_ACTIVE_STATUSES)
         )).first()
         if active:
             raise HTTPException(status_code=400, detail=f"Cannot delete channel with active job (job {active.id}, status: {active.status}). Cancel active jobs first.")
@@ -1829,19 +1832,6 @@ def import_channel(archive: dict, session: Session = Depends(get_session)):
 
 # --- Videos ---
 
-class VideoListItemRead(BaseModel):
-    id: int
-    youtube_id: str
-    channel_id: Optional[int] = None
-    title: str
-    published_at: Optional[datetime] = None
-    description: Optional[str] = None
-    thumbnail_url: Optional[str] = None
-    duration: Optional[int] = None
-    processed: bool = False
-    muted: bool = False
-    status: str
-
 @app.get("/videos", response_model=List[Video])
 def read_videos(channel_id: Optional[int] = None, session: Session = Depends(get_session)):
     from sqlalchemy import case
@@ -1952,12 +1942,11 @@ def _enqueue_unique_job(
     payload: Optional[dict] = None,
 ) -> Job:
     payload_text = json.dumps(payload or {}, sort_keys=True) if payload is not None else None
-    active_statuses = ["queued", "running", "downloading", "transcribing", "diarizing"]
     existing = session.exec(
         select(Job).where(
             Job.video_id == video_id,
             Job.job_type == job_type,
-            Job.status.in_(active_statuses),
+            Job.status.in_(PIPELINE_ACTIVE_STATUSES_CORE),
         )
     ).all()
     for j in existing:
@@ -1971,12 +1960,11 @@ def _enqueue_unique_job(
 
 @app.post("/videos/{video_id}/process")
 def process_video(video_id: int, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
-    pipeline_active_statuses = ["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]
     job = session.exec(
         select(Job).where(
             Job.video_id == video_id,
             Job.job_type.in_(["process", "diarize"]),
-            Job.status.in_(pipeline_active_statuses),
+            Job.status.in_(PIPELINE_ACTIVE_STATUSES),
         )
     ).first()
     if not job:
@@ -2005,7 +1993,7 @@ def process_all_videos(channel_id: int, session: Session = Depends(get_session))
         existing = session.exec(
             select(Job).where(
                 Job.video_id == video.id,
-                Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
+                Job.status.in_(PIPELINE_ACTIVE_STATUSES)
             )
         ).first()
 
@@ -2253,13 +2241,6 @@ def restore_video_description_from_history(video_id: int, revision_id: int, sess
     return video
 
 
-class ChannelBatchPublishRequest(BaseModel):
-    dry_run: bool = True
-    confirm: bool = False
-    push_to_youtube: Optional[bool] = None
-    limit: Optional[int] = None
-
-
 @app.post("/channels/{channel_id}/youtube-ai/publish-descriptions")
 def batch_publish_channel_youtube_descriptions(channel_id: int, req: ChannelBatchPublishRequest, session: Session = Depends(get_session)):
     channel = session.get(Channel, channel_id)
@@ -2377,23 +2358,6 @@ def batch_publish_channel_youtube_descriptions(channel_id: int, req: ChannelBatc
         "estimated_youtube_quota_units": (len(eligible_video_ids) * 51) if should_push else 0,
         "items": results,
     }
-
-class TranscriptSearchPage(SQLModel):
-    items: List["TranscriptSearchItemRead"]
-    total: int
-    limit: int
-    offset: int
-    has_more: bool
-
-class TranscriptSearchItemRead(SQLModel):
-    id: int
-    video_id: int
-    speaker_id: Optional[int] = None
-    matched_profile_id: Optional[int] = None
-    start_time: float
-    end_time: float
-    text: str
-    speaker: Optional[str] = None
 
 @app.get("/search", response_model=TranscriptSearchPage)
 def search_segments(
@@ -2535,13 +2499,6 @@ def search_segments(
         has_more=(safe_offset + len(items)) < int(total or 0),
     )
 
-class AssignSpeakerRequest(SQLModel):
-    speaker_id: int
-
-class SegmentTextUpdateRequest(SQLModel):
-    text: str
-    words: Optional[List[str]] = None
-
 @app.patch("/segments/{segment_id}/assign-speaker")
 def assign_segment_speaker(segment_id: int, body: AssignSpeakerRequest, session: Session = Depends(get_session)):
     """Assign or reassign a speaker to a transcript segment."""
@@ -2561,13 +2518,6 @@ def assign_segment_speaker(segment_id: int, body: AssignSpeakerRequest, session:
     _invalidate_speaker_query_caches()
     session.refresh(segment)
     return {"id": segment.id, "speaker_id": body.speaker_id, "speaker_name": speaker.name, "matched_profile_id": None}
-
-
-class SplitSegmentProfileRequest(BaseModel):
-    profile_id: Optional[int] = None
-    target_speaker_id: Optional[int] = None
-    new_speaker_name: Optional[str] = None
-    reassign_segment: bool = True
 
 
 def _move_profile_between_speakers(
@@ -2896,84 +2846,6 @@ def get_clip(video_id: int, start: float, end: float, audio_only: bool = False):
         raise HTTPException(status_code=400, detail=str(e))
 
 # --- Saved Clips ---
-
-class ClipCreate(SQLModel):
-    start_time: float
-    end_time: float
-    title: str
-    aspect_ratio: str = "source"
-    crop_x: Optional[float] = None
-    crop_y: Optional[float] = None
-    crop_w: Optional[float] = None
-    crop_h: Optional[float] = None
-    portrait_split_enabled: bool = False
-    portrait_top_crop_x: Optional[float] = None
-    portrait_top_crop_y: Optional[float] = None
-    portrait_top_crop_w: Optional[float] = None
-    portrait_top_crop_h: Optional[float] = None
-    portrait_bottom_crop_x: Optional[float] = None
-    portrait_bottom_crop_y: Optional[float] = None
-    portrait_bottom_crop_w: Optional[float] = None
-    portrait_bottom_crop_h: Optional[float] = None
-    script_edits_json: Optional[str] = None
-    fade_in_sec: float = 0.0
-    fade_out_sec: float = 0.0
-    burn_captions: bool = False
-    caption_speaker_labels: bool = True
-
-class ClipRead(ClipCreate):
-    id: int
-    video_id: int
-    created_at: datetime
-
-
-class ChannelClipRead(ClipRead):
-    video_title: str
-    video_youtube_id: str
-    video_published_at: Optional[datetime] = None
-    video_thumbnail_url: Optional[str] = None
-
-class ClipCaptionExportRequest(SQLModel):
-    format: str = "srt"
-    speaker_labels: Optional[bool] = None
-
-class ClipExportPresetRequest(SQLModel):
-    burn_captions: Optional[bool] = None
-    caption_speaker_labels: Optional[bool] = None
-    aspect_ratio: Optional[str] = None
-    crop_x: Optional[float] = None
-    crop_y: Optional[float] = None
-    crop_w: Optional[float] = None
-    crop_h: Optional[float] = None
-    portrait_split_enabled: Optional[bool] = None
-    portrait_top_crop_x: Optional[float] = None
-    portrait_top_crop_y: Optional[float] = None
-    portrait_top_crop_w: Optional[float] = None
-    portrait_top_crop_h: Optional[float] = None
-    portrait_bottom_crop_x: Optional[float] = None
-    portrait_bottom_crop_y: Optional[float] = None
-    portrait_bottom_crop_w: Optional[float] = None
-    portrait_bottom_crop_h: Optional[float] = None
-    fade_in_sec: Optional[float] = None
-    fade_out_sec: Optional[float] = None
-
-
-class ClipYoutubeUploadRequest(SQLModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    privacy_status: str = "private"  # private|unlisted|public
-    category_id: str = "22"  # People & Blogs
-    made_for_kids: bool = False
-    tags: Optional[List[str]] = None
-
-
-class ClipBatchYoutubeUploadRequest(SQLModel):
-    clip_ids: List[int]
-    privacy_status: str = "private"  # private|unlisted|public
-    category_id: str = "22"
-    made_for_kids: bool = False
-    tags: Optional[List[str]] = None
-
 
 def _normalize_clip_defaults(clip: Clip) -> bool:
     changed = False
@@ -3452,46 +3324,6 @@ def upload_clips_to_youtube_batch(req: ClipBatchYoutubeUploadRequest, session: S
 
 # --- Speakers ---
 
-class SpeakerRead(SQLModel):
-    id: int
-    channel_id: int
-    name: str
-    thumbnail_path: Optional[str] = None
-    is_extra: bool = False
-    total_speaking_time: float = 0.0
-    embedding_count: int = 0
-    created_at: datetime
-
-class SpeakerCountsRead(SQLModel):
-    total: int
-    identified: int
-    unknown: int
-    main: int
-    extras: int
-
-class SpeakerEpisodeAppearanceRead(SQLModel):
-    video_id: int
-    youtube_id: str
-    title: str
-    published_at: Optional[datetime] = None
-    thumbnail_url: Optional[str] = None
-    segment_count: int
-    total_speaking_time: float
-    first_start_time: float
-    last_end_time: float
-
-class SpeakerVoiceProfileRead(SQLModel):
-    id: int
-    speaker_id: int
-    source_video_id: Optional[int] = None
-    source_video_title: Optional[str] = None
-    source_video_youtube_id: Optional[str] = None
-    source_video_published_at: Optional[datetime] = None
-    sample_start_time: Optional[float] = None
-    sample_end_time: Optional[float] = None
-    sample_text: Optional[str] = None
-    created_at: datetime
-
 _SPEAKER_QUERY_CACHE_TTL_SECONDS = max(
     3,
     int(os.getenv("SPEAKER_QUERY_CACHE_TTL_SECONDS", "120"))
@@ -3871,11 +3703,6 @@ def delete_speaker_profile(speaker_id: int, profile_id: int, session: Session = 
 
     return {"status": "deleted", "profile_id": profile_id, "remaining_profiles": int(remaining)}
 
-class MoveSpeakerProfileRequest(BaseModel):
-    target_speaker_id: Optional[int] = None
-    new_speaker_name: Optional[str] = None
-
-
 @app.post("/profiles/{profile_id}/reassign-segments")
 def reassign_segments_for_profile(profile_id: int, session: Session = Depends(get_session)):
     from sqlalchemy import func, update
@@ -3960,15 +3787,6 @@ def move_speaker_profile(
         **result,
     }
 
-class SpeakerSample(SQLModel):
-    id: int
-    video_id: int
-    start_time: float
-    end_time: float
-    text: str
-    channel_id: int
-    youtube_id: str
-
 @app.get("/speakers/{speaker_id}/samples", response_model=List[SpeakerSample])
 def get_speaker_samples(speaker_id: int, count: int = 3, strategy: str = "random", session: Session = Depends(get_session)):
     """
@@ -4004,11 +3822,6 @@ def get_speaker_samples(speaker_id: int, count: int = 3, strategy: str = "random
         samples.append(SpeakerSample(**data))
         
     return samples
-
-class ExtractThumbnailRequest(SQLModel):
-    video_id: int
-    timestamp: float
-    crop_coords: dict # {x, y, w, h}
 
 @app.post("/speakers/{speaker_id}/thumbnail/extract", response_model=SpeakerRead)
 def extract_speaker_thumbnail(speaker_id: int, req: ExtractThumbnailRequest, session: Session = Depends(get_session)):
@@ -4202,10 +4015,6 @@ def update_speaker(speaker_id: int, data: dict, session: Session = Depends(get_s
         created_at=updated_speaker.created_at
     )
 
-class MergeRequest(BaseModel):
-    target_id: int
-    source_ids: List[int]
-
 @app.post("/speakers/merge", response_model=SpeakerRead)
 def merge_speakers(req: MergeRequest, session: Session = Depends(get_session)):
     """Merge multiple speakers into one target speaker.
@@ -4283,7 +4092,7 @@ def purge_video(video_id: int, session: Session = Depends(get_session)):
     if not video: raise HTTPException(status_code=404, detail="Video not found")
 
     # verify no active job
-    active_job = session.exec(select(Job).where(Job.video_id == video.id, Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]))).first()
+    active_job = session.exec(select(Job).where(Job.video_id == video.id, Job.status.in_(PIPELINE_ACTIVE_STATUSES))).first()
     if active_job:
         raise HTTPException(status_code=400, detail=f"Cannot purge video with active job {active_job.id} ({active_job.status})")
 
@@ -4323,7 +4132,7 @@ def redo_diarization(video_id: int, session: Session = Depends(get_session)):
     # Verify no active job
     active_job = session.exec(select(Job).where(
         Job.video_id == video.id,
-        Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
+        Job.status.in_(PIPELINE_ACTIVE_STATUSES)
     )).first()
     if active_job:
         raise HTTPException(status_code=400, detail=f"Video has an active job {active_job.id} ({active_job.status})")
@@ -4607,7 +4416,7 @@ def redo_transcription(video_id: int, session: Session = Depends(get_session)):
     active_job = session.exec(
         select(Job).where(
             Job.video_id == video.id,
-            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
+            Job.status.in_(PIPELINE_ACTIVE_STATUSES)
         )
     ).first()
     if active_job:
@@ -4656,26 +4465,6 @@ def toggle_video_mute(video_id: int, session: Session = Depends(get_session)):
     return video
 
 # --- Jobs ---
-
-class JobRead(JobBase):
-    id: int
-    video: Optional[Video] = None
-
-
-class PipelineFocusRead(BaseModel):
-    mode: Literal["transcribe", "diarize"]
-    auto_diarize_ready: bool
-    transcribe_active: int
-    transcribe_queued: int
-    diarize_active: int
-    diarize_queued: int
-    active_transcription_paused: int = 0
-
-
-class PipelineFocusUpdate(BaseModel):
-    mode: Literal["transcribe", "diarize"]
-    pause_active_transcription: bool = False
-
 
 def _job_queue_name(job_type: str) -> str:
     jt = (job_type or "").strip().lower()
@@ -4763,8 +4552,8 @@ def get_queue_status(session: Session = Depends(get_session)):
     }
 
 
-@app.get("/jobs/pipeline/focus", response_model=PipelineFocusRead)
-def get_pipeline_focus(session: Session = Depends(get_session)):
+def _compute_pipeline_focus_counts(session: Session) -> dict:
+    """Shared helper for pipeline focus count queries."""
     transcribe_active_statuses = ["running", "downloading", "transcribing"]
     diarize_active_statuses = ["running", "diarizing"]
     transcribe_active = int(
@@ -4800,13 +4589,18 @@ def get_pipeline_focus(session: Session = Depends(get_session)):
         ).one() or 0
     )
     return {
-        "mode": ingestion_service.get_pipeline_focus_mode(),
-        "auto_diarize_ready": transcribe_active == 0 and transcribe_queued == 0 and (diarize_active > 0 or diarize_queued > 0),
         "transcribe_active": transcribe_active,
         "transcribe_queued": transcribe_queued,
         "diarize_active": diarize_active,
         "diarize_queued": diarize_queued,
+        "auto_diarize_ready": transcribe_active == 0 and transcribe_queued == 0 and (diarize_active > 0 or diarize_queued > 0),
     }
+
+
+@app.get("/jobs/pipeline/focus", response_model=PipelineFocusRead)
+def get_pipeline_focus(session: Session = Depends(get_session)):
+    counts = _compute_pipeline_focus_counts(session)
+    return {"mode": ingestion_service.get_pipeline_focus_mode(), **counts}
 
 
 @app.post("/jobs/pipeline/focus", response_model=PipelineFocusRead)
@@ -4827,49 +4621,8 @@ def set_pipeline_focus(payload: PipelineFocusUpdate, session: Session = Depends(
         if paused_active_count:
             session.commit()
 
-    transcribe_active_statuses = ["running", "downloading", "transcribing"]
-    diarize_active_statuses = ["running", "diarizing"]
-    transcribe_active = int(
-        session.exec(
-            select(func.count(Job.id)).where(
-                Job.job_type == "process",
-                Job.status.in_(transcribe_active_statuses),
-            )
-        ).one() or 0
-    )
-    transcribe_queued = int(
-        session.exec(
-            select(func.count(Job.id)).where(
-                Job.job_type == "process",
-                Job.status == "queued",
-            )
-        ).one() or 0
-    )
-    diarize_active = int(
-        session.exec(
-            select(func.count(Job.id)).where(
-                Job.job_type == "diarize",
-                Job.status.in_(diarize_active_statuses),
-            )
-        ).one() or 0
-    )
-    diarize_queued = int(
-        session.exec(
-            select(func.count(Job.id)).where(
-                Job.job_type == "diarize",
-                Job.status == "queued",
-            )
-        ).one() or 0
-    )
-    return {
-        "mode": mode,
-        "auto_diarize_ready": transcribe_active == 0 and transcribe_queued == 0 and (diarize_active > 0 or diarize_queued > 0),
-        "transcribe_active": transcribe_active,
-        "transcribe_queued": transcribe_queued,
-        "diarize_active": diarize_active,
-        "diarize_queued": diarize_queued,
-        "active_transcription_paused": paused_active_count,
-    }
+    counts = _compute_pipeline_focus_counts(session)
+    return {"mode": mode, **counts, "active_transcription_paused": paused_active_count}
 
 
 @app.get("/settings/db-health")
@@ -4967,7 +4720,7 @@ def get_db_health(session: Session = Depends(get_session)):
 def pause_job(job_id: int, session: Session = Depends(get_session)):
     job = session.get(Job, job_id)
     if not job: raise HTTPException(status_code=404, detail="Job not found")
-    if job.status not in ["queued", "running", "downloading", "transcribing", "diarizing"]:
+    if job.status not in PIPELINE_ACTIVE_STATUSES_CORE:
         raise HTTPException(status_code=400, detail="Cannot pause job in current status")
     
     job.status = "paused"
@@ -5068,7 +4821,7 @@ def resubmit_job(job_id: int, session: Session = Depends(get_session)):
     # Check no active job already exists for this video
     active = session.exec(select(Job).where(
         Job.video_id == video_id,
-        Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
+        Job.status.in_(PIPELINE_ACTIVE_STATUSES)
     )).first()
     if active:
         raise HTTPException(status_code=400, detail=f"Video already has an active job ({active.status})")
@@ -5145,70 +4898,6 @@ def cancel_job(job_id: int, session: Session = Depends(get_session)):
     session.delete(job)
     session.commit()
     return {"status": "cancelled", "video_status": job.video.status if job.video else "unknown"}
-
-class Settings(BaseModel):
-    hf_token: str
-    transcription_engine: str = "auto"  # auto | whisper | parakeet
-    transcription_model: str = "medium"
-    transcription_compute_type: str = "int8_float16"
-    parakeet_model: str = "nvidia/parakeet-tdt-0.6b-v2"
-    parakeet_batch_size: int = 16
-    parakeet_batch_auto: bool = True
-    parakeet_require_word_timestamps: bool = True
-    parakeet_allow_whisper_fallback: bool = True
-    parakeet_unload_after_transcribe: bool = False
-    beam_size: int = 1  # 1=fastest, 5=most accurate
-    vad_filter: bool = True  # Skip silent portions for faster processing
-    batched_transcription: bool = True  # Process audio in parallel batches
-    verbose_logging: bool = False  # Show detailed debug output in terminal
-    llm_provider: str = "ollama"
-    llm_enabled: bool = False
-    ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "mistral"
-    ollama_model_tier: str = "medium"  # lite | medium | q8 | custom
-    ollama_enabled: bool = False
-    nvidia_nim_base_url: str = "https://integrate.api.nvidia.com"
-    nvidia_nim_model: str = "moonshotai/kimi-k2.5"
-    nvidia_nim_api_key: str = ""
-    nvidia_nim_thinking_mode: bool = False
-    nvidia_nim_min_request_interval_seconds: float = 2.5
-    openai_base_url: str = "https://api.openai.com"
-    openai_model: str = "gpt-4o-mini"
-    openai_api_key: str = ""
-    anthropic_base_url: str = "https://api.anthropic.com"
-    anthropic_model: str = "claude-3-5-sonnet-latest"
-    anthropic_api_key: str = ""
-    gemini_base_url: str = "https://generativelanguage.googleapis.com"
-    gemini_model: str = "gemini-2.5-flash"
-    gemini_api_key: str = ""
-    groq_base_url: str = "https://api.groq.com/openai"
-    groq_model: str = "llama-3.3-70b-versatile"
-    groq_api_key: str = ""
-    openrouter_base_url: str = "https://openrouter.ai/api"
-    openrouter_model: str = "openai/gpt-4o-mini"
-    openrouter_api_key: str = ""
-    xai_base_url: str = "https://api.x.ai"
-    xai_model: str = "grok-2"
-    xai_api_key: str = ""
-    youtube_oauth_client_id: str = ""
-    youtube_oauth_client_secret: str = ""
-    youtube_oauth_redirect_uri: str = "http://localhost:8000/auth/youtube/callback"
-    youtube_publish_push_enabled: bool = False
-    ytdlp_cookies_file: str = ""
-    ytdlp_cookies_from_browser: str = ""
-    diarization_sensitivity: str = "balanced"  # "conservative", "balanced", "aggressive"
-    speaker_match_threshold: float = 0.5  # Cosine distance threshold for speaker matching
-    funny_moments_max_saved: int = 25  # Top-ranked moments kept after detection
-    funny_moments_explain_batch_limit: int = 12  # Max moments explained per click/run
-    setup_wizard_completed: bool = False
-
-class OllamaPullRequest(BaseModel):
-    url: Optional[str] = None
-    model: Optional[str] = None
-    wait_for_completion: bool = False
-
-class TranscriptionEngineTestRequest(BaseModel):
-    engine: Optional[str] = None
 
 @app.get("/settings", response_model=Settings)
 def get_settings():

@@ -5,6 +5,7 @@ import { toApiUrl } from '../lib/api';
 import type { Job } from '../types';
 import { Pause, Play, Trash2, Clock, CheckCircle2, DownloadCloud, FileText, Users, Video as VideoIcon, RefreshCw, ArrowUp, Smile, Bot, Scissors, Cpu } from 'lucide-react';
 import axios from 'axios';
+import { usePollingFetch } from '../hooks/usePollingFetch';
 
 const ACTIVE_STATUSES = ['downloading', 'transcribing', 'diarizing', 'running'];
 const JOBS_FETCH_LIMIT = 1200;
@@ -86,90 +87,35 @@ export function JobQueue() {
     const [lowerTab, setLowerTab] = useState<'transcribe' | 'diarize' | 'history'>('transcribe');
     const [pipelineFocus, setPipelineFocus] = useState<PipelineFocus | null>(null);
     const mountedRef = useRef(false);
-    const jobsInFlightRef = useRef(false);
-    const summaryInFlightRef = useRef(false);
-    const historyInFlightRef = useRef(false);
-    const workerInFlightRef = useRef(false);
-    const jobsAbortRef = useRef<AbortController | null>(null);
-    const summaryAbortRef = useRef<AbortController | null>(null);
-    const historyAbortRef = useRef<AbortController | null>(null);
-    const workerAbortRef = useRef<AbortController | null>(null);
-    const pipelineFocusInFlightRef = useRef(false);
-    const pipelineFocusAbortRef = useRef<AbortController | null>(null);
 
-    const isRequestCanceled = (err: unknown) =>
-        axios.isAxiosError(err) && (err.code === 'ERR_CANCELED' || err.message === 'canceled');
+    const byDescCreated = (a: Job, b: Job) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
 
-    const fetchJobs = async (force = false) => {
-        if (jobsInFlightRef.current && !force) return;
-        if (force && jobsAbortRef.current) jobsAbortRef.current.abort();
-        jobsInFlightRef.current = true;
-        const controller = new AbortController();
-        jobsAbortRef.current = controller;
-        try {
-            const res = await api.get<Job[]>('/jobs', {
-                params: { limit: JOBS_FETCH_LIMIT },
-                signal: controller.signal,
-            });
-            if (!mountedRef.current) return;
-            setJobs(Array.isArray(res.data) ? res.data : []);
-        } catch (e) {
-            if (isRequestCanceled(e)) return;
-            console.error('Failed to fetch jobs:', e);
-            if (!mountedRef.current) return;
-            // Preserve existing list on transient fetch failures to avoid jarring full resets.
-        } finally {
-            jobsInFlightRef.current = false;
-            if (mountedRef.current) setLoading(false);
-        }
-    };
+    const fetchJobs = usePollingFetch<Job[]>({
+        mountedRef,
+        request: (signal) => api.get('/jobs', { params: { limit: JOBS_FETCH_LIMIT }, signal }),
+        onSuccess: (data) => setJobs(Array.isArray(data) ? data : []),
+        onError: (e) => console.error('Failed to fetch jobs:', e),
+        onFinally: () => { if (mountedRef.current) setLoading(false); },
+    });
 
-    const fetchQueueSummary = async (force = false) => {
-        if (summaryInFlightRef.current && !force) return;
-        if (force && summaryAbortRef.current) summaryAbortRef.current.abort();
-        summaryInFlightRef.current = true;
-        const controller = new AbortController();
-        summaryAbortRef.current = controller;
-        try {
-            const res = await api.get<QueueSummary>('/jobs/queues/summary', { signal: controller.signal });
-            if (!mountedRef.current) return;
-            setQueueSummary(res.data || null);
-        } catch (e) {
-            if (isRequestCanceled(e)) return;
-            console.error('Failed to fetch queue summary:', e);
-            if (!mountedRef.current) return;
-            setQueueSummary(null);
-        } finally {
-            summaryInFlightRef.current = false;
-        }
-    };
+    const fetchQueueSummary = usePollingFetch<QueueSummary>({
+        mountedRef,
+        request: (signal) => api.get('/jobs/queues/summary', { signal }),
+        onSuccess: (data) => setQueueSummary(data || null),
+        onError: (e) => { console.error('Failed to fetch queue summary:', e); setQueueSummary(null); },
+    });
 
-    const fetchHistoryJobs = async (force = false) => {
-        if (historyInFlightRef.current && !force) return;
-        if (force && historyAbortRef.current) historyAbortRef.current.abort();
-        historyInFlightRef.current = true;
-        const controller = new AbortController();
-        historyAbortRef.current = controller;
-        try {
-            const [completedRes, failedRes, waitingDiarizeRes, funnyCompletedRes] = await Promise.all([
-                api.get<Job[]>('/jobs', {
-                    params: { status: 'completed', job_type: 'process', limit: HISTORY_FETCH_LIMIT },
-                    signal: controller.signal,
-                }),
-                api.get<Job[]>('/jobs', {
-                    params: { status: 'failed', job_type: 'process', limit: HISTORY_FETCH_LIMIT },
-                    signal: controller.signal,
-                }),
-                api.get<Job[]>('/jobs', {
-                    params: { status: 'waiting_diarize', job_type: 'process', limit: HISTORY_FETCH_LIMIT },
-                    signal: controller.signal,
-                }),
-                api.get<Job[]>('/jobs', {
-                    params: { status: 'completed', job_type: 'funny_detect,funny_explain', limit: HISTORY_FETCH_LIMIT },
-                    signal: controller.signal,
-                }),
-            ]);
-            if (!mountedRef.current) return;
+    const fetchHistoryJobs = usePollingFetch<[{ data: Job[] }, { data: Job[] }, { data: Job[] }, { data: Job[] }]>({
+        mountedRef,
+        request: (signal) => Promise.all([
+            api.get<Job[]>('/jobs', { params: { status: 'completed', job_type: 'process', limit: HISTORY_FETCH_LIMIT }, signal }),
+            api.get<Job[]>('/jobs', { params: { status: 'failed', job_type: 'process', limit: HISTORY_FETCH_LIMIT }, signal }),
+            api.get<Job[]>('/jobs', { params: { status: 'waiting_diarize', job_type: 'process', limit: HISTORY_FETCH_LIMIT }, signal }),
+            api.get<Job[]>('/jobs', { params: { status: 'completed', job_type: 'funny_detect,funny_explain', limit: HISTORY_FETCH_LIMIT }, signal }),
+        ]).then(([completed, failed, waitingDiarize, funny]) => ({
+            data: [completed, failed, waitingDiarize, funny] as [{ data: Job[] }, { data: Job[] }, { data: Job[] }, { data: Job[] }],
+        })),
+        onSuccess: ([completedRes, failedRes, waitingDiarizeRes, funnyCompletedRes]) => {
             const processMerged = [
                 ...(Array.isArray(waitingDiarizeRes.data) ? waitingDiarizeRes.data : []),
                 ...(Array.isArray(completedRes.data) ? completedRes.data : []),
@@ -178,54 +124,23 @@ export function JobQueue() {
             const funnyMerged = (Array.isArray(funnyCompletedRes.data) ? funnyCompletedRes.data : []).sort(byDescCreated);
             setHistoryRows(processMerged);
             setFunnyHistoryRows(funnyMerged);
-        } catch (e) {
-            if (isRequestCanceled(e)) return;
-            console.error('Failed to fetch history jobs:', e);
-            if (!mountedRef.current) return;
-            // Keep existing history rows on transient failures.
-        } finally {
-            historyInFlightRef.current = false;
-        }
-    };
+        },
+        onError: (e) => console.error('Failed to fetch history jobs:', e),
+    });
 
-    const fetchPipelineFocus = async (force = false) => {
-        if (pipelineFocusInFlightRef.current && !force) return;
-        if (force && pipelineFocusAbortRef.current) pipelineFocusAbortRef.current.abort();
-        pipelineFocusInFlightRef.current = true;
-        const controller = new AbortController();
-        pipelineFocusAbortRef.current = controller;
-        try {
-            const res = await api.get<PipelineFocus>('/jobs/pipeline/focus', { signal: controller.signal });
-            if (!mountedRef.current) return;
-            setPipelineFocus(res.data || null);
-        } catch (e) {
-            if (isRequestCanceled(e)) return;
-            console.error('Failed to fetch pipeline focus:', e);
-            if (!mountedRef.current) return;
-            setPipelineFocus(null);
-        } finally {
-            pipelineFocusInFlightRef.current = false;
-        }
-    };
+    const fetchPipelineFocus = usePollingFetch<PipelineFocus>({
+        mountedRef,
+        request: (signal) => api.get('/jobs/pipeline/focus', { signal }),
+        onSuccess: (data) => setPipelineFocus(data || null),
+        onError: (e) => { console.error('Failed to fetch pipeline focus:', e); setPipelineFocus(null); },
+    });
 
-    const checkWorkerStatus = async (force = false) => {
-        if (workerInFlightRef.current && !force) return;
-        if (force && workerAbortRef.current) workerAbortRef.current.abort();
-        workerInFlightRef.current = true;
-        const controller = new AbortController();
-        workerAbortRef.current = controller;
-        try {
-            const res = await api.get('/system/worker-status', { signal: controller.signal });
-            if (!mountedRef.current) return;
-            setWorkerStatus(res.data.status);
-        } catch (e) {
-            if (isRequestCanceled(e)) return;
-            if (!mountedRef.current) return;
-            setWorkerStatus('offline');
-        } finally {
-            workerInFlightRef.current = false;
-        }
-    };
+    const checkWorkerStatus = usePollingFetch<{ status: 'online' | 'offline' | 'stalled' }>({
+        mountedRef,
+        request: (signal) => api.get('/system/worker-status', { signal }),
+        onSuccess: (data) => setWorkerStatus(data.status),
+        onError: () => setWorkerStatus('offline'),
+    });
 
     useEffect(() => {
         mountedRef.current = true;
@@ -322,7 +237,7 @@ export function JobQueue() {
             if (mountedRef.current) {
                 setPipelineFocus(res.data || null);
             }
-            await Promise.all([fetchPipelineFocus(true), fetchJobs(true), fetchHistoryJobs(true), fetchQueueSummary(true)]);
+            await Promise.all([fetchJobs(true), fetchHistoryJobs(true), fetchQueueSummary(true)]);
         } catch (e) {
             console.error(e);
         }
@@ -335,7 +250,6 @@ export function JobQueue() {
     };
 
     const byAscCreated = (a: Job, b: Job) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
-    const byDescCreated = (a: Job, b: Job) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     const byDescStarted = (a: Job, b: Job) => {
         const aTime = new Date(a.started_at || a.created_at).getTime();
         const bTime = new Date(b.started_at || b.created_at).getTime();

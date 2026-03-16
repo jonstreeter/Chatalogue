@@ -25,6 +25,20 @@ class JobPausedException(Exception):
     """Raised when a job is paused by the user during processing."""
     pass
 
+
+def _env_float(name: str, default: str) -> float:
+    """Parse a float from an environment variable with a fallback default."""
+    try:
+        return float((os.getenv(name) or default).strip() or default)
+    except (ValueError, TypeError):
+        return float(default)
+
+
+def _truncate_error(error: str | None, max_len: int = 4000) -> str:
+    """Truncate an error message to a safe DB storage length."""
+    return (error or "Unknown error")[:max_len]
+
+
 # Configuration
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 AUDIO_DIR = DATA_DIR / "audio"
@@ -649,7 +663,7 @@ class IngestionService:
             if not job:
                 return
             job.status = "failed"
-            job.error = (error or "Unknown error")[:4000]
+            job.error = _truncate_error(error)
             job.completed_at = datetime.now()
             job.status_detail = None
             session.add(job)
@@ -863,7 +877,8 @@ class IngestionService:
                 session.add(video)
             session.commit()
 
-    def _mark_process_job_completed_from_child(self, parent_job_id: int, child_job_id: int):
+    def _finalize_process_job_from_child(self, parent_job_id: int, child_job_id: int, status: str, error: str = None):
+        """Update a parent process job based on its child job's outcome."""
         with Session(engine) as session:
             parent = session.get(Job, parent_job_id)
             child = session.get(Job, child_job_id)
@@ -874,32 +889,14 @@ class IngestionService:
             for key, value in child_payload.items():
                 if key.startswith("stage_") or key.startswith("parakeet_") or key.startswith("transcription_"):
                     payload[key] = value
-            payload["pipeline_stage"] = "completed"
+            payload["pipeline_stage"] = status
             payload["diarize_job_id"] = int(child_job_id)
             parent.payload_json = json.dumps(payload, sort_keys=True)
-            parent.status = "completed"
-            parent.progress = 100
-            parent.status_detail = None
-            parent.completed_at = datetime.now()
-            session.add(parent)
-            session.commit()
-
-    def _mark_process_job_failed_from_child(self, parent_job_id: int, child_job_id: int, error: str):
-        with Session(engine) as session:
-            parent = session.get(Job, parent_job_id)
-            child = session.get(Job, child_job_id)
-            if not parent:
-                return
-            payload = self._load_job_payload(parent.payload_json)
-            child_payload = self._load_job_payload(child.payload_json if child else None)
-            for key, value in child_payload.items():
-                if key.startswith("stage_") or key.startswith("parakeet_") or key.startswith("transcription_"):
-                    payload[key] = value
-            payload["pipeline_stage"] = "failed"
-            payload["diarize_job_id"] = int(child_job_id)
-            parent.payload_json = json.dumps(payload, sort_keys=True)
-            parent.status = "failed"
-            parent.error = (error or "Unknown error")[:4000]
+            parent.status = status
+            if status == "completed":
+                parent.progress = 100
+            if error:
+                parent.error = _truncate_error(error)
             parent.status_detail = None
             parent.completed_at = datetime.now()
             session.add(parent)
@@ -1278,10 +1275,7 @@ class IngestionService:
             "label": str(label or "unknown"),
             "job_id": int(job_id) if job_id else None,
             "device": self.device or "unknown",
-            "free_gb": round(float(snap.get("free") or 0) / (1024 ** 3), 2) if snap.get("free") else 0.0,
-            "total_gb": round(float(snap.get("total") or 0) / (1024 ** 3), 2) if snap.get("total") else 0.0,
-            "allocated_gb": round(float(snap.get("allocated") or 0) / (1024 ** 3), 2) if snap.get("allocated") else 0.0,
-            "reserved_gb": round(float(snap.get("reserved") or 0) / (1024 ** 3), 2) if snap.get("reserved") else 0.0,
+            **self._snap_to_gb_dict(snap),
             "parakeet_dynamic_batch_cap": (
                 int(self._parakeet_dynamic_batch_cap) if self._parakeet_dynamic_batch_cap is not None else None
             ),
@@ -1310,15 +1304,10 @@ class IngestionService:
             return None
 
         snap = self._cuda_memory_snapshot()
-        free_b = int(snap.get("free") or 0)
-        total_b = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
-        allocated_b = int(snap.get("allocated") or 0)
-        reserved_b = int(snap.get("reserved") or 0)
+        free_b, total_b, allocated_b, reserved_b, free_gb, free_ratio = self._snap_unpack(snap)
         if total_b <= 0:
             return None
 
-        free_gb = float(free_b) / (1024 ** 3)
-        free_ratio = float(free_b) / float(total_b) if free_b > 0 else 0.0
         reserved_ratio = float(reserved_b) / float(total_b) if reserved_b > 0 else 0.0
         allocated_gb = float(allocated_b) / (1024 ** 3) if allocated_b > 0 else 0.0
         reserved_gb = float(reserved_b) / (1024 ** 3) if reserved_b > 0 else 0.0
@@ -1329,22 +1318,10 @@ class IngestionService:
         ]
         recent_peak_free = max([float(e.get("free_gb") or 0.0) for e in recent], default=free_gb)
 
-        try:
-            free_drop_threshold_gb = float((os.getenv("CUDA_DEGRADE_FREE_DROP_GB") or "3.0").strip() or "3.0")
-        except Exception:
-            free_drop_threshold_gb = 3.0
-        try:
-            min_free_ratio = float((os.getenv("CUDA_DEGRADE_MIN_FREE_RATIO") or "0.28").strip() or "0.28")
-        except Exception:
-            min_free_ratio = 0.28
-        try:
-            reserved_ratio_threshold = float((os.getenv("CUDA_DEGRADE_RESERVED_RATIO") or "0.50").strip() or "0.50")
-        except Exception:
-            reserved_ratio_threshold = 0.50
-        try:
-            low_headroom_gb = float((os.getenv("CUDA_DEGRADE_LOW_HEADROOM_GB") or "8.0").strip() or "8.0")
-        except Exception:
-            low_headroom_gb = 8.0
+        free_drop_threshold_gb = _env_float("CUDA_DEGRADE_FREE_DROP_GB", "3.0")
+        min_free_ratio = _env_float("CUDA_DEGRADE_MIN_FREE_RATIO", "0.28")
+        reserved_ratio_threshold = _env_float("CUDA_DEGRADE_RESERVED_RATIO", "0.50")
+        low_headroom_gb = _env_float("CUDA_DEGRADE_LOW_HEADROOM_GB", "8.0")
 
         reasons: list[str] = []
         dynamic_cap = int(self._parakeet_dynamic_batch_cap or 0)
@@ -1437,12 +1414,7 @@ class IngestionService:
             "parakeet_dynamic_batch_cap": (
                 int(self._parakeet_dynamic_batch_cap) if self._parakeet_dynamic_batch_cap is not None else None
             ),
-            "memory": {
-                "free_gb": round(float(snap.get("free") or 0) / (1024 ** 3), 2) if snap.get("free") else 0.0,
-                "total_gb": round(float(snap.get("total") or 0) / (1024 ** 3), 2) if snap.get("total") else 0.0,
-                "allocated_gb": round(float(snap.get("allocated") or 0) / (1024 ** 3), 2) if snap.get("allocated") else 0.0,
-                "reserved_gb": round(float(snap.get("reserved") or 0) / (1024 ** 3), 2) if snap.get("reserved") else 0.0,
-            },
+            "memory": self._snap_to_gb_dict(snap),
             "recent_events": self._recent_cuda_health_events(limit=12),
         }
 
@@ -1451,6 +1423,23 @@ class IngestionService:
             return f"{float(value_bytes) / (1024 ** 3):.1f}GB"
         except Exception:
             return "unknown"
+
+    def _snap_to_gb_dict(self, snap: dict) -> dict:
+        """Convert a raw CUDA memory snapshot to a dict with GB values."""
+        def _gb(key: str) -> float:
+            v = snap.get(key) or 0
+            return round(float(v) / (1024 ** 3), 2) if v else 0.0
+        return {"free_gb": _gb("free"), "total_gb": _gb("total"), "allocated_gb": _gb("allocated"), "reserved_gb": _gb("reserved")}
+
+    def _snap_unpack(self, snap: dict) -> tuple:
+        """Unpack a raw CUDA memory snapshot into (free_b, total_b, allocated_b, reserved_b, free_gb, free_ratio)."""
+        free_b = int(snap.get("free") or 0)
+        total_b = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
+        allocated_b = int(snap.get("allocated") or 0)
+        reserved_b = int(snap.get("reserved") or 0)
+        free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
+        free_ratio = (float(free_b) / float(total_b)) if total_b > 0 and free_b > 0 else 0.0
+        return free_b, total_b, allocated_b, reserved_b, free_gb, free_ratio
 
     def _is_cuda_oom(self, error: Exception) -> bool:
         msg = str(error or "").lower()
@@ -1600,23 +1589,16 @@ class IngestionService:
         if self.device != "cuda":
             return
         snap = self._cuda_memory_snapshot()
-        free_b = int(snap.get("free") or 0)
-        total_b = int(snap.get("total") or 0)
-        allocated_b = int(snap.get("allocated") or 0)
-        reserved_b = int(snap.get("reserved") or 0)
+        free_b, total_b, allocated_b, reserved_b, _, _ = self._snap_unpack(snap)
         log_verbose(
             f"{label}: free {self._format_gb(free_b)} / total {self._format_gb(total_b)} "
             f"(alloc {self._format_gb(allocated_b)}, resv {self._format_gb(reserved_b)})"
         )
         if job_id:
+            gb = self._snap_to_gb_dict(snap)
             self._upsert_job_payload_fields(
                 job_id,
-                {
-                    f"{label}_cuda_free_gb": round(float(free_b) / (1024 ** 3), 2) if free_b > 0 else 0.0,
-                    f"{label}_cuda_total_gb": round(float(total_b) / (1024 ** 3), 2) if total_b > 0 else 0.0,
-                    f"{label}_cuda_allocated_gb": round(float(allocated_b) / (1024 ** 3), 2) if allocated_b > 0 else 0.0,
-                    f"{label}_cuda_reserved_gb": round(float(reserved_b) / (1024 ** 3), 2) if reserved_b > 0 else 0.0,
-                },
+                {f"{label}_cuda_{k}": v for k, v in gb.items()},
             )
 
     def _move_module_to_cpu(self, module):
@@ -1790,12 +1772,12 @@ class IngestionService:
 
         recover = False
         reason_bits = []
-        if free_drop_gb >= float((os.getenv("CUDA_HEADROOM_RECOVERY_DROP_GB") or "1.5").strip() or "1.5"):
+        if free_drop_gb >= _env_float("CUDA_HEADROOM_RECOVERY_DROP_GB", "1.5"):
             recover = True
             reason_bits.append(f"free_drop={free_drop_gb:.1f}GB")
         if reserved_b > 0 and total_b > 0:
             reserved_ratio = float(reserved_b) / float(total_b)
-            if reserved_ratio >= float((os.getenv("CUDA_HEADROOM_RECOVERY_RESERVED_RATIO") or "0.45").strip() or "0.45"):
+            if reserved_ratio >= _env_float("CUDA_HEADROOM_RECOVERY_RESERVED_RATIO", "0.45"):
                 recover = True
                 reason_bits.append(f"reserved_ratio={reserved_ratio:.2f}")
         if reserved_b > allocated_b + (1024 ** 3):
@@ -2630,7 +2612,7 @@ class IngestionService:
 
     def _should_force_parakeet_long_audio_chunked(self, duration_seconds: float, job_id: int = None) -> tuple[bool, str]:
         try:
-            threshold_seconds = float((os.getenv("PARAKEET_LONG_AUDIO_SECONDS") or "1800").strip() or "1800")
+            threshold_seconds = _env_float("PARAKEET_LONG_AUDIO_SECONDS", "1800")
         except Exception:
             threshold_seconds = 1800.0
         if duration_seconds < threshold_seconds:
@@ -2643,30 +2625,16 @@ class IngestionService:
         if self.device != "cuda":
             return True, "non_cuda_long_audio"
 
-        snap = self._cuda_memory_snapshot()
-        free_b = int(snap.get("free") or 0)
-        total_b = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
-        free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
-        free_ratio = (float(free_b) / float(total_b)) if total_b > 0 and free_b > 0 else 0.0
-        dynamic_cap = int(self._parakeet_dynamic_batch_cap or 0)
-
         # Predictively chunk long-form audio. Direct whole-audio inference on ~30min+
         # inputs is much more likely to trip avoidable OOM paths even on large GPUs.
         # Chunking is fast enough if we keep the model resident across chunks.
-        if self._cuda_fault_count <= 0 and not bool(self._cuda_degraded_reason) and not bool(self._cuda_unhealthy_reason):
-            return True, f"predictive_long_audio_chunking_{free_gb:.1f}gb"
         if self._cuda_fault_count > 0 or bool(self._cuda_degraded_reason) or bool(self._cuda_unhealthy_reason):
             return True, "worker_fault_history"
-        if self._cuda_oom_backoff_count > 0:
-            return True, "worker_oom_history"
-        if dynamic_cap and dynamic_cap <= 2:
-            return True, f"dynamic_cap_{dynamic_cap}"
-        if free_gb < 16.0:
-            return True, f"low_free_vram_{free_gb:.1f}gb"
-        if free_ratio < 0.50:
-            return True, f"low_free_ratio_{free_ratio:.2f}"
 
-        return False, f"healthy_headroom_{free_gb:.1f}gb"
+        snap = self._cuda_memory_snapshot()
+        free_b = int(snap.get("free") or 0)
+        free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
+        return True, f"predictive_long_audio_chunking_{free_gb:.1f}gb"
 
     def _transcribe_with_parakeet_in_chunks(self, audio_path: Path, start_time_offset: float = 0.0, job_id: int = None):
         total_duration = float(self._probe_audio_duration_seconds(audio_path) or 0.0)
@@ -3116,13 +3084,7 @@ class IngestionService:
                 int(response.get("parakeet_batch_size_requested") or 16)
             )
             if self.device == "cuda":
-                snap = self._cuda_memory_snapshot()
-                response["cuda_memory"] = {
-                    "free_gb": round(float(snap.get("free") or 0) / (1024 ** 3), 2),
-                    "total_gb": round(float(snap.get("total") or 0) / (1024 ** 3), 2),
-                    "allocated_gb": round(float(snap.get("allocated") or 0) / (1024 ** 3), 2),
-                    "reserved_gb": round(float(snap.get("reserved") or 0) / (1024 ** 3), 2),
-                }
+                response["cuda_memory"] = self._snap_to_gb_dict(self._cuda_memory_snapshot())
 
         try:
             if req == "whisper":
@@ -5879,7 +5841,7 @@ class IngestionService:
                     segments, _, _ = self._load_raw_transcript_checkpoint(video, audio_path, job_id=job_id)
                     self._process_diarize_phase(video, audio_path, segments, job_id)
                     if parent_job_id:
-                        self._mark_process_job_completed_from_child(parent_job_id, job_id)
+                        self._finalize_process_job_from_child(parent_job_id, job_id, "completed")
                         with Session(engine) as session:
                             parent = session.get(Job, parent_job_id)
                             if parent:
@@ -5895,7 +5857,7 @@ class IngestionService:
                     log(tb)
                     self._mark_job_failure(job_id, f"{e}\n{tb[-3500:]}")
                     if parent_job_id:
-                        self._mark_process_job_failed_from_child(parent_job_id, job_id, f"{e}\n{tb[-3500:]}")
+                        self._finalize_process_job_from_child(parent_job_id, job_id, "failed", error=f"{e}\n{tb[-3500:]}")
                 finally:
                     if self.device == "cuda":
                         self._clear_cuda_cache()
