@@ -8,6 +8,7 @@ import pickle
 import gc
 import sys
 from pathlib import Path
+from typing import Literal
 from sqlmodel import Session, select, func
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -43,6 +44,7 @@ def ensure_dirs():
 
 
 PROCESS_JOB_TYPES = {"process"}
+DIARIZE_JOB_TYPES = {"diarize"}
 FUNNY_JOB_TYPES = {"funny_detect", "funny_explain"}
 YOUTUBE_JOB_TYPES = {"youtube_metadata"}
 CLIP_JOB_TYPES = {"clip_export_mp4", "clip_export_captions"}
@@ -50,6 +52,11 @@ CLIP_JOB_TYPES = {"clip_export_mp4", "clip_export_captions"}
 class IngestionService:
     def __init__(self):
         ensure_dirs()
+
+        # Apply safer CUDA allocator defaults before any lazy torch import. This
+        # reduces allocator fragmentation on long-lived Windows workers where
+        # Parakeet and diarization alternate ownership of large CUDA blocks.
+        self._configure_cuda_allocator()
 
         # Install pkg_resources shim before ANY lazy ML import can happen.
         # ctranslate2, pyannote.audio, and NeMo all import pkg_resources on Windows.
@@ -83,6 +90,11 @@ class IngestionService:
         self._cuda_unhealthy_since = None
         self._cuda_recovery_pending = False
         self._cuda_fault_count = 0
+        self._cuda_degraded_reason = None
+        self._cuda_soft_reset_count = 0
+        self._cuda_oom_backoff_count = 0
+        self._cuda_health_guard = threading.Lock()
+        self._cuda_health_events = []
         # Dynamic, in-process Parakeet batch cap that ratchets down after CUDA OOMs.
         # Persists for this backend process lifetime (resets on restart).
         self._parakeet_dynamic_batch_cap = None
@@ -98,10 +110,37 @@ class IngestionService:
         self._speaker_match_cache = {}
         self._partial_checkpoint_guard = threading.Lock()
         self._partial_checkpoint_counts = {}
+        self._pipeline_focus_guard = threading.Lock()
+        self._pipeline_focus_mode: Literal["transcribe", "diarize"] = "transcribe"
         # Proactive shaping for hosted NVIDIA NIM calls to reduce 429 bursts during
         # chunked/global-summary + per-moment explain runs.
         self._nvidia_nim_request_lock = threading.Lock()
         self._nvidia_nim_next_allowed_at = 0.0
+
+    def get_pipeline_focus_mode(self) -> Literal["transcribe", "diarize"]:
+        with self._pipeline_focus_guard:
+            return self._pipeline_focus_mode
+
+    def set_pipeline_focus_mode(self, mode: str) -> Literal["transcribe", "diarize"]:
+        normalized: Literal["transcribe", "diarize"] = "diarize" if str(mode or "").strip().lower() == "diarize" else "transcribe"
+        with self._pipeline_focus_guard:
+            self._pipeline_focus_mode = normalized
+        log(f"Pipeline queue focus set to {normalized}.")
+        return normalized
+
+    def _configure_cuda_allocator(self):
+        if sys.platform != "win32":
+            return
+        raw = (os.getenv("PYTORCH_CUDA_ALLOC_CONF") or "").strip()
+        if raw:
+            return
+        parts = [
+            f"max_split_size_mb:{int((os.getenv('CUDA_ALLOC_MAX_SPLIT_MB') or '128').strip() or '128')}",
+            f"garbage_collection_threshold:{float((os.getenv('CUDA_ALLOC_GC_THRESHOLD') or '0.8').strip() or '0.8')}",
+            "expandable_segments:True",
+        ]
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(parts)
+        log_verbose(f"Set PYTORCH_CUDA_ALLOC_CONF={os.environ['PYTORCH_CUDA_ALLOC_CONF']}")
 
     def _get_temp_redo_backup_path(self, video_id: int, token: str | None = None) -> Path:
         token = token or str(int(time.time() * 1000))
@@ -625,6 +664,247 @@ class IngestionService:
         except Exception:
             return {}
 
+    def _has_jobs_of_types(self, job_types: set[str], statuses: set[str]) -> bool:
+        if not job_types or not statuses:
+            return False
+        with Session(engine) as session:
+            row = session.exec(
+                select(Job.id)
+                .where(Job.job_type.in_(list(job_types)), Job.status.in_(list(statuses)))
+                .limit(1)
+            ).first()
+            return row is not None
+
+    def _get_detached_video(self, video_id: int) -> Video:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise RuntimeError(f"Video {video_id} not found")
+            _ = video.channel
+            session.expunge(video)
+            if video.channel:
+                session.expunge(video.channel)
+            return video
+
+    def _ensure_audio_ready_for_video(self, video: Video, job_id: int = None) -> Path:
+        lock = self._get_video_download_lock(int(video.id))
+        with lock:
+            audio_path = self.download_audio(video, job_id=job_id)
+            audio_path = self._validate_and_retry_audio(video, audio_path, job_id)
+        return audio_path
+
+    def _deserialize_transcript_words(self, raw_words, seg_start=None, seg_end=None):
+        from math import isfinite
+
+        if not raw_words:
+            return None
+
+        parsed = []
+        for w in raw_words:
+            try:
+                ws = float(w.get("start"))
+                we = float(w.get("end", ws))
+                ww = str(w.get("word", "")).strip()
+            except Exception:
+                continue
+            if not ww or not isfinite(ws):
+                continue
+            if not isfinite(we) or we < ws:
+                we = ws
+            parsed.append([ws, we, ww])
+
+        if not parsed:
+            return None
+
+        if seg_start is not None and seg_end is not None:
+            try:
+                seg_start_f = float(seg_start)
+                seg_end_f = float(seg_end)
+            except Exception:
+                seg_start_f = None
+                seg_end_f = None
+
+            if seg_start_f is not None and seg_end_f is not None and seg_end_f > seg_start_f:
+                min_start = min(p[0] for p in parsed)
+                max_end = max(p[1] for p in parsed)
+                seg_dur = max(0.01, seg_end_f - seg_start_f)
+
+                looks_ms_absolute = max_end > max(seg_end_f * 5, 1000)
+                looks_ms_relative = min_start >= -0.5 and max_end > max(1000, seg_dur * 20)
+                if looks_ms_absolute or looks_ms_relative:
+                    for p in parsed:
+                        p[0] /= 1000.0
+                        p[1] /= 1000.0
+                    min_start = min(p[0] for p in parsed)
+                    max_end = max(p[1] for p in parsed)
+
+                looks_relative = min_start >= -0.5 and max_end <= seg_dur + 1.5
+                if looks_relative:
+                    for p in parsed:
+                        p[0] += seg_start_f
+                        p[1] += seg_start_f
+                    min_start = min(p[0] for p in parsed)
+                    max_end = max(p[1] for p in parsed)
+
+                if seg_start_f > 120 and max_end < seg_start_f - 5:
+                    shift = seg_start_f - min_start
+                    for p in parsed:
+                        p[0] += shift
+                        p[1] += shift
+
+        return [
+            self._build_whisper_style_word(start=ws, end=we, word=ww)
+            for ws, we, ww in parsed
+        ] or None
+
+    def _word_coverage(self, items) -> float:
+        if not items:
+            return 1.0
+        with_words = 0
+        for s in items:
+            try:
+                if getattr(s, "words", None):
+                    with_words += 1
+            except Exception:
+                continue
+        return with_words / max(len(items), 1)
+
+    def _load_raw_transcript_checkpoint(self, video: Video, audio_path: Path, job_id: int = None):
+        safe_title = self.sanitize_filename(video.title)
+        raw_transcript_path = audio_path.parent / f"{safe_title}_transcript_raw.json"
+        if not raw_transcript_path.exists():
+            raise FileNotFoundError(f"Raw transcript checkpoint not found for video {video.id}")
+
+        with open(raw_transcript_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        segments = []
+        for s in data.get("segments", []):
+            words = self._deserialize_transcript_words(
+                s.get("words"),
+                seg_start=s.get("start"),
+                seg_end=s.get("end"),
+            )
+            segments.append(
+                self._build_whisper_style_segment(
+                    seg_id=0,
+                    start=s["start"],
+                    end=s["end"],
+                    text=s["text"],
+                    words=words,
+                )
+            )
+
+        total_duration = float(video.duration or 0)
+        if total_duration <= 0 and segments:
+            total_duration = float(getattr(segments[-1], "end", 0.0) or 0.0)
+
+        engine_from_raw = str(
+            data.get("transcription_engine_used")
+            or data.get("engine")
+            or ""
+        ).strip().lower()
+        if engine_from_raw not in {"parakeet", "whisper"}:
+            engine_from_raw = ""
+
+        payload_fields = {"transcription_reused_existing": True}
+        if engine_from_raw:
+            payload_fields["transcription_engine_used"] = engine_from_raw
+        self._upsert_job_payload_fields(job_id, payload_fields)
+        return segments, total_duration, engine_from_raw
+
+    def _queue_diarize_followup(self, video_id: int, parent_job_id: int):
+        with Session(engine) as session:
+            parent = session.get(Job, parent_job_id)
+            if not parent:
+                raise RuntimeError(f"Parent process job {parent_job_id} not found")
+            payload = self._load_job_payload(parent.payload_json)
+            payload["parent_job_id"] = int(parent_job_id)
+            payload["pipeline_stage"] = "diarize"
+            child = self._enqueue_job(video_id, "diarize", payload=payload)
+            return int(child.id)
+
+    def _mark_process_job_waiting_for_diarize(self, job_id: int, diarize_job_id: int):
+        with Session(engine) as session:
+            job = session.get(Job, job_id)
+            if not job:
+                return
+            video = session.get(Video, job.video_id)
+            now = datetime.now()
+            payload = self._load_job_payload(job.payload_json)
+            transcribe_start_ms = None
+            try:
+                transcribe_started_at = payload.get("stage_transcribe_started_at") or payload.get("stage_transcribing_started_at")
+                if not transcribe_started_at and job.started_at:
+                    transcribe_started_at = job.started_at.isoformat()
+                if transcribe_started_at:
+                    transcribe_start_ms = datetime.fromisoformat(str(transcribe_started_at))
+            except Exception:
+                transcribe_start_ms = None
+            payload.update(
+                {
+                    "pipeline_stage": "waiting_diarize",
+                    "diarize_job_id": int(diarize_job_id),
+                    "stage_transcribe_completed_at": now.isoformat(),
+                }
+            )
+            if transcribe_start_ms is not None:
+                try:
+                    payload["stage_transcribe_seconds"] = max(0.0, (now - transcribe_start_ms).total_seconds())
+                except Exception:
+                    pass
+            job.status = "waiting_diarize"
+            job.progress = max(int(job.progress or 0), 55)
+            job.status_detail = f"Queued for diarization (job {diarize_job_id})"
+            job.payload_json = json.dumps(payload, sort_keys=True)
+            session.add(job)
+            if video:
+                video.status = "transcribed"
+                session.add(video)
+            session.commit()
+
+    def _mark_process_job_completed_from_child(self, parent_job_id: int, child_job_id: int):
+        with Session(engine) as session:
+            parent = session.get(Job, parent_job_id)
+            child = session.get(Job, child_job_id)
+            if not parent:
+                return
+            payload = self._load_job_payload(parent.payload_json)
+            child_payload = self._load_job_payload(child.payload_json if child else None)
+            for key, value in child_payload.items():
+                if key.startswith("stage_") or key.startswith("parakeet_") or key.startswith("transcription_"):
+                    payload[key] = value
+            payload["pipeline_stage"] = "completed"
+            payload["diarize_job_id"] = int(child_job_id)
+            parent.payload_json = json.dumps(payload, sort_keys=True)
+            parent.status = "completed"
+            parent.progress = 100
+            parent.status_detail = None
+            parent.completed_at = datetime.now()
+            session.add(parent)
+            session.commit()
+
+    def _mark_process_job_failed_from_child(self, parent_job_id: int, child_job_id: int, error: str):
+        with Session(engine) as session:
+            parent = session.get(Job, parent_job_id)
+            child = session.get(Job, child_job_id)
+            if not parent:
+                return
+            payload = self._load_job_payload(parent.payload_json)
+            child_payload = self._load_job_payload(child.payload_json if child else None)
+            for key, value in child_payload.items():
+                if key.startswith("stage_") or key.startswith("parakeet_") or key.startswith("transcription_"):
+                    payload[key] = value
+            payload["pipeline_stage"] = "failed"
+            payload["diarize_job_id"] = int(child_job_id)
+            parent.payload_json = json.dumps(payload, sort_keys=True)
+            parent.status = "failed"
+            parent.error = (error or "Unknown error")[:4000]
+            parent.status_detail = None
+            parent.completed_at = datetime.now()
+            session.add(parent)
+            session.commit()
+
     def _enqueue_job(self, video_id: int, job_type: str, payload: dict | None = None):
         """Add a queued job if one of the same type+payload isn't already active/queued."""
         payload_text = json.dumps(payload or {}, sort_keys=True) if payload is not None else None
@@ -954,13 +1234,21 @@ class IngestionService:
                 self.device = "cuda" if torch.cuda.is_available() else "cpu"
             log(f"Using device: {self.device}")
             if self.device == "cuda":
-                log_verbose(f"  GPU: {torch.cuda.get_device_name(0)}")
                 try:
+                    log_verbose(f"  GPU: {torch.cuda.get_device_name(0)}")
                     props = torch.cuda.get_device_properties(0)
                     self._gpu_total_vram_bytes = int(getattr(props, "total_memory", 0) or 0)
                     if self._gpu_total_vram_bytes > 0:
                         log_verbose(f"  VRAM total: {self._gpu_total_vram_bytes / (1024 ** 3):.1f} GB")
-                except Exception:
+                except Exception as e:
+                    msg = str(e or "")
+                    if "cuda allocator config" in msg.lower() or "unrecognized key" in msg.lower():
+                        bad_conf = os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+                        log(
+                            "CUDA initialization failed due to invalid allocator config. "
+                            f"Cleared PYTORCH_CUDA_ALLOC_CONF={bad_conf!r} and falling back to CPU for this process."
+                        )
+                        self.device = "cpu"
                     self._gpu_total_vram_bytes = 0
 
     def _cuda_memory_snapshot(self) -> dict:
@@ -982,6 +1270,181 @@ class IngestionService:
         except Exception:
             pass
         return snap
+
+    def _record_cuda_health_event(self, label: str, job_id: int = None, extra: dict | None = None):
+        snap = self._cuda_memory_snapshot()
+        entry = {
+            "ts": datetime.now().isoformat(),
+            "label": str(label or "unknown"),
+            "job_id": int(job_id) if job_id else None,
+            "device": self.device or "unknown",
+            "free_gb": round(float(snap.get("free") or 0) / (1024 ** 3), 2) if snap.get("free") else 0.0,
+            "total_gb": round(float(snap.get("total") or 0) / (1024 ** 3), 2) if snap.get("total") else 0.0,
+            "allocated_gb": round(float(snap.get("allocated") or 0) / (1024 ** 3), 2) if snap.get("allocated") else 0.0,
+            "reserved_gb": round(float(snap.get("reserved") or 0) / (1024 ** 3), 2) if snap.get("reserved") else 0.0,
+            "parakeet_dynamic_batch_cap": (
+                int(self._parakeet_dynamic_batch_cap) if self._parakeet_dynamic_batch_cap is not None else None
+            ),
+            "cuda_unhealthy": bool(self._cuda_unhealthy_reason),
+            "cuda_unhealthy_reason": self._cuda_unhealthy_reason,
+            "cuda_degraded_reason": self._cuda_degraded_reason,
+            "cuda_fault_count_this_worker": int(self._cuda_fault_count),
+            "cuda_soft_reset_count": int(self._cuda_soft_reset_count),
+            "cuda_oom_backoff_count": int(self._cuda_oom_backoff_count),
+        }
+        if isinstance(extra, dict) and extra:
+            entry.update(extra)
+        with self._cuda_health_guard:
+            self._cuda_health_events.append(entry)
+            if len(self._cuda_health_events) > 60:
+                self._cuda_health_events = self._cuda_health_events[-60:]
+        return entry
+
+    def _recent_cuda_health_events(self, limit: int = 12) -> list[dict]:
+        with self._cuda_health_guard:
+            items = list(self._cuda_health_events[-max(1, int(limit)):])
+        return items
+
+    def _evaluate_cuda_degradation(self, label: str = "probe", job_id: int = None) -> str | None:
+        if self.device != "cuda" or self._cuda_recovery_pending:
+            return None
+
+        snap = self._cuda_memory_snapshot()
+        free_b = int(snap.get("free") or 0)
+        total_b = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
+        allocated_b = int(snap.get("allocated") or 0)
+        reserved_b = int(snap.get("reserved") or 0)
+        if total_b <= 0:
+            return None
+
+        free_gb = float(free_b) / (1024 ** 3)
+        free_ratio = float(free_b) / float(total_b) if free_b > 0 else 0.0
+        reserved_ratio = float(reserved_b) / float(total_b) if reserved_b > 0 else 0.0
+        allocated_gb = float(allocated_b) / (1024 ** 3) if allocated_b > 0 else 0.0
+        reserved_gb = float(reserved_b) / (1024 ** 3) if reserved_b > 0 else 0.0
+
+        recent = [
+            e for e in self._recent_cuda_health_events(limit=10)
+            if str(e.get("device") or "") == "cuda" and float(e.get("total_gb") or 0) > 0
+        ]
+        recent_peak_free = max([float(e.get("free_gb") or 0.0) for e in recent], default=free_gb)
+
+        try:
+            free_drop_threshold_gb = float((os.getenv("CUDA_DEGRADE_FREE_DROP_GB") or "3.0").strip() or "3.0")
+        except Exception:
+            free_drop_threshold_gb = 3.0
+        try:
+            min_free_ratio = float((os.getenv("CUDA_DEGRADE_MIN_FREE_RATIO") or "0.28").strip() or "0.28")
+        except Exception:
+            min_free_ratio = 0.28
+        try:
+            reserved_ratio_threshold = float((os.getenv("CUDA_DEGRADE_RESERVED_RATIO") or "0.50").strip() or "0.50")
+        except Exception:
+            reserved_ratio_threshold = 0.50
+        try:
+            low_headroom_gb = float((os.getenv("CUDA_DEGRADE_LOW_HEADROOM_GB") or "8.0").strip() or "8.0")
+        except Exception:
+            low_headroom_gb = 8.0
+
+        reasons: list[str] = []
+        dynamic_cap = int(self._parakeet_dynamic_batch_cap or 0)
+        if recent_peak_free - free_gb >= free_drop_threshold_gb and free_ratio <= min_free_ratio:
+            reasons.append(
+                f"free_vram_drop={recent_peak_free - free_gb:.1f}GB (now {free_gb:.1f}GB, free_ratio={free_ratio:.2f})"
+            )
+        if reserved_ratio >= reserved_ratio_threshold and reserved_b > allocated_b + (1024 ** 3):
+            reasons.append(
+                f"reserved_ratio={reserved_ratio:.2f} with reserved {reserved_gb:.1f}GB > allocated {allocated_gb:.1f}GB + 1GB"
+            )
+        if dynamic_cap <= 1 and free_gb <= low_headroom_gb:
+            reasons.append(
+                f"parakeet_cap={dynamic_cap or 1} under low_headroom={free_gb:.1f}GB"
+            )
+        if self._cuda_oom_backoff_count >= 2 and free_ratio <= 0.35:
+            reasons.append(
+                f"repeated_oom_backoff={self._cuda_oom_backoff_count} with free_ratio={free_ratio:.2f}"
+            )
+
+        if not reasons:
+            self._cuda_degraded_reason = None
+            return None
+
+        reason = "; ".join(reasons)[:500]
+        self._cuda_degraded_reason = reason
+        self._record_cuda_health_event(
+            f"{label}_degraded",
+            job_id=job_id,
+            extra={
+                "degradation_reason": reason,
+                "degradation_free_ratio": round(free_ratio, 3),
+                "degradation_reserved_ratio": round(reserved_ratio, 3),
+            },
+        )
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "cuda_degraded": True,
+                "cuda_degraded_reason": reason,
+                "cuda_free_gb_before_reset": round(free_gb, 2),
+                "cuda_reserved_gb_before_reset": round(reserved_gb, 2),
+                "cuda_allocated_gb_before_reset": round(allocated_gb, 2),
+            },
+        )
+        return reason
+
+    def _soft_reset_cuda_if_degraded(self, label: str = "pre_parakeet", job_id: int = None) -> bool:
+        reason = self._evaluate_cuda_degradation(label=label, job_id=job_id)
+        if not reason:
+            return False
+
+        log(
+            "CUDA degradation detected before Parakeet work. "
+            f"Performing a worker soft reset to recover headroom ({reason})."
+        )
+        self._cuda_soft_reset_count += 1
+        self.purge_loaded_models(reason=f"cuda_soft_reset:{label}")
+        self._ensure_device()
+        if self.device == "cuda":
+            self._apply_cuda_memory_fraction_limit()
+        self._record_cuda_health_event(
+            f"{label}_soft_reset",
+            job_id=job_id,
+            extra={"soft_reset_reason": reason},
+        )
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "cuda_soft_reset_applied": True,
+                "cuda_soft_reset_reason": reason,
+                "cuda_soft_reset_count": int(self._cuda_soft_reset_count),
+            },
+        )
+        self._cuda_degraded_reason = None
+        return True
+
+    def get_cuda_health_status(self) -> dict:
+        self._ensure_device()
+        snap = self._cuda_memory_snapshot()
+        return {
+            "device": self.device,
+            "cuda_unhealthy": bool(self._cuda_unhealthy_reason),
+            "cuda_unhealthy_reason": self._cuda_unhealthy_reason,
+            "cuda_degraded_reason": self._cuda_degraded_reason,
+            "cuda_recovery_pending": bool(self._cuda_recovery_pending),
+            "cuda_fault_count_this_worker": int(self._cuda_fault_count),
+            "cuda_soft_reset_count": int(self._cuda_soft_reset_count),
+            "cuda_oom_backoff_count": int(self._cuda_oom_backoff_count),
+            "parakeet_dynamic_batch_cap": (
+                int(self._parakeet_dynamic_batch_cap) if self._parakeet_dynamic_batch_cap is not None else None
+            ),
+            "memory": {
+                "free_gb": round(float(snap.get("free") or 0) / (1024 ** 3), 2) if snap.get("free") else 0.0,
+                "total_gb": round(float(snap.get("total") or 0) / (1024 ** 3), 2) if snap.get("total") else 0.0,
+                "allocated_gb": round(float(snap.get("allocated") or 0) / (1024 ** 3), 2) if snap.get("allocated") else 0.0,
+                "reserved_gb": round(float(snap.get("reserved") or 0) / (1024 ** 3), 2) if snap.get("reserved") else 0.0,
+            },
+            "recent_events": self._recent_cuda_health_events(limit=12),
+        }
 
     def _format_gb(self, value_bytes: int) -> str:
         try:
@@ -1018,6 +1481,12 @@ class IngestionService:
         self._cuda_unhealthy_since = datetime.now()
         self._cuda_recovery_pending = True
         self._cuda_fault_count += 1
+        self._parakeet_dynamic_batch_cap = 1
+        self._record_cuda_health_event(
+            "cuda_fault_quarantine",
+            job_id=job_id,
+            extra={"fault_reason": self._cuda_unhealthy_reason},
+        )
 
         # Drop GPU-bound models and force this job onto CPU fallback.
         self._release_parakeet_model("cuda_fault_job_quarantine")
@@ -1036,6 +1505,8 @@ class IngestionService:
                 "cuda_job_quarantined": True,
                 "cuda_recovery_pending": True,
                 "cuda_fault_count_this_worker": int(self._cuda_fault_count),
+                "parakeet_dynamic_batch_cap": 1,
+                "parakeet_dynamic_batch_cap_source": "illegal_access_quarantine",
             },
         )
         log(
@@ -1081,6 +1552,7 @@ class IngestionService:
             del probe
             self._clear_cuda_cache()
             self._cuda_recovery_pending = False
+            self._record_cuda_health_event("cuda_recovery_succeeded")
             log("CUDA recovery succeeded. Parakeet GPU execution re-enabled for subsequent jobs.")
             return True
         except Exception as e:
@@ -1090,6 +1562,10 @@ class IngestionService:
             self.device = "cpu"
             self._gpu_total_vram_bytes = 0
             self._cuda_memory_fraction_applied = None
+            self._record_cuda_health_event(
+                "cuda_recovery_failed",
+                extra={"recovery_error": str(e)[:220]},
+            )
             log(
                 "CUDA recovery failed after a fatal Parakeet fault. "
                 f"Keeping this worker on CPU until a later recovery attempt or backend restart. Reason: {e}"
@@ -1113,6 +1589,48 @@ class IngestionService:
                 torch.cuda.ipc_collect()
             except Exception:
                 pass
+            try:
+                torch.cuda.reset_peak_memory_stats(0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _log_cuda_memory(self, label: str, job_id: int = None):
+        if self.device != "cuda":
+            return
+        snap = self._cuda_memory_snapshot()
+        free_b = int(snap.get("free") or 0)
+        total_b = int(snap.get("total") or 0)
+        allocated_b = int(snap.get("allocated") or 0)
+        reserved_b = int(snap.get("reserved") or 0)
+        log_verbose(
+            f"{label}: free {self._format_gb(free_b)} / total {self._format_gb(total_b)} "
+            f"(alloc {self._format_gb(allocated_b)}, resv {self._format_gb(reserved_b)})"
+        )
+        if job_id:
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    f"{label}_cuda_free_gb": round(float(free_b) / (1024 ** 3), 2) if free_b > 0 else 0.0,
+                    f"{label}_cuda_total_gb": round(float(total_b) / (1024 ** 3), 2) if total_b > 0 else 0.0,
+                    f"{label}_cuda_allocated_gb": round(float(allocated_b) / (1024 ** 3), 2) if allocated_b > 0 else 0.0,
+                    f"{label}_cuda_reserved_gb": round(float(reserved_b) / (1024 ** 3), 2) if reserved_b > 0 else 0.0,
+                },
+            )
+
+    def _move_module_to_cpu(self, module):
+        if module is None:
+            return
+        try:
+            if hasattr(module, "to"):
+                module.to("cpu")
+                return
+        except Exception:
+            pass
+        try:
+            if hasattr(module, "cpu"):
+                module.cpu()
         except Exception:
             pass
 
@@ -1136,40 +1654,71 @@ class IngestionService:
         except Exception as e:
             log_verbose(f"Could not apply CUDA memory fraction limit: {e}")
 
-    def _release_parakeet_model(self, reason: str = ""):
+    def _release_parakeet_model(self, reason: str = "", job_id: int = None):
         if self.parakeet_model is None:
             return
+        model = self.parakeet_model
+        self._log_cuda_memory("pre_release_parakeet", job_id=job_id)
         self.parakeet_model = None
+        self._move_module_to_cpu(model)
+        del model
         self._clear_cuda_cache()
+        self._log_cuda_memory("post_release_parakeet", job_id=job_id)
         if reason:
             log(f"Released Parakeet model from GPU memory ({reason}).")
         else:
             log("Released Parakeet model from GPU memory.")
 
-    def _release_whisper_model(self, reason: str = ""):
+    def _release_whisper_model(self, reason: str = "", job_id: int = None):
         if self.whisper_model is None:
             return
+        model = self.whisper_model
+        self._log_cuda_memory("pre_release_whisper", job_id=job_id)
         self.whisper_model = None
         self._whisper_compute_type = None
         self._whisper_device = None
+        try:
+            inner_model = getattr(model, "model", None)
+            if inner_model is not None:
+                self._move_module_to_cpu(inner_model)
+        except Exception:
+            pass
+        del model
         self._clear_cuda_cache()
+        self._log_cuda_memory("post_release_whisper", job_id=job_id)
         if reason:
             log(f"Released Whisper model from GPU memory ({reason}).")
         else:
             log("Released Whisper model from GPU memory.")
 
-    def _release_diarization_models(self, reason: str = ""):
+    def _release_diarization_models(self, reason: str = "", job_id: int = None):
         """Release pyannote models/inference objects to recover GPU memory."""
         had_models = any([
             self.diarization_pipeline is not None,
             self.embedding_model is not None,
             self.embedding_inference is not None,
         ])
+        pipeline = self.diarization_pipeline
+        embedding_model = self.embedding_model
+        embedding_inference = self.embedding_inference
+        if had_models:
+            self._log_cuda_memory("pre_release_diarization", job_id=job_id)
         self.diarization_pipeline = None
         self.embedding_model = None
         self.embedding_inference = None
         if had_models:
+            self._move_module_to_cpu(pipeline)
+            self._move_module_to_cpu(embedding_model)
+            try:
+                if hasattr(embedding_inference, "to"):
+                    embedding_inference.to("cpu")
+            except Exception:
+                pass
+            del pipeline
+            del embedding_model
+            del embedding_inference
             self._clear_cuda_cache()
+            self._log_cuda_memory("post_release_diarization", job_id=job_id)
             if reason:
                 log(f"Released diarization/embedding models from GPU memory ({reason}).")
             else:
@@ -1203,16 +1752,70 @@ class IngestionService:
         self._cuda_unhealthy_since = None
         self._cuda_recovery_pending = False
         self._cuda_fault_count = 0
+        self._cuda_degraded_reason = None
+        self._cuda_oom_backoff_count = 0
         self.device = None
         self._gpu_total_vram_bytes = 0
         self._cuda_memory_fraction_applied = None
         gc.collect()
+        self._record_cuda_health_event(f"purge_loaded_models:{reason}")
 
         return {
             "purged_whisper": had_whisper,
             "purged_parakeet": had_parakeet,
             "purged_diarization": had_diar,
         }
+
+    def _maybe_recover_cuda_headroom(self, baseline_free_b: int, job_id: int = None):
+        if self.device != "cuda":
+            return
+        snap = self._cuda_memory_snapshot()
+        free_b = int(snap.get("free") or 0)
+        total_b = int(snap.get("total") or 0)
+        reserved_b = int(snap.get("reserved") or 0)
+        allocated_b = int(snap.get("allocated") or 0)
+        free_drop_b = max(0, int(baseline_free_b or 0) - free_b)
+        free_drop_gb = float(free_drop_b) / (1024 ** 3) if free_drop_b > 0 else 0.0
+        reserved_gb = float(reserved_b) / (1024 ** 3) if reserved_b > 0 else 0.0
+        allocated_gb = float(allocated_b) / (1024 ** 3) if allocated_b > 0 else 0.0
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "job_cuda_free_gb_end": round(float(free_b) / (1024 ** 3), 2) if free_b > 0 else 0.0,
+                "job_cuda_free_drop_gb": round(free_drop_gb, 2),
+                "job_cuda_reserved_gb_end": round(reserved_gb, 2),
+                "job_cuda_allocated_gb_end": round(allocated_gb, 2),
+            },
+        )
+
+        recover = False
+        reason_bits = []
+        if free_drop_gb >= float((os.getenv("CUDA_HEADROOM_RECOVERY_DROP_GB") or "1.5").strip() or "1.5"):
+            recover = True
+            reason_bits.append(f"free_drop={free_drop_gb:.1f}GB")
+        if reserved_b > 0 and total_b > 0:
+            reserved_ratio = float(reserved_b) / float(total_b)
+            if reserved_ratio >= float((os.getenv("CUDA_HEADROOM_RECOVERY_RESERVED_RATIO") or "0.45").strip() or "0.45"):
+                recover = True
+                reason_bits.append(f"reserved_ratio={reserved_ratio:.2f}")
+        if reserved_b > allocated_b + (1024 ** 3):
+            recover = True
+            reason_bits.append("reserved_gt_allocated+1GB")
+
+        if not recover:
+            return
+
+        reason = ",".join(reason_bits) if reason_bits else "post_job_headroom_recovery"
+        log(
+            "CUDA headroom did not rebound after job cleanup; purging loaded models "
+            f"to recover allocator state ({reason})."
+        )
+        self._record_cuda_health_event(
+            "post_job_headroom_recovery",
+            job_id=job_id,
+            extra={"recovery_reason": reason},
+        )
+        self.purge_loaded_models(reason=f"post_job_headroom_recovery:{reason}")
 
     def _resolve_parakeet_batch_size(self, requested_batch_size: int) -> int:
         requested = max(1, min(int(requested_batch_size or 1), 64))
@@ -1273,6 +1876,7 @@ class IngestionService:
             new_cap = max(1, min(int(next_batch), 64))
         except Exception:
             return
+        self._cuda_oom_backoff_count += 1
         prev = self._parakeet_dynamic_batch_cap
         if prev is None or new_cap < int(prev):
             self._parakeet_dynamic_batch_cap = new_cap
@@ -1281,7 +1885,13 @@ class IngestionService:
                 {
                     "parakeet_dynamic_batch_cap": int(new_cap),
                     "parakeet_dynamic_batch_cap_source": "oom_backoff",
+                    "cuda_oom_backoff_count": int(self._cuda_oom_backoff_count),
                 },
+            )
+            self._record_cuda_health_event(
+                "parakeet_oom_backoff",
+                job_id=job_id,
+                extra={"next_batch": int(new_cap)},
             )
             if prev is None:
                 log(f"Persisting Parakeet batch cap at {new_cap} after CUDA OOM.")
@@ -1431,6 +2041,51 @@ class IngestionService:
         )
         return release
 
+    def _should_unload_diarization_after_job(self, job_id: int = None) -> bool:
+        mode = (os.getenv("DIARIZATION_UNLOAD_AFTER_JOB") or "auto").strip().lower()
+        decision = {"diarization_unload_mode": mode}
+        if mode in {"1", "true", "yes", "on"}:
+            decision.update({"diarization_unload_after_job": True, "diarization_unload_reason": "forced_true"})
+            self._upsert_job_payload_fields(job_id, decision)
+            return True
+        if mode in {"0", "false", "no", "off"}:
+            decision.update({"diarization_unload_after_job": False, "diarization_unload_reason": "forced_false"})
+            self._upsert_job_payload_fields(job_id, decision)
+            return False
+        if self.device != "cuda":
+            decision.update({"diarization_unload_after_job": False, "diarization_unload_reason": "non_cuda_keep_loaded"})
+            self._upsert_job_payload_fields(job_id, decision)
+            return False
+        if self._cuda_fault_count > 0 or self._cuda_recovery_pending:
+            decision.update({"diarization_unload_after_job": True, "diarization_unload_reason": "post_fault_conservative"})
+            self._upsert_job_payload_fields(job_id, decision)
+            return True
+
+        focus_mode = self.get_pipeline_focus_mode()
+        has_transcribe_backlog = self._has_jobs_of_types(PROCESS_JOB_TYPES, {"queued", "running", "downloading", "transcribing"})
+        has_more_diarize_work = self._has_jobs_of_types(DIARIZE_JOB_TYPES, {"queued", "running", "diarizing"})
+
+        if has_transcribe_backlog:
+            decision.update({"diarization_unload_after_job": True, "diarization_unload_reason": "transcribe_backlog_present"})
+            self._upsert_job_payload_fields(job_id, decision)
+            return True
+
+        # Only keep pyannote warm if the worker is explicitly focused on diarization
+        # and there is more diarization work ready to drain immediately. Otherwise it
+        # just sits on VRAM and steals headroom from the next Parakeet job.
+        if focus_mode != "diarize":
+            decision.update({"diarization_unload_after_job": True, "diarization_unload_reason": "focus_not_diarize"})
+            self._upsert_job_payload_fields(job_id, decision)
+            return True
+        if not has_more_diarize_work:
+            decision.update({"diarization_unload_after_job": True, "diarization_unload_reason": "no_diarize_backlog"})
+            self._upsert_job_payload_fields(job_id, decision)
+            return True
+
+        decision.update({"diarization_unload_after_job": False, "diarization_unload_reason": "auto_keep_loaded"})
+        self._upsert_job_payload_fields(job_id, decision)
+        return False
+
     def _ensure_ctranslate2_pkg_resources(self):
         """Install a pkg_resources shim when setuptools is absent or broken.
 
@@ -1559,6 +2214,13 @@ class IngestionService:
         else:
             requested_compute_type = os.getenv("TRANSCRIPTION_COMPUTE_TYPE", "").strip()
 
+        if self.device != "cuda" and requested_compute_type not in {"", "int8", "float32"}:
+            log(
+                f"Ignoring unsupported Whisper compute_type={requested_compute_type!r} on device={self.device}; "
+                "using CPU-safe candidates instead."
+            )
+            requested_compute_type = ""
+
         # Keep an already-loaded compatible model.
         if self.whisper_model is not None and self._whisper_compute_type and self._whisper_device:
             if not force_float32 or self._whisper_compute_type == "float32":
@@ -1644,10 +2306,13 @@ class IngestionService:
                 except Exception as e:
                     log(f"CPU fallback compute_type={ct} not supported ({type(e).__name__}), trying next...")
 
+        device_label = self.device
+        tried = list(candidates)
+        if attempted_cuda and "int8" not in tried:
+            tried.extend(["cpu:int8", "cpu:float32"])
         raise RuntimeError(
-            f"Could not load Whisper model ({model_size}) on device={self.device}. "
-            f"Tried compute types: {candidates}"
-            + (" plus CPU fallback ['int8', 'float32']." if self.device == "cuda" else ".")
+            f"Could not load Whisper model ({model_size}) on device={device_label}. "
+            f"Tried compute types: {tried}."
         )
 
     def _parakeet_dependencies_available(self) -> bool:
@@ -1659,6 +2324,10 @@ class IngestionService:
 
     def _load_parakeet_model(self, job_id: int = None):
         self._ensure_device()
+        if self.device == "cuda":
+            self._record_cuda_health_event("pre_parakeet_load", job_id=job_id)
+            self._soft_reset_cuda_if_degraded(label="pre_parakeet_load", job_id=job_id)
+            self._record_cuda_health_event("post_parakeet_reset_check", job_id=job_id)
         if self._cuda_unhealthy_reason:
             raise RuntimeError(
                 f"Parakeet disabled for this worker until restart due to prior CUDA fault: {self._cuda_unhealthy_reason}"
@@ -1881,6 +2550,21 @@ class IngestionService:
         except Exception:
             overlap_seconds = 0.35
 
+        if self.device == "cuda":
+            snap = self._cuda_memory_snapshot()
+            free_b = int(snap.get("free") or 0)
+            total_b = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
+            free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
+            free_ratio = (float(free_b) / float(total_b)) if total_b > 0 and free_b > 0 else 0.0
+            dynamic_cap = int(self._parakeet_dynamic_batch_cap or 0)
+
+            if dynamic_cap <= 1 or free_gb < 8.0 or free_ratio < 0.25:
+                chunk_seconds = min(chunk_seconds, 120)
+            elif dynamic_cap <= 2 or free_gb < 12.0 or free_ratio < 0.35:
+                chunk_seconds = min(chunk_seconds, 180)
+            elif free_gb < 16.0 or free_ratio < 0.45:
+                chunk_seconds = min(chunk_seconds, 240)
+
         chunk_seconds = max(120, min(chunk_seconds, 3600))
         min_chunk_seconds = max(30, min(min_chunk_seconds, chunk_seconds))
         overlap_seconds = max(0.0, min(overlap_seconds, 2.0))
@@ -1900,6 +2584,40 @@ class IngestionService:
                 pass
         if self.device != "cuda":
             return 0
+        snap = self._cuda_memory_snapshot()
+        free_b = int(snap.get("free") or 0)
+        total_b = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
+        free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
+        free_ratio = (float(free_b) / float(total_b)) if total_b > 0 and free_b > 0 else 0.0
+        dynamic_cap = int(self._parakeet_dynamic_batch_cap or 0)
+        # On healthy high-headroom runs, keep the model resident across chunks. That
+        # avoids the repeated "Loading Parakeet model..." loop that looks hung and
+        # adds large overhead without improving stability.
+        if (
+            free_gb >= 20.0
+            and free_ratio >= 0.60
+            and self._cuda_fault_count <= 0
+            and not bool(self._cuda_degraded_reason)
+            and not bool(self._cuda_unhealthy_reason)
+        ):
+            return 0
+        # Only recycle every chunk when the worker has already shown memory pressure
+        # or prior CUDA instability. On healthy high-headroom runs, per-chunk reloads
+        # destroy throughput and can look like the model-load stage is hung.
+        if dynamic_cap <= 1 and (
+            self._cuda_oom_backoff_count > 0
+            or self._cuda_fault_count > 0
+            or bool(self._cuda_degraded_reason)
+            or bool(self._cuda_unhealthy_reason)
+        ):
+            return 1
+        if dynamic_cap == 2 and (
+            self._cuda_oom_backoff_count > 0
+            or self._cuda_fault_count > 0
+            or bool(self._cuda_degraded_reason)
+            or bool(self._cuda_unhealthy_reason)
+        ):
+            return 2
         if total_duration_seconds >= 7200:
             return 6
         if total_duration_seconds >= 5400:
@@ -1909,6 +2627,46 @@ class IngestionService:
         if total_duration_seconds >= 1800:
             return 14
         return 0
+
+    def _should_force_parakeet_long_audio_chunked(self, duration_seconds: float, job_id: int = None) -> tuple[bool, str]:
+        try:
+            threshold_seconds = float((os.getenv("PARAKEET_LONG_AUDIO_SECONDS") or "1800").strip() or "1800")
+        except Exception:
+            threshold_seconds = 1800.0
+        if duration_seconds < threshold_seconds:
+            return False, "below_threshold"
+
+        # Above 2x threshold: always chunk.
+        if duration_seconds >= threshold_seconds * 2.0:
+            return True, "duration_very_long"
+
+        if self.device != "cuda":
+            return True, "non_cuda_long_audio"
+
+        snap = self._cuda_memory_snapshot()
+        free_b = int(snap.get("free") or 0)
+        total_b = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
+        free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
+        free_ratio = (float(free_b) / float(total_b)) if total_b > 0 and free_b > 0 else 0.0
+        dynamic_cap = int(self._parakeet_dynamic_batch_cap or 0)
+
+        # Predictively chunk long-form audio. Direct whole-audio inference on ~30min+
+        # inputs is much more likely to trip avoidable OOM paths even on large GPUs.
+        # Chunking is fast enough if we keep the model resident across chunks.
+        if self._cuda_fault_count <= 0 and not bool(self._cuda_degraded_reason) and not bool(self._cuda_unhealthy_reason):
+            return True, f"predictive_long_audio_chunking_{free_gb:.1f}gb"
+        if self._cuda_fault_count > 0 or bool(self._cuda_degraded_reason) or bool(self._cuda_unhealthy_reason):
+            return True, "worker_fault_history"
+        if self._cuda_oom_backoff_count > 0:
+            return True, "worker_oom_history"
+        if dynamic_cap and dynamic_cap <= 2:
+            return True, f"dynamic_cap_{dynamic_cap}"
+        if free_gb < 16.0:
+            return True, f"low_free_vram_{free_gb:.1f}gb"
+        if free_ratio < 0.50:
+            return True, f"low_free_ratio_{free_ratio:.2f}"
+
+        return False, f"healthy_headroom_{free_gb:.1f}gb"
 
     def _transcribe_with_parakeet_in_chunks(self, audio_path: Path, start_time_offset: float = 0.0, job_id: int = None):
         total_duration = float(self._probe_audio_duration_seconds(audio_path) or 0.0)
@@ -2015,6 +2773,12 @@ class IngestionService:
     ):
         self._load_parakeet_model(job_id)
         parakeet_input, cleanup_input = self._convert_audio_for_parakeet(audio_path)
+        waveform = None
+        transcribe_input = None
+        result = None
+        hypothesis = None
+        raw_words = None
+        raw_segments = None
         try:
             parakeet_input_mode = "path"
             transcribe_input = [str(parakeet_input)]
@@ -2078,7 +2842,6 @@ class IngestionService:
                 {},
             ]
             last_error = None
-            result = None
             transcribe_started = False
             current_batch = parakeet_batch_size
             while result is None:
@@ -2251,6 +3014,32 @@ class IngestionService:
                 duration_guess = float(getattr(segments[-1], "end", 0.0))
             return segments, duration_guess
         finally:
+            try:
+                del waveform
+            except Exception:
+                pass
+            try:
+                del transcribe_input
+            except Exception:
+                pass
+            try:
+                del result
+            except Exception:
+                pass
+            try:
+                del hypothesis
+            except Exception:
+                pass
+            try:
+                del raw_words
+            except Exception:
+                pass
+            try:
+                del raw_segments
+            except Exception:
+                pass
+            gc.collect()
+            self._clear_cuda_cache()
             if cleanup_input and parakeet_input.exists():
                 try:
                     parakeet_input.unlink()
@@ -2755,7 +3544,7 @@ class IngestionService:
         if not directory.exists():
             return None
         for base in basenames:
-            for ext in ['.webm', '.m4a', '.opus', '.mp3', '.ogg', '.wav']:
+            for ext in ['.webm', '.m4a', '.mp4', '.opus', '.mp3', '.ogg', '.wav']:
                 candidate = directory / f"{base}{ext}"
                 if candidate.exists():
                     return candidate
@@ -4970,7 +5759,7 @@ class IngestionService:
         return requeued
 
     def process_queue(self):
-        """Process pipeline jobs (download/transcribe/diarize) sequentially."""
+        """Process transcription-stage pipeline jobs."""
         log("Starting process queue worker...")
 
         # Crash recovery is handled once at app startup by cleanup_orphaned_active_jobs().
@@ -4985,49 +5774,39 @@ class IngestionService:
                 if self._cuda_recovery_pending:
                     self._recover_cuda_after_fault_if_needed()
 
-                # 1. Claim a job
-                with Session(engine) as session:
-                    # Pipeline queue (process jobs) is intentionally serialized due to
-                    # high GPU/CPU usage and model memory pressure.
-                    job = session.exec(
-                        select(Job)
-                        .where(Job.status == "queued", Job.job_type == "process")
-                        .order_by(Job.created_at.asc(), Job.id.asc())
-                    ).first()
-                    if not job:
-                        # No jobs, wait and retry
-                        time.sleep(2)
-                        continue
-                    
-                    job.status = "running"
-                    job.started_at = datetime.now()
-                    session.add(job)
-                    session.commit()
-                    session.refresh(job)
-                    job_id = job.id
-                    video_id = job.video_id
-                    log_verbose(f"Processing job {job_id} for video {video_id}")
+                focus_mode = self.get_pipeline_focus_mode()
+                if (
+                    focus_mode == "diarize"
+                    and self._has_jobs_of_types(DIARIZE_JOB_TYPES, {"queued", "running", "diarizing"})
+                ):
+                    time.sleep(1)
+                    continue
+
+                if self._has_jobs_of_types(DIARIZE_JOB_TYPES, {"running", "diarizing"}):
+                    time.sleep(1)
+                    continue
+
+                claimed = self._claim_next_queued_job(PROCESS_JOB_TYPES)
+                if not claimed:
+                    time.sleep(2)
+                    continue
+                job_id = claimed["id"]
+                video_id = claimed["video_id"]
+                log_verbose(f"Processing transcription-stage job {job_id} for video {video_id}")
 
                 # 2. Process
                 try:
-                    self.process_video(video_id, job_id)
-
-                    # 3. Mark success
-                    with Session(engine) as session:
-                        job = session.get(Job, job_id)
-                        if job:
-                            job.status = "completed"
-                            job.completed_at = datetime.now()
-                            job.progress = 100
-                            session.add(job)
-                            session.commit()
-                            # Redo-diarization backup no longer needed after successful completion.
-                            self._cleanup_redo_backup_for_job(job.payload_json)
+                    self._ensure_device()
+                    video_detached, audio_path = self._process_download_phase(video_id, job_id)
+                    self._process_transcribe_phase(video_detached, audio_path, job_id)
+                    diarize_job_id = self._queue_diarize_followup(video_id, job_id)
+                    self._mark_process_job_waiting_for_diarize(job_id, diarize_job_id)
+                    log(f"Transcription complete for {video_detached.title}; queued diarization job {diarize_job_id}.")
 
                 except JobPausedException:
                     log(f"Job {job_id} paused by user")
                     # Job status already set to "paused" by the API endpoint;
-                    # video status reset to "pending" by process_video.
+                    # video status reset to "pending" by the pipeline phase handlers.
 
                 except Exception as e:
                     import traceback
@@ -5052,7 +5831,10 @@ class IngestionService:
                                 self._restore_redo_backup_if_needed(session, job, reason="job failure")
                     except Exception as re:
                         log(f"Redo-backup restore failed after job error {job_id}: {re}")
-                            
+                finally:
+                    if self.device == "cuda":
+                        self._clear_cuda_cache()
+                    gc.collect()
             except Exception as e:
                 log(f"Queue worker loop error: {e}")
                 import traceback
@@ -5060,6 +5842,72 @@ class IngestionService:
                 log_verbose("Retrying in 5 seconds...")
                 time.sleep(5)
                 continue
+
+    def process_diarize_queue(self):
+        """Process diarization-stage pipeline jobs after transcription jobs drain."""
+        log("Starting diarize queue worker...")
+        while True:
+            try:
+                if self._cuda_recovery_pending:
+                    self._recover_cuda_after_fault_if_needed()
+
+                focus_mode = self.get_pipeline_focus_mode()
+                if (
+                    focus_mode != "diarize"
+                    and self._has_jobs_of_types(PROCESS_JOB_TYPES, {"queued", "running", "downloading", "transcribing"})
+                ):
+                    time.sleep(1)
+                    continue
+
+                claimed = self._claim_next_queued_job(DIARIZE_JOB_TYPES)
+                if not claimed:
+                    time.sleep(2)
+                    continue
+
+                job_id = claimed["id"]
+                video_id = claimed["video_id"]
+                payload = self._load_job_payload(claimed.get("payload_json"))
+                parent_job_id = int(payload.get("parent_job_id") or 0)
+                self._ensure_device()
+                baseline_cuda_free_b = 0
+                if self.device == "cuda":
+                    baseline_cuda_free_b = int(self._cuda_memory_snapshot().get("free") or 0)
+
+                try:
+                    video = self._get_detached_video(video_id)
+                    audio_path = self._ensure_audio_ready_for_video(video, job_id=None)
+                    segments, _, _ = self._load_raw_transcript_checkpoint(video, audio_path, job_id=job_id)
+                    self._process_diarize_phase(video, audio_path, segments, job_id)
+                    if parent_job_id:
+                        self._mark_process_job_completed_from_child(parent_job_id, job_id)
+                        with Session(engine) as session:
+                            parent = session.get(Job, parent_job_id)
+                            if parent:
+                                self._cleanup_redo_backup_for_job(parent.payload_json)
+                    self._mark_job_success(job_id)
+                    log(f"Diarization complete for {video.title}.")
+                except JobPausedException:
+                    log(f"Diarize job {job_id} paused by user")
+                except Exception as e:
+                    import traceback
+                    tb = traceback.format_exc()
+                    log(f"Error diarizing job {job_id}: {e}")
+                    log(tb)
+                    self._mark_job_failure(job_id, f"{e}\n{tb[-3500:]}")
+                    if parent_job_id:
+                        self._mark_process_job_failed_from_child(parent_job_id, job_id, f"{e}\n{tb[-3500:]}")
+                finally:
+                    if self.device == "cuda":
+                        self._clear_cuda_cache()
+                    gc.collect()
+                    if self.device == "cuda":
+                        self._maybe_recover_cuda_headroom(baseline_cuda_free_b, job_id=job_id)
+            except Exception as e:
+                log(f"diarize worker loop error: {e}")
+                if is_verbose():
+                    import traceback
+                    traceback.print_exc()
+                time.sleep(3)
 
     def process_funny_queue(self):
         """Process funny-moment analysis/explanation jobs."""
@@ -5369,6 +6217,17 @@ class IngestionService:
 
     def process_video(self, video_id: int, job_id: int = None):
         """Orchestrate the ingestion process via phases."""
+        self._ensure_device()
+        self._record_cuda_health_event("job_start", job_id=job_id, extra={"video_id": int(video_id)})
+        baseline_cuda_free_b = 0
+        if self.device == "cuda":
+            baseline_cuda_free_b = int(self._cuda_memory_snapshot().get("free") or 0)
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "job_cuda_free_gb_start": round(float(baseline_cuda_free_b) / (1024 ** 3), 2) if baseline_cuda_free_b > 0 else 0.0,
+                },
+            )
         try:
             # Phase 1: Download
             video_detached, audio_path = self._process_download_phase(video_id, job_id)
@@ -5415,9 +6274,12 @@ class IngestionService:
             raise RuntimeError(f"{e}\n{tb[-3200:]}") from e
         finally:
             if self.device == "cuda":
-                self._release_diarization_models("process_video_finally")
+                self._release_diarization_models("process_video_finally", job_id=job_id)
                 self._clear_cuda_cache()
             gc.collect()
+            if self.device == "cuda":
+                self._maybe_recover_cuda_headroom(baseline_cuda_free_b, job_id=job_id)
+            self._record_cuda_health_event("job_end", job_id=job_id, extra={"video_id": int(video_id)})
 
     def _format_timestamp(self, seconds: float) -> str:
         """Convert seconds to SRT timestamp format: HH:MM:SS,mmm"""
@@ -6446,14 +7308,23 @@ class IngestionService:
         transcribe_engine_used = "whisper"
 
         # Keep Parakeet transcription from oversubscribing VRAM on long-running workers:
-        # release pyannote models before Parakeet transcribe (they will lazy-load again
-        # for diarization phase).
+        # always release other GPU-heavy ASR/diarization models before Parakeet transcribe.
+        # This is required now that queue stages can keep models warm independently.
         if prefer_parakeet and self.device == "cuda":
             if self.whisper_model is not None:
-                self._release_whisper_model("before_parakeet_transcribe")
-            release_before = os.getenv("PARAKEET_RELEASE_OTHER_MODELS_BEFORE_TRANSCRIBE", "false").strip().lower() == "true"
-            if release_before:
-                self._release_diarization_models("before_parakeet_transcribe")
+                self._release_whisper_model("before_parakeet_transcribe", job_id=job_id)
+            if any([
+                self.diarization_pipeline is not None,
+                self.embedding_model is not None,
+                self.embedding_inference is not None,
+            ]):
+                self._release_diarization_models("before_parakeet_transcribe", job_id=job_id)
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "parakeet_released_diarization_before_transcribe": True,
+                },
+            )
 
         # Read transcription settings
         beam_size = int(os.getenv("TRANSCRIPTION_BEAM_SIZE", "1"))
@@ -6473,11 +7344,24 @@ class IngestionService:
                 force_chunked_for_long = (
                     os.getenv("PARAKEET_LONG_AUDIO_FORCE_CHUNKED", "true").strip().lower() == "true"
                 )
+                long_chunked = False
+                long_chunk_reason = "disabled"
                 if (
                     force_chunked_for_long
-                    and self.device == "cuda"
-                    and remaining_duration >= float(os.getenv("PARAKEET_LONG_AUDIO_SECONDS", "1800"))
+                    and remaining_duration > 0
                 ):
+                    long_chunked, long_chunk_reason = self._should_force_parakeet_long_audio_chunked(
+                        remaining_duration,
+                        job_id=job_id,
+                    )
+                self._upsert_job_payload_fields(
+                    job_id,
+                    {
+                        "parakeet_long_audio_force_chunked_enabled": bool(force_chunked_for_long),
+                        "parakeet_long_audio_force_chunked_reason": long_chunk_reason,
+                    },
+                )
+                if long_chunked:
                     self._upsert_job_payload_fields(
                         job_id,
                         {
@@ -6487,7 +7371,7 @@ class IngestionService:
                     )
                     self._update_job_status_detail(
                         job_id,
-                        "Long audio detected. Using stable Parakeet chunk mode..."
+                        f"Long audio detected. Using stable Parakeet chunk mode ({long_chunk_reason})..."
                     )
                     parakeet_segments, parakeet_duration = self._transcribe_with_parakeet_in_chunks(
                         transcribe_path, start_time_offset=start_time_offset, job_id=job_id
@@ -6517,7 +7401,13 @@ class IngestionService:
                         self._save_partial_transcript(video.id, segments, est_total_duration or 0.0)
                 duration_info = parakeet_duration or video.duration or 0
             except Exception as e:
-                log(f"Parakeet unavailable/failed: {e}. Falling back to Whisper.")
+                allow_whisper_fallback = (
+                    os.getenv("PARAKEET_ALLOW_WHISPER_FALLBACK", "true").strip().lower() == "true"
+                )
+                if allow_whisper_fallback:
+                    log(f"Parakeet unavailable/failed: {e}. Falling back to Whisper.")
+                else:
+                    log(f"Parakeet unavailable/failed: {e}. Whisper fallback disabled; failing job with Parakeet error.")
                 if self._is_cuda_illegal_access(e):
                     self._mark_cuda_unhealthy(str(e), job_id=job_id)
                     fallback_reason = (
@@ -6536,12 +7426,28 @@ class IngestionService:
                         "transcription_engine_used": "whisper",
                         "transcription_engine_fallback_reason": str(e)[:500],
                         "transcription_engine_fallback_detail": fallback_reason,
+                        "parakeet_allow_whisper_fallback": bool(allow_whisper_fallback),
                     },
                 )
+                if not allow_whisper_fallback:
+                    failure_reason = (
+                        f"Parakeet failed and Whisper fallback is disabled. Root cause: {str(e).strip()[:500]}"
+                    )
+                    self._update_job_status_detail(job_id, failure_reason[:240])
+                    self._upsert_job_payload_fields(
+                        job_id,
+                        {
+                            "transcription_engine_used": "parakeet",
+                            "transcription_engine_fallback_reason": None,
+                            "transcription_engine_fallback_detail": None,
+                            "parakeet_no_fallback_failure": failure_reason[:800],
+                        },
+                    )
+                    raise RuntimeError(failure_reason) from e
                 prefer_parakeet = False
                 # Ensure failed Parakeet state does not continue occupying GPU memory
                 # when Whisper fallback begins.
-                self._release_parakeet_model("fallback_to_whisper")
+                self._release_parakeet_model("fallback_to_whisper", job_id=job_id)
                 # Force fresh run from current checkpoint state.
                 segments = existing_segments
         
@@ -6741,7 +7647,7 @@ class IngestionService:
             log(f"Failed to save raw transcript checkpoint: {e}")
 
         if transcribe_engine_used == "parakeet" and self._should_unload_parakeet_after_transcribe(job_id=job_id):
-            self._release_parakeet_model("post_transcribe_low_vram")
+            self._release_parakeet_model("post_transcribe_low_vram", job_id=job_id)
             
         return segments, total_duration
 
@@ -6769,9 +7675,9 @@ class IngestionService:
             
         log("Diarizing...")
         if self.device == "cuda" and self.whisper_model is not None:
-            self._release_whisper_model("before_diarize")
+            self._release_whisper_model("before_diarize", job_id=job_id)
         if self._should_release_parakeet_before_diarize(job_id=job_id):
-            self._release_parakeet_model("before_diarize")
+            self._release_parakeet_model("before_diarize", job_id=job_id)
         # Ensure the speaker-match cache starts fresh for this channel; new embeddings
         # created during this run are appended incrementally.
         self._invalidate_speaker_match_cache(video.channel_id)
@@ -7269,8 +8175,8 @@ class IngestionService:
             video_attached.processed = True
             session.add(video_attached)
             session.commit()
-        if self.device == "cuda":
-            self._release_diarization_models("post_diarize")
+        if self.device == "cuda" and self._should_unload_diarization_after_job(job_id=job_id):
+            self._release_diarization_models("post_diarize", job_id=job_id)
 
     def extract_frame_and_crop(self, video_id: int, timestamp: float, crop_coords: dict) -> str:
         """

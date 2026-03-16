@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import List, Optional, Literal
 from datetime import datetime, timedelta
 from sqlmodel import Session, select, SQLModel
 from sqlalchemy import func, text
@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import base64
 import threading
+import atexit
 import os
 import json
 import pickle
@@ -26,6 +27,7 @@ import urllib.error
 import numpy as np
 from pydantic import BaseModel
 from dotenv import set_key, load_dotenv
+from filelock import FileLock, Timeout as FileLockTimeout
 
 # Load .env before configuring logging
 load_dotenv()
@@ -55,6 +57,11 @@ ingestion_service = None
 worker_threads: dict[str, threading.Thread] = {}
 prefetch_thread = None
 youtube_oauth_pending_states: dict[str, float] = {}
+backend_instance_lock: FileLock | None = None
+BACKEND_RUNTIME_DIR = Path(__file__).parent.parent / "runtime"
+BACKEND_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+BACKEND_INSTANCE_LOCK_PATH = BACKEND_RUNTIME_DIR / "backend.instance.lock"
+BACKEND_INSTANCE_INFO_PATH = BACKEND_RUNTIME_DIR / "backend.instance.json"
 
 # Ensure image directory exists
 IMAGES_DIR = Path(__file__).parent.parent / "data" / "images"
@@ -65,39 +72,87 @@ ENV_PATH = Path(__file__).parent.parent / ".env"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global ingestion_service, worker_threads, prefetch_thread
-    create_db_and_tables()
-    ingestion_service = IngestionService()
+    global ingestion_service, worker_threads, prefetch_thread, backend_instance_lock
+
+    backend_instance_lock = FileLock(str(BACKEND_INSTANCE_LOCK_PATH))
     try:
-        ingestion_service.cleanup_orphaned_active_jobs()
-    except Exception as e:
-        print(f"Startup orphan-job cleanup failed: {e}")
+        backend_instance_lock.acquire(timeout=0)
+    except FileLockTimeout:
+        detail = f"Another Chatalogue backend instance is already running for this install. Lock: {BACKEND_INSTANCE_LOCK_PATH}"
+        try:
+            if BACKEND_INSTANCE_INFO_PATH.exists():
+                info = json.loads(BACKEND_INSTANCE_INFO_PATH.read_text(encoding="utf-8"))
+                detail += f" | holder_pid={info.get('pid')} | holder_python={info.get('python')}"
+        except Exception:
+            pass
+        print(detail)
+        raise RuntimeError(detail)
 
-    # Start queue workers by queue type to allow safe parallelism:
-    # - process: download/transcribe/diarize (serialized)
-    # - funny: laughter detection + humor explanation
-    # - youtube: summary/chapter generation
-    # - clip: rendering/export jobs
-    worker_specs = {
-        "process": ingestion_service.process_queue,
-        "funny": ingestion_service.process_funny_queue,
-        "youtube": ingestion_service.process_youtube_queue,
-        "clip": ingestion_service.process_clip_queue,
-    }
-    worker_threads = {}
-    for name, target in worker_specs.items():
-        t = threading.Thread(target=target, daemon=True, name=f"{name}-queue-worker")
-        t.start()
-        worker_threads[name] = t
-    print(f"Queue workers started: {', '.join(worker_threads.keys())}")
+    def _release_backend_lock():
+        global backend_instance_lock
+        try:
+            if backend_instance_lock is not None and getattr(backend_instance_lock, "is_locked", False):
+                backend_instance_lock.release()
+        except Exception:
+            pass
+        try:
+            if BACKEND_INSTANCE_INFO_PATH.exists():
+                BACKEND_INSTANCE_INFO_PATH.unlink()
+        except Exception:
+            pass
 
-    # Start a lightweight background worker that pre-downloads audio for queued jobs
-    # so processing can begin immediately when jobs reach the front of the queue.
-    prefetch_thread = threading.Thread(target=ingestion_service.prefetch_queue_audio, daemon=True)
-    prefetch_thread.start()
-    print("Audio prefetch worker thread started.")
+    atexit.register(_release_backend_lock)
+    BACKEND_INSTANCE_INFO_PATH.write_text(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "python": os.sys.executable,
+                "started_at": datetime.now().isoformat(),
+                "cwd": str(Path.cwd()),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
-    yield
+    try:
+        create_db_and_tables()
+        ingestion_service = IngestionService()
+        try:
+            ingestion_service.cleanup_orphaned_active_jobs()
+        except Exception as e:
+            print(f"Startup orphan-job cleanup failed: {e}")
+
+        # Start queue workers by queue type to allow safe parallelism:
+        # - process: download/transcribe stage
+        # - diarize: speaker diarization stage (waits for transcribe drain)
+        # - funny: laughter detection + humor explanation
+        # - youtube: summary/chapter generation
+        # - clip: rendering/export jobs
+        worker_specs = {
+            "process": ingestion_service.process_queue,
+            "diarize": ingestion_service.process_diarize_queue,
+            "funny": ingestion_service.process_funny_queue,
+            "youtube": ingestion_service.process_youtube_queue,
+            "clip": ingestion_service.process_clip_queue,
+        }
+        worker_threads = {}
+        for name, target in worker_specs.items():
+            t = threading.Thread(target=target, daemon=True, name=f"{name}-queue-worker")
+            t.start()
+            worker_threads[name] = t
+        print(f"Queue workers started: {', '.join(worker_threads.keys())}")
+
+        # Start a lightweight background worker that pre-downloads audio for queued jobs
+        # so processing can begin immediately when jobs reach the front of the queue.
+        prefetch_thread = threading.Thread(target=ingestion_service.prefetch_queue_audio, daemon=True)
+        prefetch_thread.start()
+        print("Audio prefetch worker thread started.")
+
+        yield
+    finally:
+        _release_backend_lock()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -117,6 +172,16 @@ app.mount("/thumbnails", StaticFiles(directory=THUMBNAILS_DIR), name="thumbnails
 def get_session():
     with Session(engine) as session:
         yield session
+
+
+@app.get("/system/cuda-health")
+def system_cuda_health():
+    if ingestion_service is None:
+        raise HTTPException(status_code=503, detail="Ingestion service not ready")
+    try:
+        return ingestion_service.get_cuda_health_status()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to inspect CUDA health: {e}")
 
 
 YOUTUBE_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube"
@@ -1347,7 +1412,7 @@ def delete_channel_preview(channel_id: int, session: Session = Depends(get_sessi
         clip_count = session.exec(select(func.count(Clip.id)).where(Clip.video_id.in_(video_ids))).one()
         active_jobs = session.exec(select(func.count(Job.id)).where(
             Job.video_id.in_(video_ids),
-            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing"])
+            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
         )).one()
     speaker_count = session.exec(select(func.count(Speaker.id)).where(Speaker.channel_id == channel_id)).one()
 
@@ -1382,7 +1447,7 @@ def delete_channel(channel_id: int, session: Session = Depends(get_session)):
     if video_ids:
         active = session.exec(select(Job).where(
             Job.video_id.in_(video_ids),
-            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing"])
+            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
         )).first()
         if active:
             raise HTTPException(status_code=400, detail=f"Cannot delete channel with active job (job {active.id}, status: {active.status}). Cancel active jobs first.")
@@ -1906,12 +1971,12 @@ def _enqueue_unique_job(
 
 @app.post("/videos/{video_id}/process")
 def process_video(video_id: int, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
-    # Check if job exists
+    pipeline_active_statuses = ["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]
     job = session.exec(
         select(Job).where(
             Job.video_id == video_id,
-            Job.job_type == "process",
-            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing"]),
+            Job.job_type.in_(["process", "diarize"]),
+            Job.status.in_(pipeline_active_statuses),
         )
     ).first()
     if not job:
@@ -1940,7 +2005,7 @@ def process_all_videos(channel_id: int, session: Session = Depends(get_session))
         existing = session.exec(
             select(Job).where(
                 Job.video_id == video.id,
-                Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing"])
+                Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
             )
         ).first()
 
@@ -4218,7 +4283,7 @@ def purge_video(video_id: int, session: Session = Depends(get_session)):
     if not video: raise HTTPException(status_code=404, detail="Video not found")
 
     # verify no active job
-    active_job = session.exec(select(Job).where(Job.video_id == video.id, Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing"]))).first()
+    active_job = session.exec(select(Job).where(Job.video_id == video.id, Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]))).first()
     if active_job:
         raise HTTPException(status_code=400, detail=f"Cannot purge video with active job {active_job.id} ({active_job.status})")
 
@@ -4258,7 +4323,7 @@ def redo_diarization(video_id: int, session: Session = Depends(get_session)):
     # Verify no active job
     active_job = session.exec(select(Job).where(
         Job.video_id == video.id,
-        Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing"])
+        Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
     )).first()
     if active_job:
         raise HTTPException(status_code=400, detail=f"Video has an active job {active_job.id} ({active_job.status})")
@@ -4542,7 +4607,7 @@ def redo_transcription(video_id: int, session: Session = Depends(get_session)):
     active_job = session.exec(
         select(Job).where(
             Job.video_id == video.id,
-            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing"])
+            Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
         )
     ).first()
     if active_job:
@@ -4597,9 +4662,24 @@ class JobRead(JobBase):
     video: Optional[Video] = None
 
 
+class PipelineFocusRead(BaseModel):
+    mode: Literal["transcribe", "diarize"]
+    auto_diarize_ready: bool
+    transcribe_active: int
+    transcribe_queued: int
+    diarize_active: int
+    diarize_queued: int
+    active_transcription_paused: int = 0
+
+
+class PipelineFocusUpdate(BaseModel):
+    mode: Literal["transcribe", "diarize"]
+    pause_active_transcription: bool = False
+
+
 def _job_queue_name(job_type: str) -> str:
     jt = (job_type or "").strip().lower()
-    if jt == "process":
+    if jt in {"process", "diarize"}:
         return "pipeline"
     if jt in {"funny_detect", "funny_explain"}:
         return "funny"
@@ -4624,6 +4704,7 @@ def read_jobs(
     if status:
         query = query.where(Job.status == status).order_by(Job.created_at.desc())
     else:
+        query = query.where(Job.status != "waiting_diarize")
         # Ensure active jobs are always included near the top even when limit truncates.
         query = query.order_by(
             case((Job.status.in_(active_like_statuses), 0), else_=1),
@@ -4655,6 +4736,8 @@ def get_job_queues_summary(session: Session = Depends(get_session)):
         # sqlite row can come back as tuple in this select mode
         job_type = row[1] if isinstance(row, tuple) else getattr(row, "job_type", "")
         status = row[2] if isinstance(row, tuple) else getattr(row, "status", "")
+        if status == "waiting_diarize":
+            continue
         q = _job_queue_name(job_type)
         bucket = summary[q]
         bucket["total"] += 1
@@ -4677,6 +4760,115 @@ def get_queue_status(session: Session = Depends(get_session)):
         "queued": len(queued),
         "paused": len(paused),
         "total_active": len(running) + len(queued) + len(paused)
+    }
+
+
+@app.get("/jobs/pipeline/focus", response_model=PipelineFocusRead)
+def get_pipeline_focus(session: Session = Depends(get_session)):
+    transcribe_active_statuses = ["running", "downloading", "transcribing"]
+    diarize_active_statuses = ["running", "diarizing"]
+    transcribe_active = int(
+        session.exec(
+            select(func.count(Job.id)).where(
+                Job.job_type == "process",
+                Job.status.in_(transcribe_active_statuses),
+            )
+        ).one() or 0
+    )
+    transcribe_queued = int(
+        session.exec(
+            select(func.count(Job.id)).where(
+                Job.job_type == "process",
+                Job.status == "queued",
+            )
+        ).one() or 0
+    )
+    diarize_active = int(
+        session.exec(
+            select(func.count(Job.id)).where(
+                Job.job_type == "diarize",
+                Job.status.in_(diarize_active_statuses),
+            )
+        ).one() or 0
+    )
+    diarize_queued = int(
+        session.exec(
+            select(func.count(Job.id)).where(
+                Job.job_type == "diarize",
+                Job.status == "queued",
+            )
+        ).one() or 0
+    )
+    return {
+        "mode": ingestion_service.get_pipeline_focus_mode(),
+        "auto_diarize_ready": transcribe_active == 0 and transcribe_queued == 0 and (diarize_active > 0 or diarize_queued > 0),
+        "transcribe_active": transcribe_active,
+        "transcribe_queued": transcribe_queued,
+        "diarize_active": diarize_active,
+        "diarize_queued": diarize_queued,
+    }
+
+
+@app.post("/jobs/pipeline/focus", response_model=PipelineFocusRead)
+def set_pipeline_focus(payload: PipelineFocusUpdate, session: Session = Depends(get_session)):
+    mode = ingestion_service.set_pipeline_focus_mode(payload.mode)
+    paused_active_count = 0
+    if mode == "diarize" and payload.pause_active_transcription:
+        active_process_jobs = session.exec(
+            select(Job).where(
+                Job.job_type == "process",
+                Job.status.in_(["running", "downloading", "transcribing"]),
+            )
+        ).all()
+        for job in active_process_jobs:
+            job.status = "paused"
+            session.add(job)
+            paused_active_count += 1
+        if paused_active_count:
+            session.commit()
+
+    transcribe_active_statuses = ["running", "downloading", "transcribing"]
+    diarize_active_statuses = ["running", "diarizing"]
+    transcribe_active = int(
+        session.exec(
+            select(func.count(Job.id)).where(
+                Job.job_type == "process",
+                Job.status.in_(transcribe_active_statuses),
+            )
+        ).one() or 0
+    )
+    transcribe_queued = int(
+        session.exec(
+            select(func.count(Job.id)).where(
+                Job.job_type == "process",
+                Job.status == "queued",
+            )
+        ).one() or 0
+    )
+    diarize_active = int(
+        session.exec(
+            select(func.count(Job.id)).where(
+                Job.job_type == "diarize",
+                Job.status.in_(diarize_active_statuses),
+            )
+        ).one() or 0
+    )
+    diarize_queued = int(
+        session.exec(
+            select(func.count(Job.id)).where(
+                Job.job_type == "diarize",
+                Job.status == "queued",
+            )
+        ).one() or 0
+    )
+    return {
+        "mode": mode,
+        "auto_diarize_ready": transcribe_active == 0 and transcribe_queued == 0 and (diarize_active > 0 or diarize_queued > 0),
+        "transcribe_active": transcribe_active,
+        "transcribe_queued": transcribe_queued,
+        "diarize_active": diarize_active,
+        "diarize_queued": diarize_queued,
+        "active_transcription_paused": paused_active_count,
     }
 
 
@@ -4831,14 +5023,15 @@ def clear_queue(session: Session = Depends(get_session)):
     max_attempts = 12
     for attempt in range(max_attempts):
         try:
+            clearable_statuses = ["queued", "paused", "waiting_diarize"]
             count = session.exec(
-                select(func.count(Job.id)).where(Job.status.in_(["queued", "paused"]))
+                select(func.count(Job.id)).where(Job.status.in_(clearable_statuses))
             ).one()
             deleted_count = int(count or 0)
             if deleted_count <= 0:
                 return {"deleted": 0}
 
-            session.exec(delete(Job).where(Job.status.in_(["queued", "paused"])))
+            session.exec(delete(Job).where(Job.status.in_(clearable_statuses)))
             session.commit()
             return {"deleted": deleted_count}
         except OperationalError as e:
@@ -4875,7 +5068,7 @@ def resubmit_job(job_id: int, session: Session = Depends(get_session)):
     # Check no active job already exists for this video
     active = session.exec(select(Job).where(
         Job.video_id == video_id,
-        Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing"])
+        Job.status.in_(["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"])
     )).first()
     if active:
         raise HTTPException(status_code=400, detail=f"Video already has an active job ({active.status})")
@@ -4935,6 +5128,20 @@ def cancel_job(job_id: int, session: Session = Depends(get_session)):
         video.processed = False # Ensure processed flag is reset
         session.add(video)
 
+    payload = json.loads(job.payload_json) if job.payload_json else {}
+    if job.job_type == "diarize":
+        parent_job_id = int(payload.get("parent_job_id") or 0)
+        if parent_job_id:
+            parent_job = session.get(Job, parent_job_id)
+            if parent_job:
+                session.delete(parent_job)
+    elif job.job_type == "process" and job.status == "waiting_diarize":
+        child_job_id = int(payload.get("diarize_job_id") or 0)
+        if child_job_id:
+            child_job = session.get(Job, child_job_id)
+            if child_job:
+                session.delete(child_job)
+
     session.delete(job)
     session.commit()
     return {"status": "cancelled", "video_status": job.video.status if job.video else "unknown"}
@@ -4948,6 +5155,7 @@ class Settings(BaseModel):
     parakeet_batch_size: int = 16
     parakeet_batch_auto: bool = True
     parakeet_require_word_timestamps: bool = True
+    parakeet_allow_whisper_fallback: bool = True
     parakeet_unload_after_transcribe: bool = False
     beam_size: int = 1  # 1=fastest, 5=most accurate
     vad_filter: bool = True  # Skip silent portions for faster processing
@@ -5016,6 +5224,7 @@ def get_settings():
         parakeet_batch_size=int(os.getenv("PARAKEET_BATCH_SIZE", "16")),
         parakeet_batch_auto=os.getenv("PARAKEET_BATCH_AUTO", "true").lower() == "true",
         parakeet_require_word_timestamps=os.getenv("PARAKEET_REQUIRE_WORD_TIMESTAMPS", "true").lower() == "true",
+        parakeet_allow_whisper_fallback=os.getenv("PARAKEET_ALLOW_WHISPER_FALLBACK", "true").lower() == "true",
         parakeet_unload_after_transcribe=os.getenv("PARAKEET_UNLOAD_AFTER_TRANSCRIBE", "false").lower() == "true",
         beam_size=int(os.getenv("TRANSCRIPTION_BEAM_SIZE", "1")),
         vad_filter=os.getenv("TRANSCRIPTION_VAD_FILTER", "true").lower() == "true",
@@ -5073,6 +5282,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     parakeet_batch_size = max(1, min(int(getattr(settings, "parakeet_batch_size", 16)), 64))
     parakeet_batch_auto = bool(getattr(settings, "parakeet_batch_auto", True))
     parakeet_require_word_timestamps = bool(getattr(settings, "parakeet_require_word_timestamps", True))
+    parakeet_allow_whisper_fallback = bool(getattr(settings, "parakeet_allow_whisper_fallback", True))
     parakeet_unload_after_transcribe = bool(getattr(settings, "parakeet_unload_after_transcribe", False))
     llm_enabled = bool(getattr(settings, "llm_enabled", False) or settings.ollama_enabled)
     normalized_provider = _normalize_llm_provider(getattr(settings, "llm_provider", "ollama"))
@@ -5094,6 +5304,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     set_key(ENV_PATH, "PARAKEET_BATCH_SIZE", str(parakeet_batch_size))
     set_key(ENV_PATH, "PARAKEET_BATCH_AUTO", str(parakeet_batch_auto).lower())
     set_key(ENV_PATH, "PARAKEET_REQUIRE_WORD_TIMESTAMPS", str(parakeet_require_word_timestamps).lower())
+    set_key(ENV_PATH, "PARAKEET_ALLOW_WHISPER_FALLBACK", str(parakeet_allow_whisper_fallback).lower())
     set_key(ENV_PATH, "PARAKEET_UNLOAD_AFTER_TRANSCRIBE", str(parakeet_unload_after_transcribe).lower())
     set_key(ENV_PATH, "TRANSCRIPTION_BEAM_SIZE", str(settings.beam_size))
     set_key(ENV_PATH, "TRANSCRIPTION_VAD_FILTER", str(settings.vad_filter).lower())
@@ -5149,6 +5360,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     os.environ["PARAKEET_BATCH_SIZE"] = str(parakeet_batch_size)
     os.environ["PARAKEET_BATCH_AUTO"] = str(parakeet_batch_auto).lower()
     os.environ["PARAKEET_REQUIRE_WORD_TIMESTAMPS"] = str(parakeet_require_word_timestamps).lower()
+    os.environ["PARAKEET_ALLOW_WHISPER_FALLBACK"] = str(parakeet_allow_whisper_fallback).lower()
     os.environ["PARAKEET_UNLOAD_AFTER_TRANSCRIBE"] = str(parakeet_unload_after_transcribe).lower()
     os.environ["TRANSCRIPTION_BEAM_SIZE"] = str(settings.beam_size)
     os.environ["TRANSCRIPTION_VAD_FILTER"] = str(settings.vad_filter).lower()

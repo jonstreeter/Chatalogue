@@ -39,3 +39,9 @@
 - Add an opt-in way to expose the local Chatalogue server externally, similar to Gradio share links.
 - Support short-lived public URLs/tunnels with clear status, manual stop control, and expiry defaults.
 - Include access controls (token/password/IP allowlist), audit logging, and explicit warning banners while sharing is enabled.
+
+## 9. Intelligent Video Editing via Transcript Instructions
+- Add support for AI-driven video editing directly from word-level diarized transcripts.
+- Users input prompts like "cut filler words, repetitions, and off-topic parts; keep only the most important arguments."
+- An integrated LLM proposes condensed segments with precise timestamps.
+- Output: JSON/EDL or ready-to-run FFmpeg concat/trim commands for lossless local rendering.

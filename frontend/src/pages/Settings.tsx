@@ -51,6 +51,7 @@ interface TranscriptionEngineTestResult {
     parakeet_effective_batch_size?: number;
     parakeet_batch_hard_max?: number;
     parakeet_max_gpu_memory_fraction?: number;
+    parakeet_allow_whisper_fallback?: boolean;
     parakeet_unload_after_transcribe?: boolean | string;
     cuda_memory?: {
         free_gb?: number;
@@ -334,6 +335,7 @@ export function Settings() {
     const [parakeetBatchSize, setParakeetBatchSize] = useState(16);
     const [parakeetBatchAuto, setParakeetBatchAuto] = useState(true);
     const [parakeetRequireWordTimestamps, setParakeetRequireWordTimestamps] = useState(true);
+    const [parakeetAllowWhisperFallback, setParakeetAllowWhisperFallback] = useState(true);
     const [parakeetUnloadAfterTranscribe, setParakeetUnloadAfterTranscribe] = useState(false);
     const [testingTranscriptionEngine, setTestingTranscriptionEngine] = useState(false);
     const [transcriptionEngineTestResult, setTranscriptionEngineTestResult] = useState<TranscriptionEngineTestResult | null>(null);
@@ -442,7 +444,7 @@ export function Settings() {
 
     useEffect(() => {
         setTranscriptionEngineTestResult(null);
-    }, [transcriptionEngine, transcriptionModel, computeType, parakeetModel, parakeetBatchSize, parakeetBatchAuto, parakeetRequireWordTimestamps, parakeetUnloadAfterTranscribe]);
+    }, [transcriptionEngine, transcriptionModel, computeType, parakeetModel, parakeetBatchSize, parakeetBatchAuto, parakeetRequireWordTimestamps, parakeetAllowWhisperFallback, parakeetUnloadAfterTranscribe]);
 
     const loadSettings = async () => {
         try {
@@ -459,6 +461,7 @@ export function Settings() {
             setParakeetBatchSize(res.data.parakeet_batch_size ?? 16);
             setParakeetBatchAuto(res.data.parakeet_batch_auto ?? true);
             setParakeetRequireWordTimestamps(res.data.parakeet_require_word_timestamps ?? true);
+            setParakeetAllowWhisperFallback(res.data.parakeet_allow_whisper_fallback ?? true);
             setParakeetUnloadAfterTranscribe(res.data.parakeet_unload_after_transcribe ?? false);
             setBeamSize(res.data.beam_size ?? 1);
             setVadFilter(res.data.vad_filter ?? true);
@@ -1057,6 +1060,7 @@ export function Settings() {
                 parakeet_batch_size: parakeetBatchSize,
                 parakeet_batch_auto: parakeetBatchAuto,
                 parakeet_require_word_timestamps: parakeetRequireWordTimestamps,
+                parakeet_allow_whisper_fallback: parakeetAllowWhisperFallback,
                 parakeet_unload_after_transcribe: parakeetUnloadAfterTranscribe,
                 beam_size: beamSize,
                 vad_filter: vadFilter,
@@ -1274,6 +1278,20 @@ export function Settings() {
                                                     <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200 sm:col-span-2">
                                                         <div className="flex-1">
                                                             <label className="block text-sm font-medium text-slate-700">
+                                                                Allow Whisper Fallback
+                                                            </label>
+                                                            <p className="text-xs text-slate-500 mt-0.5">
+                                                                Disable this for Parakeet-only testing. Jobs will fail immediately and preserve the real Parakeet error instead of switching to Whisper.
+                                                            </p>
+                                                        </div>
+                                                        <label className="relative inline-flex items-center cursor-pointer ml-4">
+                                                            <input type="checkbox" checked={parakeetAllowWhisperFallback} onChange={(e) => setParakeetAllowWhisperFallback(e.target.checked)} className="sr-only peer" />
+                                                            <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                                                        </label>
+                                                    </div>
+                                                    <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200 sm:col-span-2">
+                                                        <div className="flex-1">
+                                                            <label className="block text-sm font-medium text-slate-700">
                                                                 Release Parakeet After Transcribe
                                                             </label>
                                                             <p className="text-xs text-slate-500 mt-0.5">
@@ -1287,7 +1305,7 @@ export function Settings() {
                                                     </div>
                                                 </div>
                                                 <p className="text-xs text-slate-500">
-                                                    Install optional Parakeet dependencies in the app venv via <code>backend/requirements-parakeet.txt</code>. If unavailable or unsupported, Whisper fallback is automatic.
+                                                    Install optional Parakeet dependencies in the app venv via <code>backend/requirements-parakeet.txt</code>. Leave Whisper fallback enabled for production stability; disable it only when you need Parakeet-only diagnostics.
                                                 </p>
                                             </div>
                                         )}
@@ -2778,6 +2796,4 @@ export function Settings() {
         </>
     );
 }
-
-
 

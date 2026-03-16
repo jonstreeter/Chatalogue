@@ -50,6 +50,7 @@ interface Settings {
   parakeet_batch_size: number;
   parakeet_batch_auto: boolean;
   parakeet_require_word_timestamps: boolean;
+  parakeet_allow_whisper_fallback: boolean;
   parakeet_unload_after_transcribe: boolean;
   beam_size: number;
   vad_filter: boolean;
@@ -120,6 +121,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
 
   const [engine, setEngine] = useState<'auto' | 'whisper' | 'parakeet'>('auto');
   const [whisperModel, setWhisperModel] = useState('medium');
+  const [parakeetAllowWhisperFallback, setParakeetAllowWhisperFallback] = useState(true);
   const [engineTest, setEngineTest] = useState<{
     success?: boolean;
     error?: string;
@@ -156,6 +158,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
       setHfToken(s.hf_token || '');
       setEngine((s.transcription_engine || 'auto') as any);
       setWhisperModel(s.transcription_model || 'medium');
+      setParakeetAllowWhisperFallback(s.parakeet_allow_whisper_fallback ?? true);
       setLlmProvider((s.llm_provider || 'ollama') as LlmProvider);
       setLlmEnabled(s.llm_enabled);
       setOllamaUrl(s.ollama_url || 'http://localhost:11434');
@@ -246,6 +249,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
       await saveSettings({
         transcription_engine: engine,
         transcription_model: whisperModel,
+        parakeet_allow_whisper_fallback: parakeetAllowWhisperFallback,
       });
       const res = await api.post('/settings/test-transcription-engine', { engine });
       const data = res.data || {};
@@ -407,6 +411,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
         hf_token: hfSkipped ? '' : hfToken,
         transcription_engine: engine,
         transcription_model: whisperModel,
+        parakeet_allow_whisper_fallback: parakeetAllowWhisperFallback,
         llm_provider: llmProvider,
         llm_enabled: llmEnabled && !llmSkipped,
         setup_wizard_completed: true,
@@ -673,6 +678,23 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                 Parakeet is typically 2&ndash;5x faster but currently English-only.
                 Whisper supports 90+ languages.
               </div>
+
+              {(engine === 'parakeet' || engine === 'auto') && (
+                <label className="mb-4 flex items-start gap-3 p-3 rounded-lg border border-slate-200 bg-white cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={parakeetAllowWhisperFallback}
+                    onChange={(e) => setParakeetAllowWhisperFallback(e.target.checked)}
+                    className="mt-0.5 accent-rose-500"
+                  />
+                  <div>
+                    <div className="text-sm font-medium text-slate-900">Allow Whisper fallback</div>
+                    <div className="text-xs text-slate-500">
+                      Recommended for normal use. Turn this off only when you want Parakeet-only failure diagnostics.
+                    </div>
+                  </div>
+                </label>
+              )}
 
               {(engine === 'whisper' || engine === 'auto') && (
                 <div className="mb-4">
