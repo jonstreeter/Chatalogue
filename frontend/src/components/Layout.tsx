@@ -1,6 +1,6 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Home, ListTodo, Settings as SettingsIcon, Users, Menu, X, RefreshCw, Download } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Home, ListTodo, Settings as SettingsIcon, Users, Menu, X, RefreshCw, Download, AlertTriangle } from 'lucide-react';
+import { useEffect, useState, useCallback } from 'react';
 import api from '../lib/api';
 
 interface QueueStatus {
@@ -8,6 +8,33 @@ interface QueueStatus {
     queued: number;
     paused: number;
     total_active: number;
+}
+
+interface CudaHealth {
+    device: string;
+    cuda_unhealthy: boolean;
+    cuda_unhealthy_reason: string | null;
+    cuda_recovery_pending: boolean;
+    permanent_cpu_mode: boolean;
+    auto_restart_count: number;
+    auto_restart_limit: number;
+    cuda_fault_count_this_worker: number;
+    memory?: {
+        free_gb?: number;
+        total_gb?: number;
+        allocated_gb?: number;
+        reserved_gb?: number;
+    };
+    system_memory?: {
+        rss_gb?: number;
+        total_gb?: number;
+        available_gb?: number;
+    };
+    component_memory?: Record<string, {
+        loaded?: boolean;
+        ram_gb?: number;
+        vram_gb?: number;
+    }>;
 }
 
 interface SystemVersionInfo {
@@ -35,6 +62,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
     const [checkingVersion, setCheckingVersion] = useState(false);
     const [updating, setUpdating] = useState(false);
     const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+    const [cudaHealth, setCudaHealth] = useState<CudaHealth | null>(null);
+    const [retryingGpu, setRetryingGpu] = useState(false);
 
     useEffect(() => {
         setMobileNavOpen(false);
@@ -76,6 +105,47 @@ export function Layout({ children }: { children: React.ReactNode }) {
         }, 120000);
         return () => clearInterval(interval);
     }, []);
+
+    useEffect(() => {
+        if (!backendOnline) return;
+        const fetchCudaHealth = async () => {
+            try {
+                const res = await api.get<CudaHealth>('/system/cuda-health');
+                setCudaHealth(res.data);
+            } catch { /* ignore */ }
+        };
+        fetchCudaHealth();
+        const interval = setInterval(fetchCudaHealth, 15000);
+        return () => clearInterval(interval);
+    }, [backendOnline]);
+
+    const handleRetryGpu = useCallback(async () => {
+        if (retryingGpu) return;
+        setRetryingGpu(true);
+        try {
+            await api.post('/system/cuda-restart-state/reset');
+            await api.post('/system/restart');
+            // Poll until backend comes back
+            for (let i = 0; i < 20; i++) {
+                await new Promise((r) => setTimeout(r, 2000));
+                try {
+                    const res = await api.get<CudaHealth>('/system/cuda-health');
+                    setCudaHealth(res.data);
+                    break;
+                } catch { /* keep polling */ }
+            }
+        } catch { /* ignore */ } finally {
+            setRetryingGpu(false);
+        }
+    }, [retryingGpu]);
+
+    const cudaBannerSeverity = cudaHealth?.permanent_cpu_mode
+        ? 'red'
+        : (cudaHealth?.auto_restart_count ?? 0) > 0
+            ? 'orange'
+            : cudaHealth?.cuda_unhealthy
+                ? 'yellow'
+                : null;
 
     const handleCheckUpdates = async () => {
         setUpdateMessage(null);
@@ -128,6 +198,46 @@ export function Layout({ children }: { children: React.ReactNode }) {
     const branchLabel = versionInfo?.git?.branch || 'main';
     const updateAvailable = Boolean(versionInfo?.git?.update_available);
     const behindCount = Number(versionInfo?.git?.behind_count || 0);
+
+    const memoryComponents = [
+        { key: 'parakeet', label: 'Parakeet', color: 'bg-violet-500' },
+        { key: 'whisper', label: 'Whisper', color: 'bg-cyan-500' },
+        { key: 'pyannote', label: 'Pyannote', color: 'bg-emerald-500' },
+    ] as const;
+
+    const renderMemoryBar = (
+        label: string,
+        totalGb: number | null,
+        values: { key: string; label: string; color: string; valueGb: number }[],
+        usedGb?: number | null,
+        trailing?: string | null,
+    ) => {
+        if (totalGb == null || totalGb <= 0) return null;
+        const componentUsed = values.reduce((sum, item) => sum + Math.max(0, item.valueGb || 0), 0);
+        const effectiveUsed = Math.max(0, Math.min(totalGb, usedGb ?? componentUsed));
+        const otherUsed = Math.max(0, effectiveUsed - componentUsed);
+        const barSegments = [
+            ...values,
+            ...(otherUsed > 0.05 ? [{ key: 'other', label: 'Other', color: 'bg-slate-300', valueGb: otherUsed }] : []),
+        ];
+        return (
+            <div className="mt-3">
+                <div className="flex items-center justify-between text-[11px] text-slate-500">
+                    <span className="font-medium text-slate-600">{label}</span>
+                    <span>{trailing || `${effectiveUsed.toFixed(1)} / ${totalGb.toFixed(1)} GB`}</span>
+                </div>
+                <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                    <div className="flex h-full w-full">
+                        {barSegments.map((item) => {
+                            const widthPct = Math.max(0, Math.min(100, (item.valueGb / totalGb) * 100));
+                            if (widthPct <= 0.05) return null;
+                            return <div key={item.key} className={`h-full shrink-0 ${item.color}`} style={{ width: `${widthPct}%` }} />;
+                        })}
+                    </div>
+                </div>
+            </div>
+        );
+    };
 
     return (
         <div className="flex h-screen overflow-hidden bg-slate-50">
@@ -313,12 +423,96 @@ export function Layout({ children }: { children: React.ReactNode }) {
                         {updateMessage && (
                             <p className="mt-2 text-[11px] text-slate-500">{updateMessage}</p>
                         )}
+                        {cudaHealth && (() => {
+                            const componentMemory = cudaHealth.component_memory || {};
+                            const ramTotal = typeof cudaHealth.system_memory?.total_gb === 'number' ? cudaHealth.system_memory.total_gb : null;
+                            const vramTotal = typeof cudaHealth.memory?.total_gb === 'number' ? cudaHealth.memory.total_gb : null;
+                            const ramUsed = typeof cudaHealth.system_memory?.rss_gb === 'number' ? cudaHealth.system_memory.rss_gb : null;
+                            const vramAllocated = typeof cudaHealth.memory?.allocated_gb === 'number' ? cudaHealth.memory.allocated_gb : null;
+                            const ramValues = memoryComponents.map((component) => ({
+                                ...component,
+                                valueGb: Number(componentMemory[component.key]?.ram_gb || 0),
+                            }));
+                            const vramValues = memoryComponents.map((component) => ({
+                                ...component,
+                                valueGb: Number(componentMemory[component.key]?.vram_gb || 0),
+                            }));
+                            return (
+                                <>
+                                    {renderMemoryBar(
+                                        'RAM',
+                                        ramTotal,
+                                        ramValues,
+                                        ramUsed,
+                                        ramUsed != null && ramTotal != null ? `${ramUsed.toFixed(1)} / ${ramTotal.toFixed(1)} GB` : null,
+                                    )}
+                                    {renderMemoryBar(
+                                        'VRAM',
+                                        vramTotal,
+                                        vramValues,
+                                        vramAllocated,
+                                        vramAllocated != null && vramTotal != null ? `${vramAllocated.toFixed(1)} / ${vramTotal.toFixed(1)} GB` : null,
+                                    )}
+                                    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-500">
+                                        {memoryComponents.map((component) => {
+                                            const ramGb = Number(componentMemory[component.key]?.ram_gb || 0);
+                                            const vramGb = Number(componentMemory[component.key]?.vram_gb || 0);
+                                            const loaded = Boolean(componentMemory[component.key]?.loaded) || ramGb > 0 || vramGb > 0;
+                                            return (
+                                                <span key={component.key} className="inline-flex items-center gap-1">
+                                                    <span className={`h-2 w-2 rounded-full ${component.color}`} />
+                                                    {component.label}{loaded ? ` ${Math.max(ramGb, vramGb).toFixed(1)} GB` : ' idle'}
+                                                </span>
+                                            );
+                                        })}
+                                    </div>
+                                </>
+                            );
+                        })()}
                     </div>
                 </div>
             </aside>
 
             {/* Main Content */}
             <main className="flex-1 min-w-0 overflow-y-auto relative z-10 px-3 pb-6 pt-20 md:p-8 md:pt-8">
+                {cudaBannerSeverity && (
+                    <div className={`mb-4 rounded-xl border px-4 py-3 flex items-start gap-3 text-sm ${
+                        cudaBannerSeverity === 'red'
+                            ? 'bg-red-50 border-red-200 text-red-800'
+                            : cudaBannerSeverity === 'orange'
+                                ? 'bg-orange-50 border-orange-200 text-orange-800'
+                                : 'bg-amber-50 border-amber-200 text-amber-800'
+                    }`}>
+                        <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                            {cudaBannerSeverity === 'red' ? (
+                                <p>
+                                    <span className="font-semibold">GPU disabled</span> after repeated recovery failures. Processing will use CPU (slower).
+                                </p>
+                            ) : cudaBannerSeverity === 'orange' ? (
+                                <p>
+                                    <span className="font-semibold">GPU error detected.</span> Backend auto-restarting (attempt {cudaHealth!.auto_restart_count}/{cudaHealth!.auto_restart_limit})...
+                                </p>
+                            ) : (
+                                <p>
+                                    <span className="font-semibold">GPU error detected.</span>{' '}
+                                    {cudaHealth?.cuda_recovery_pending ? 'Auto-recovery in progress...' : 'Running on CPU fallback.'}
+                                </p>
+                            )}
+                        </div>
+                        {cudaBannerSeverity === 'red' && (
+                            <button
+                                type="button"
+                                onClick={handleRetryGpu}
+                                disabled={retryingGpu}
+                                className="shrink-0 inline-flex items-center gap-1.5 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                            >
+                                <RefreshCw size={12} className={retryingGpu ? 'animate-spin' : ''} />
+                                {retryingGpu ? 'Restarting...' : 'Retry GPU'}
+                            </button>
+                        )}
+                    </div>
+                )}
                 {children}
             </main>
         </div >

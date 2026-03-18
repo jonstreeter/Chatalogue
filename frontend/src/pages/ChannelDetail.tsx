@@ -22,6 +22,7 @@ export function ChannelDetail() {
     const [showDeleteModal, setShowDeleteModal] = useState(false);
     const [exporting, setExporting] = useState(false);
     const [showBatchPublishModal, setShowBatchPublishModal] = useState(false);
+    const [consolidatingTranscripts, setConsolidatingTranscripts] = useState(false);
 
     useEffect(() => {
         if (id) {
@@ -51,6 +52,23 @@ export function ChannelDetail() {
             console.error('Export failed', e);
         } finally {
             setExporting(false);
+        }
+    };
+
+    const handleConsolidateTranscripts = async () => {
+        if (!id) return;
+        if (!confirm('Post-process existing transcripts in this channel to merge same-speaker fragments and smooth tiny diarization cuts?')) return;
+        setConsolidatingTranscripts(true);
+        try {
+            const res = await api.post(`/channels/${id}/consolidate-transcripts`);
+            const changed = Number(res?.data?.counts?.changed || 0);
+            const merged = Number(res?.data?.counts?.merged_segments || 0);
+            const reassigned = Number(res?.data?.counts?.reassigned_islands || 0);
+            alert(`Transcript consolidation complete. ${changed} video(s) changed, ${merged} segment merges, ${reassigned} short speaker-island reassignment${reassigned === 1 ? '' : 's'}.`);
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to consolidate channel transcripts');
+        } finally {
+            setConsolidatingTranscripts(false);
         }
     };
 
@@ -100,6 +118,15 @@ export function ChannelDetail() {
                     >
                         <Link2 size={14} />
                         Publish AI Descriptions
+                    </button>
+                    <button
+                        onClick={handleConsolidateTranscripts}
+                        disabled={consolidatingTranscripts}
+                        className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-emerald-700 bg-white border border-emerald-200 rounded-lg hover:bg-emerald-50 transition-colors disabled:opacity-50 sm:col-span-1"
+                        title="Merge same-speaker transcript fragments across this channel without re-running ASR or diarization"
+                    >
+                        {consolidatingTranscripts ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                        Consolidate Transcripts
                     </button>
                     <button
                         onClick={handleExport}

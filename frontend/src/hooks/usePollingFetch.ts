@@ -1,6 +1,5 @@
 import { useRef, useCallback } from 'react';
 import axios from 'axios';
-import api from '../lib/api';
 
 /**
  * Creates a guarded fetch function with in-flight dedup and abort-on-force.

@@ -59,22 +59,23 @@ const getJobTypeLabel = (jobType: string): string => {
 type QueueSummary = Record<QueueName, { queued: number; running: number; paused: number; completed: number; failed: number; total: number }>;
 type PipelineFocus = {
     mode: 'transcribe' | 'diarize';
+    execution_mode?: 'sequential' | 'staged';
     auto_diarize_ready: boolean;
     transcribe_active: number;
     transcribe_queued: number;
     diarize_active: number;
     diarize_queued: number;
     active_transcription_paused?: number;
+    diarize_auto_start_threshold?: number;
 };
 type ProcessStageSummary = {
     transcribeDone: boolean;
     diarizeDone: boolean;
-    funnyDone: boolean;
     transcribeDuration: number | null;
     diarizeDuration: number | null;
-    funnyDuration: number | null;
     processDuration: number | null;
-    totalDuration: number | null;
+    activeDuration: number | null;
+    elapsedDuration: number | null;
 };
 
 export function JobQueue() {
@@ -108,18 +109,32 @@ export function JobQueue() {
     const fetchHistoryJobs = usePollingFetch<[{ data: Job[] }, { data: Job[] }, { data: Job[] }, { data: Job[] }]>({
         mountedRef,
         request: (signal) => Promise.all([
-            api.get<Job[]>('/jobs', { params: { status: 'completed', job_type: 'process', limit: HISTORY_FETCH_LIMIT }, signal }),
-            api.get<Job[]>('/jobs', { params: { status: 'failed', job_type: 'process', limit: HISTORY_FETCH_LIMIT }, signal }),
+            api.get<Job[]>('/jobs', { params: { status: 'completed', job_type: 'process,diarize', limit: HISTORY_FETCH_LIMIT }, signal }),
+            api.get<Job[]>('/jobs', { params: { status: 'failed', job_type: 'process,diarize', limit: HISTORY_FETCH_LIMIT }, signal }),
             api.get<Job[]>('/jobs', { params: { status: 'waiting_diarize', job_type: 'process', limit: HISTORY_FETCH_LIMIT }, signal }),
             api.get<Job[]>('/jobs', { params: { status: 'completed', job_type: 'funny_detect,funny_explain', limit: HISTORY_FETCH_LIMIT }, signal }),
         ]).then(([completed, failed, waitingDiarize, funny]) => ({
             data: [completed, failed, waitingDiarize, funny] as [{ data: Job[] }, { data: Job[] }, { data: Job[] }, { data: Job[] }],
         })),
         onSuccess: ([completedRes, failedRes, waitingDiarizeRes, funnyCompletedRes]) => {
+            const filterChildDiarize = (jobs: any[]) => {
+                return (Array.isArray(jobs) ? jobs : []).filter(job => {
+                    if ((job.job_type || '').toLowerCase() === 'diarize') {
+                        try {
+                            const payload = typeof job.payload_json === 'string' ? JSON.parse(job.payload_json) : (job.payload_json || {});
+                            if (payload.parent_job_id) return false;
+                        } catch (e) {
+                            // ignore
+                        }
+                    }
+                    return true;
+                });
+            };
+
             const processMerged = [
-                ...(Array.isArray(waitingDiarizeRes.data) ? waitingDiarizeRes.data : []),
-                ...(Array.isArray(completedRes.data) ? completedRes.data : []),
-                ...(Array.isArray(failedRes.data) ? failedRes.data : []),
+                ...filterChildDiarize(waitingDiarizeRes.data),
+                ...filterChildDiarize(completedRes.data),
+                ...filterChildDiarize(failedRes.data),
             ].sort(byDescCreated);
             const funnyMerged = (Array.isArray(funnyCompletedRes.data) ? funnyCompletedRes.data : []).sort(byDescCreated);
             setHistoryRows(processMerged);
@@ -161,11 +176,6 @@ export function JobQueue() {
             clearInterval(summaryInterval);
             clearInterval(pipelineFocusInterval);
             clearInterval(workerInterval);
-            jobsAbortRef.current?.abort();
-            historyAbortRef.current?.abort();
-            summaryAbortRef.current?.abort();
-            pipelineFocusAbortRef.current?.abort();
-            workerAbortRef.current?.abort();
         };
     }, []);
 
@@ -212,7 +222,7 @@ export function JobQueue() {
     };
 
     const handleClearHistory = async () => {
-        if (!confirm('Clear completed and failed jobs history?')) return;
+        if (!confirm('Clear completed, failed, and pending diarization jobs from history?')) return;
         try {
             await api.delete('/jobs/history');
             setHistoryRows([]);
@@ -373,6 +383,31 @@ const getStatusLabel = (status: string): string => {
         </span>
     );
 
+    const getPipelineModelPolicy = (job: Job): 'coexist' | 'unload' | null => {
+        if ((job.job_type || '').toLowerCase() !== 'process') return null;
+        const engine = getTranscriptionEngineUsed(job);
+        if (engine !== 'parakeet') return null;
+        const payload = getJobPayload(job);
+
+        if (payload.parakeet_release_before_diarize === false || payload.diarization_unload_after_job === false) {
+            return 'coexist';
+        }
+        if (payload.parakeet_release_before_diarize === true || payload.diarization_unload_after_job === true) {
+            return 'unload';
+        }
+        return null;
+    };
+
+    const ModelPolicyBadge = ({ policy }: { policy: 'coexist' | 'unload' }) => (
+        <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${
+            policy === 'coexist'
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : 'bg-amber-50 text-amber-700 border-amber-200'
+        }`}>
+            {policy === 'coexist' ? 'Coexist' : 'Unload'}
+        </span>
+    );
+
     const activeJobs = jobs.filter(j => ACTIVE_STATUSES.includes(j.status)).sort(byDescStarted);
     const activeByQueue: Record<QueueName, Job[]> = {
         pipeline: [],
@@ -402,6 +437,15 @@ const getStatusLabel = (status: string): string => {
     const diarizeRunningJobs = activeJobs.filter(j => (j.job_type || '').toLowerCase() === 'diarize').sort(byDescStarted);
     const transcriptionPendingCount = transcriptionQueuedJobs.length + transcriptionPausedJobs.length + transcriptionRunningJobs.length;
     const diarizePendingCount = diarizeQueuedJobs.length + diarizePausedJobs.length + diarizeRunningJobs.length;
+    const pipelineExecutionMode = pipelineFocus?.execution_mode === 'staged' ? 'staged' : 'sequential';
+    const isStagedExecution = pipelineExecutionMode === 'staged';
+
+    useEffect(() => {
+        if (!isStagedExecution && lowerTab === 'diarize') {
+            setLowerTab('transcribe');
+        }
+    }, [isStagedExecution, lowerTab]);
+
     const completedFunnyJobsByVideo = new Map<number, Job[]>();
     for (const item of funnyHistoryRows) {
         const jt = (item.job_type || '').toLowerCase();
@@ -420,9 +464,9 @@ const getStatusLabel = (status: string): string => {
     }
 
     const getProcessStageSummary = (job: Job): ProcessStageSummary | null => {
-        if ((job.job_type || '').toLowerCase() !== 'process') return null;
+        const type = (job.job_type || '').toLowerCase();
+        if (type !== 'process' && type !== 'diarize') return null;
         const payload = getJobPayload(job);
-        const processStartMs = parseTimeMs(job.started_at) ?? parseTimeMs(job.created_at);
         const processEndMs = parseTimeMs(job.completed_at);
         const transcribeStartMs =
             parseTimeMs(String(payload.stage_transcribe_started_at || ''))
@@ -434,52 +478,36 @@ const getStatusLabel = (status: string): string => {
         const processDuration = getJobDurationSeconds(job);
         const transcribeCompletedMs = parseTimeMs(String(payload.stage_transcribe_completed_at || ''));
         const transcribeDuration =
-            (transcribeStartMs != null && diarizeStartMs != null && diarizeStartMs >= transcribeStartMs)
-                ? (diarizeStartMs - transcribeStartMs) / 1000
-                : (transcribeStartMs != null && transcribeCompletedMs != null && transcribeCompletedMs >= transcribeStartMs)
-                    ? (transcribeCompletedMs - transcribeStartMs) / 1000
+            (transcribeStartMs != null && transcribeCompletedMs != null && transcribeCompletedMs >= transcribeStartMs)
+                ? (transcribeCompletedMs - transcribeStartMs) / 1000
+                : (transcribeStartMs != null && diarizeStartMs != null && diarizeStartMs >= transcribeStartMs)
+                    ? (diarizeStartMs - transcribeStartMs) / 1000
                 : null;
         const diarizeDuration =
             (diarizeStartMs != null && processEndMs != null && processEndMs >= diarizeStartMs)
                 ? (processEndMs - diarizeStartMs) / 1000
                 : null;
 
-        let funnyDuration: number | null = null;
-        let totalDuration: number | null =
+        let elapsedDuration: number | null =
             job.status === 'waiting_diarize'
                 ? (transcribeDuration ?? processDuration)
                 : processDuration;
-        let funnyDone = false;
-        const funnyJobs = completedFunnyJobsByVideo.get(job.video_id) || [];
-        let linkedFunny: Job | null = null;
-        if (processStartMs != null) {
-            linkedFunny = funnyJobs.find((f) => {
-                const fStart = parseTimeMs(f.started_at) ?? parseTimeMs(f.created_at);
-                return fStart != null && fStart >= (processStartMs - 1000);
-            }) || null;
-        } else {
-            linkedFunny = funnyJobs[0] || null;
-        }
-        if (linkedFunny) {
-            funnyDone = true;
-            funnyDuration = getJobDurationSeconds(linkedFunny);
-            const funnyCompletedMs = parseTimeMs(linkedFunny.completed_at);
-            if (processStartMs != null && funnyCompletedMs != null && funnyCompletedMs >= processStartMs) {
-                totalDuration = (funnyCompletedMs - processStartMs) / 1000;
-            } else if (processDuration != null && funnyDuration != null) {
-                totalDuration = processDuration + funnyDuration;
-            }
-        }
+
+        const activeDurationParts = [transcribeDuration, diarizeDuration]
+            .filter((value): value is number => value != null && Number.isFinite(value) && value >= 0);
+        const activeDuration =
+            activeDurationParts.length > 0
+                ? activeDurationParts.reduce((sum, value) => sum + value, 0)
+                : processDuration;
 
         return {
             transcribeDone: job.status === 'completed' || job.status === 'waiting_diarize' || transcribeStartMs != null,
             diarizeDone: job.status === 'completed' || diarizeStartMs != null,
-            funnyDone,
             transcribeDuration,
             diarizeDuration,
-            funnyDuration,
             processDuration,
-            totalDuration,
+            activeDuration,
+            elapsedDuration,
         };
     };
     const pendingByQueue: Record<QueueName, { queued: Job[]; paused: Job[]; running: Job[] }> = {
@@ -544,6 +572,7 @@ const getStatusLabel = (status: string): string => {
     const ActiveJobCard = ({ job }: { job: Job }) => {
         const thumb = getThumbnailUrl(job);
         const transcriptionEngineUsed = getTranscriptionEngineUsed(job);
+        const modelPolicy = getPipelineModelPolicy(job);
         const detail = (job.status_detail || '').toLowerCase();
         const funnyScanActive = detail.includes('funny moments') || detail.includes('laughter');
         const videoPipelineComplete = job.video?.processed || job.video?.status === 'completed';
@@ -778,6 +807,7 @@ const getStatusLabel = (status: string): string => {
                                 )}
                                 <span className="font-mono text-xs bg-slate-50 px-2 py-0.5 rounded border border-slate-200">{job.job_type}</span>
                                 {transcriptionEngineUsed && <EngineBadge engine={transcriptionEngineUsed} />}
+                                {modelPolicy && <ModelPolicyBadge policy={modelPolicy} />}
                                 {job.started_at && (
                                     <span className="text-xs">Started {new Date(job.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                                 )}
@@ -798,7 +828,6 @@ const getStatusLabel = (status: string): string => {
                         {showModelLoadStage && renderProgressBar('Model Loading', 'model_load', Cpu)}
                         {renderProgressBar('Transcribing', 'transcribe', FileText)}
                         {renderProgressBar('Diarizing', 'diarize', Users)}
-                        {renderProgressBar('Funny Moments', 'funny', Smile)}
                     </div>
 
                     {job.status_detail && (
@@ -1059,44 +1088,60 @@ const getStatusLabel = (status: string): string => {
                     </section>
 
                     <section className="space-y-4 pt-2">
-                        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div className="flex flex-col gap-3 md:flex-row md:items-center">
                             <div className="inline-flex w-full md:w-auto rounded-xl bg-slate-100 p-1 border border-slate-200 overflow-x-auto">
                                 <button
                                     onClick={() => setLowerTab('transcribe')}
                                     className={`px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors ${
                                         lowerTab === 'transcribe'
-                                            ? 'bg-white text-slate-800 shadow-sm'
-                                            : 'text-slate-500 hover:text-slate-700'
+                                            ? pipelineFocus?.mode === 'transcribe' ? 'bg-emerald-50 text-emerald-800 shadow-sm border border-emerald-200' : 'bg-white text-slate-800 shadow-sm'
+                                            : pipelineFocus?.mode === 'transcribe' ? 'text-emerald-600 hover:text-emerald-700 bg-emerald-50/50' : 'text-slate-500 hover:text-slate-700'
                                     }`}
                                 >
-                                    <FileText size={16} className="text-slate-400" />
-                                    Transcription Queue
+                                    {pipelineFocus?.mode === 'transcribe' ? (
+                                        <div className="relative flex h-2.5 w-2.5 items-center justify-center mr-0.5">
+                                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                        </div>
+                                    ) : (
+                                        <FileText size={16} className={lowerTab === 'transcribe' ? "text-blue-500" : "text-slate-400"} />
+                                    )}
+                                    {isStagedExecution ? 'Transcription' : 'Pipeline'}
                                     <span className={`text-[11px] px-1.5 py-0.5 rounded-full border ${
                                         lowerTab === 'transcribe'
-                                            ? 'bg-blue-50 text-blue-700 border-blue-200'
-                                            : 'bg-white text-slate-500 border-slate-200'
+                                            ? pipelineFocus?.mode === 'transcribe' ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'
+                                            : pipelineFocus?.mode === 'transcribe' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-white text-slate-500 border-slate-200'
                                     }`}>
                                         {transcriptionPendingCount}
                                     </span>
                                 </button>
-                                <button
-                                    onClick={() => setLowerTab('diarize')}
-                                    className={`px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors ${
-                                        lowerTab === 'diarize'
-                                            ? 'bg-white text-slate-800 shadow-sm'
-                                            : 'text-slate-500 hover:text-slate-700'
-                                    }`}
-                                >
-                                    <Users size={16} className="text-slate-400" />
-                                    Diarization Queue
-                                    <span className={`text-[11px] px-1.5 py-0.5 rounded-full border ${
-                                        lowerTab === 'diarize'
-                                            ? 'bg-blue-50 text-blue-700 border-blue-200'
-                                            : 'bg-white text-slate-500 border-slate-200'
-                                    }`}>
-                                        {diarizePendingCount}
-                                    </span>
-                                </button>
+                                {isStagedExecution && (
+                                    <button
+                                        onClick={() => setLowerTab('diarize')}
+                                        className={`px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors ${
+                                            lowerTab === 'diarize'
+                                                ? pipelineFocus?.mode === 'diarize' ? 'bg-emerald-50 text-emerald-800 shadow-sm border border-emerald-200' : 'bg-white text-slate-800 shadow-sm'
+                                                : pipelineFocus?.mode === 'diarize' ? 'text-emerald-600 hover:text-emerald-700 bg-emerald-50/50' : 'text-slate-500 hover:text-slate-700'
+                                        }`}
+                                    >
+                                        {pipelineFocus?.mode === 'diarize' ? (
+                                            <div className="relative flex h-2.5 w-2.5 items-center justify-center mr-0.5">
+                                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                            </div>
+                                        ) : (
+                                            <Users size={16} className={lowerTab === 'diarize' ? "text-blue-500" : "text-slate-400"} />
+                                        )}
+                                        Diarization
+                                        <span className={`text-[11px] px-1.5 py-0.5 rounded-full border ${
+                                            lowerTab === 'diarize'
+                                                ? pipelineFocus?.mode === 'diarize' ? 'bg-emerald-100 text-emerald-800 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'
+                                                : pipelineFocus?.mode === 'diarize' ? 'bg-emerald-50 text-emerald-700 border-emerald-100' : 'bg-white text-slate-500 border-slate-200'
+                                        }`}>
+                                            {diarizePendingCount}
+                                        </span>
+                                    </button>
+                                )}
                                 <button
                                     onClick={() => setLowerTab('history')}
                                     className={`px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors ${
@@ -1105,8 +1150,8 @@ const getStatusLabel = (status: string): string => {
                                             : 'text-slate-500 hover:text-slate-700'
                                     }`}
                                 >
-                                    <CheckCircle2 size={16} className="text-slate-400" />
-                                    History Log
+                                    <CheckCircle2 size={16} className={lowerTab === 'history' ? "text-slate-600" : "text-slate-400"} />
+                                    History
                                     <span className={`text-[11px] px-1.5 py-0.5 rounded-full border ${
                                         lowerTab === 'history'
                                             ? 'bg-slate-50 text-slate-700 border-slate-200'
@@ -1116,32 +1161,46 @@ const getStatusLabel = (status: string): string => {
                                     </span>
                                 </button>
                             </div>
+                        </div>
 
+                        <div className="flex min-h-[32px] items-center justify-end w-full">
                             {lowerTab === 'transcribe' ? (
-                                <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2">
+                                <div className="text-xs text-slate-500 flex flex-wrap items-center justify-end gap-2">
                                     <span className={`px-2 py-1 rounded-full border ${pipelineFocus?.mode === 'transcribe' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
-                                        Mode: {pipelineFocus?.mode === 'diarize' ? 'Diarization priority' : 'Transcription priority'}
+                                        Mode: {isStagedExecution ? (pipelineFocus?.mode === 'diarize' ? 'Diarization priority' : 'Transcription priority') : 'Sequential per-video'}
                                     </span>
+                                    {isStagedExecution && pipelineFocus?.diarize_auto_start_threshold && pipelineFocus.diarize_auto_start_threshold > 0 ? (
+                                        <span className="px-2 py-1 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700" title="Auto-switches to diarization when queued jobs hit this threshold">
+                                            Auto-switch: {pipelineFocus.diarize_auto_start_threshold}
+                                        </span>
+                                    ) : null}
                                     <span className="px-2 py-1 rounded-full bg-blue-50 border border-blue-200 text-blue-700">Running: {transcriptionRunningJobs.length}</span>
                                     <span className="px-2 py-1 rounded-full bg-slate-100 border border-slate-200">Queued: {transcriptionQueuedJobs.length}</span>
                                     <span className="px-2 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-700">Paused: {transcriptionPausedJobs.length}</span>
                                     <span className="px-2 py-1 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700">Total: {transcriptionPendingCount}</span>
-                                    <button
-                                        onClick={() => handleSetPipelineFocus('transcribe')}
-                                        className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
-                                            pipelineFocus?.mode === 'transcribe'
-                                                ? 'bg-blue-600 text-white border-blue-600'
-                                                : 'bg-white text-blue-700 border-blue-200 hover:bg-blue-50'
-                                        }`}
-                                    >
-                                        Resume Transcribing
-                                    </button>
+                                    {isStagedExecution && (
+                                        <button
+                                            onClick={() => handleSetPipelineFocus('transcribe')}
+                                            className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                                                pipelineFocus?.mode === 'transcribe'
+                                                    ? 'bg-blue-600 text-white border-blue-600'
+                                                    : 'bg-white text-blue-700 border-blue-200 hover:bg-blue-50'
+                                            }`}
+                                        >
+                                            Resume Transcribing
+                                        </button>
+                                    )}
                                 </div>
-                            ) : lowerTab === 'diarize' ? (
-                                <div className="text-xs text-slate-500 flex flex-wrap items-center gap-2">
+                            ) : isStagedExecution && lowerTab === 'diarize' ? (
+                                <div className="text-xs text-slate-500 flex flex-wrap items-center justify-end gap-2">
                                     <span className={`px-2 py-1 rounded-full border ${pipelineFocus?.mode === 'diarize' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
                                         Mode: {pipelineFocus?.mode === 'diarize' ? 'Diarization priority' : 'Transcription priority'}
                                     </span>
+                                    {pipelineFocus?.diarize_auto_start_threshold && pipelineFocus.diarize_auto_start_threshold > 0 ? (
+                                        <span className="px-2 py-1 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700" title="Auto-switches to transcribe when diarization queue empties">
+                                            Auto-switch: enabled
+                                        </span>
+                                    ) : null}
                                     <span className="px-2 py-1 rounded-full bg-blue-50 border border-blue-200 text-blue-700">Running: {diarizeRunningJobs.length}</span>
                                     <span className="px-2 py-1 rounded-full bg-slate-100 border border-slate-200">Queued: {diarizeQueuedJobs.length}</span>
                                     <span className="px-2 py-1 rounded-full bg-amber-50 border border-amber-200 text-amber-700">Paused: {diarizePausedJobs.length}</span>
@@ -1173,14 +1232,16 @@ const getStatusLabel = (status: string): string => {
                         </div>
 
                         {lowerTab === 'transcribe' ? (
-                            renderQueueSection('Transcription Queue', FileText, transcriptionRunningJobs, transcriptionQueuedJobs, transcriptionPausedJobs)
-                        ) : lowerTab === 'diarize' ? (
+                            renderQueueSection(isStagedExecution ? 'Transcription Queue' : 'Pipeline Queue', FileText, transcriptionRunningJobs, transcriptionQueuedJobs, transcriptionPausedJobs)
+                        ) : isStagedExecution && lowerTab === 'diarize' ? (
                             renderQueueSection('Diarization Queue', Users, diarizeRunningJobs, diarizeQueuedJobs, diarizePausedJobs)
                         ) : (
                             <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
                                 {historyJobs.length === 0 ? (
                                     <div className="p-8 text-center text-slate-400 text-sm">
-                                        No pipeline history yet. Transcription-complete jobs appear here while they wait for diarization.
+                                        {isStagedExecution
+                                            ? 'No pipeline history yet. Transcription-complete jobs appear here while they wait for diarization.'
+                                            : 'No pipeline history yet.'}
                                     </div>
                                 ) : (
                                     <div className="max-h-[44vh] overflow-auto">
@@ -1197,6 +1258,7 @@ const getStatusLabel = (status: string): string => {
                                             <tbody className="divide-y divide-slate-100">
                                                 {historyJobs.map(job => {
                                                     const transcriptionEngineUsed = getTranscriptionEngineUsed(job);
+                                                    const modelPolicy = getPipelineModelPolicy(job);
                                                     const processStageSummary = getProcessStageSummary(job);
                                                     return (
                                                     <tr key={job.id} className="hover:bg-slate-50 transition-colors">
@@ -1217,6 +1279,7 @@ const getStatusLabel = (status: string): string => {
                                                                     {getJobTypeLabel(job.job_type)}
                                                                 </span>
                                                                 {transcriptionEngineUsed && <EngineBadge engine={transcriptionEngineUsed} />}
+                                                                {modelPolicy && <ModelPolicyBadge policy={modelPolicy} />}
                                                                 <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${getStatusPillClasses(job.status)}`}>
                                                                     {getStatusLabel(job.status)}
                                                                 </span>
@@ -1228,9 +1291,6 @@ const getStatusLabel = (status: string): string => {
                                                                     </span>
                                                                     <span className={`px-2 py-0.5 rounded border ${processStageSummary.diarizeDone ? 'bg-green-50 text-green-700 border-green-200' : 'bg-slate-50 text-slate-500 border-slate-200'}`}>
                                                                         Diarize {processStageSummary.diarizeDone ? (processStageSummary.diarizeDuration != null ? formatDuration(processStageSummary.diarizeDuration) : 'done') : 'queued'}
-                                                                    </span>
-                                                                    <span className={`px-2 py-0.5 rounded border ${processStageSummary.funnyDone ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
-                                                                        Funny {processStageSummary.funnyDone ? (processStageSummary.funnyDuration != null ? formatDuration(processStageSummary.funnyDuration) : 'done') : (job.status === 'waiting_diarize' ? 'blocked' : 'pending')}
                                                                     </span>
                                                                 </div>
                                                             )}
@@ -1244,7 +1304,8 @@ const getStatusLabel = (status: string): string => {
                                                             {(() => {
                                                                 const runtime = getJobDurationSeconds(job);
                                                                 const elapsed = getJobElapsedSeconds(job);
-                                                                const stageTotal = processStageSummary?.totalDuration ?? runtime;
+                                                                const stageTotal = processStageSummary?.activeDuration ?? runtime;
+                                                                const wallElapsed = processStageSummary?.elapsedDuration ?? elapsed;
                                                                 const isProcess = (job.job_type || '').toLowerCase() === 'process';
                                                                 const videoLengthSeconds =
                                                                     typeof job.video?.duration === 'number' && job.video.duration > 0
@@ -1268,14 +1329,9 @@ const getStatusLabel = (status: string): string => {
                                                                                 speed {realtimeRatio}
                                                                             </div>
                                                                         )}
-                                                                        {isProcess && processStageSummary?.processDuration != null && stageTotal != null && Math.abs(stageTotal - processStageSummary.processDuration) >= 1 && (
+                                                                        {isProcess && wallElapsed != null && stageTotal != null && Math.abs(wallElapsed - stageTotal) >= 1 && (
                                                                             <div className="text-[11px] text-slate-400 mt-0.5">
-                                                                                pipeline {formatDuration(processStageSummary.processDuration)}
-                                                                            </div>
-                                                                        )}
-                                                                        {isProcess && processStageSummary?.funnyDone && processStageSummary.funnyDuration != null && (
-                                                                            <div className="text-[11px] text-slate-400 mt-0.5">
-                                                                                funny {formatDuration(processStageSummary.funnyDuration)}
+                                                                                elapsed {formatDuration(wallElapsed)}
                                                                             </div>
                                                                         )}
                                                                         {!isProcess && (() => {

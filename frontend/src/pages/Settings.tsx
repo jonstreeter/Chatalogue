@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { Save, Key, CheckCircle2, AlertCircle, Zap, ExternalLink, Loader2, RefreshCw, Terminal, Bot, AudioLines, Power, Mic, Smile, Link2, Database, Wand2 } from 'lucide-react';
 import api from '../lib/api';
 import { SetupWizard } from '../components/SetupWizard';
@@ -18,6 +18,7 @@ interface TokenValidation {
 
 type SettingsTab = 'transcription' | 'diarization' | 'llm' | 'youtube' | 'funny' | 'system';
 type TranscriptionEngine = 'auto' | 'whisper' | 'parakeet';
+type PipelineExecutionMode = 'sequential' | 'staged';
 type LlmProvider = 'ollama' | 'nvidia_nim' | 'openai' | 'anthropic' | 'gemini' | 'groq' | 'openrouter' | 'xai';
 type OllamaModelTier = 'lite' | 'medium' | 'q8' | 'custom';
 type OllamaPreference = 'speed' | 'balanced' | 'capability';
@@ -329,6 +330,7 @@ export function Settings() {
     const [activeTab, setActiveTab] = useState<SettingsTab>('transcription');
     const [token, setToken] = useState('');
     const [transcriptionEngine, setTranscriptionEngine] = useState<TranscriptionEngine>('auto');
+    const [pipelineExecutionMode, setPipelineExecutionMode] = useState<PipelineExecutionMode>('sequential');
     const [transcriptionModel, setTranscriptionModel] = useState('medium');
     const [computeType, setComputeType] = useState('int8_float16');
     const [parakeetModel, setParakeetModel] = useState('nvidia/parakeet-tdt-0.6b-v2');
@@ -393,6 +395,7 @@ export function Settings() {
     const [disconnectingYouTube, setDisconnectingYouTube] = useState(false);
     const [diarizationSensitivity, setDiarizationSensitivity] = useState('balanced');
     const [speakerMatchThreshold, setSpeakerMatchThreshold] = useState(0.5);
+    const [diarizeAutoStartThreshold, setDiarizeAutoStartThreshold] = useState(0);
     const [funnyMomentsMaxSaved, setFunnyMomentsMaxSaved] = useState(25);
     const [funnyMomentsExplainBatchLimit, setFunnyMomentsExplainBatchLimit] = useState(12);
     const [ollamaTest, setOllamaTest] = useState<LlmConnectionTestResult | null>(null);
@@ -455,6 +458,11 @@ export function Settings() {
                 const engine: TranscriptionEngine = rawEngine === 'whisper' || rawEngine === 'parakeet' ? rawEngine : 'auto';
                 setTranscriptionEngine(engine);
             }
+            {
+                const rawPipelineMode = String(res.data.pipeline_execution_mode || 'sequential').toLowerCase();
+                const mode: PipelineExecutionMode = rawPipelineMode === 'staged' ? 'staged' : 'sequential';
+                setPipelineExecutionMode(mode);
+            }
             setTranscriptionModel(res.data.transcription_model || 'tiny');
             setComputeType(res.data.transcription_compute_type || 'float16');
             setParakeetModel(res.data.parakeet_model || 'nvidia/parakeet-tdt-0.6b-v2');
@@ -509,6 +517,7 @@ export function Settings() {
             setYtdlpCookiesFromBrowser(res.data.ytdlp_cookies_from_browser || '');
             setDiarizationSensitivity(res.data.diarization_sensitivity || 'balanced');
             setSpeakerMatchThreshold(res.data.speaker_match_threshold ?? 0.5);
+            setDiarizeAutoStartThreshold(res.data.diarize_auto_start_threshold ?? 0);
             setFunnyMomentsMaxSaved(res.data.funny_moments_max_saved ?? 25);
             setFunnyMomentsExplainBatchLimit(res.data.funny_moments_explain_batch_limit ?? 12);
             if (res.data.hf_token) {
@@ -1054,6 +1063,7 @@ export function Settings() {
             await api.post('/settings', {
                 hf_token: token,
                 transcription_engine: transcriptionEngine,
+                pipeline_execution_mode: pipelineExecutionMode,
                 transcription_model: transcriptionModel,
                 transcription_compute_type: computeType,
                 parakeet_model: parakeetModel,
@@ -1103,6 +1113,7 @@ export function Settings() {
                 ytdlp_cookies_from_browser: ytdlpCookiesFromBrowser,
                 diarization_sensitivity: diarizationSensitivity,
                 speaker_match_threshold: speakerMatchThreshold,
+                diarize_auto_start_threshold: diarizeAutoStartThreshold,
                 funny_moments_max_saved: funnyMomentsMaxSaved,
                 funny_moments_explain_batch_limit: funnyMomentsExplainBatchLimit,
             });
@@ -1210,6 +1221,22 @@ export function Settings() {
                                             </select>
                                             <p className="mt-2 text-xs text-slate-500">
                                                 Auto keeps cross-platform behavior: Parakeet is used when supported on host/runtime, otherwise Whisper runs automatically.
+                                            </p>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-slate-700 mb-2">
+                                                Pipeline Execution
+                                            </label>
+                                            <select
+                                                value={pipelineExecutionMode}
+                                                onChange={(e) => setPipelineExecutionMode((e.target.value || 'sequential') as PipelineExecutionMode)}
+                                                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                                            >
+                                                <option value="sequential">Sequential: transcribe then diarize each video inline</option>
+                                                <option value="staged">Staged: batch transcribe queue, then diarize queue</option>
+                                            </select>
+                                            <p className="mt-2 text-xs text-slate-500">
+                                                Sequential keeps one video moving end-to-end and avoids queue handoff. Staged keeps transcription and diarization as separate batches.
                                             </p>
                                         </div>
 
@@ -1637,6 +1664,23 @@ export function Settings() {
                                             </div>
                                             <p className="mt-2 text-xs text-slate-500">
                                                 How similar a voice must sound to an existing speaker to be matched. Default: 0.50.
+                                            </p>
+                                        </div>
+
+                                        <div className="pt-4 border-t border-slate-100">
+                                            <label className="block text-sm font-medium text-slate-700 mb-2">
+                                                Auto-Switch to Diarization (Queue Threshold)
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min={0}
+                                                max={100}
+                                                value={diarizeAutoStartThreshold}
+                                                onChange={(e) => setDiarizeAutoStartThreshold(Number(e.target.value || 0))}
+                                                className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+                                            />
+                                            <p className="mt-2 text-xs text-slate-500">
+                                                Automatically switch the pipeline focus to Diarization when this many jobs are waiting. Set to 0 to disable. When the diarization queue empties, focus automatically returns to Transcription.
                                             </p>
                                         </div>
                                     </div>
@@ -2796,4 +2840,3 @@ export function Settings() {
         </>
     );
 }
-

@@ -6,7 +6,7 @@ Thanks for contributing.
 
 ### Windows
 1. Run `install_windows.bat`
-2. Run `run.bat`
+2. Run `run_windows.bat`
 
 ### macOS
 1. Run `chmod +x install_mac.sh run_mac.sh`

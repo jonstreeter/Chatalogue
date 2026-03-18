@@ -65,7 +65,7 @@ call npm install --fund=false --audit=false --loglevel=warn
 echo.
 echo [4/4] Update complete!
 echo.
-echo Run "%PROJECT_ROOT%\run.bat" to start Chatalogue.
+echo Run "%PROJECT_ROOT%\run_windows.bat" to start Chatalogue.
 echo.
 pause
 ENDLOCAL

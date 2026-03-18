@@ -51,6 +51,7 @@ export function VideoDetailPage() {
     // Speaker Modal State
     const [selectedSpeaker, setSelectedSpeaker] = useState<Speaker | null>(null);
     const [initialSample, setInitialSample] = useState<any>(null);
+    const speakerDetailCacheRef = useRef<Map<number, Speaker>>(new Map());
 
     // Clips State
     const [clips, setClips] = useState<Clip[]>([]);
@@ -491,7 +492,13 @@ export function VideoDetailPage() {
             : `${m}:${s.toString().padStart(2, '0')}`;
     };
 
-    const parseSegmentWords = (seg: TranscriptSegment): Array<{ start: number; end: number; word: string }> => {
+    const TRANSCRIPT_HIGHLIGHT_LEAD_SECONDS = 0.08;
+    const TRANSCRIPT_SEGMENT_TRAIL_SECONDS = 0.05;
+    const TRANSCRIPT_WORD_GAP_BRIDGE_SECONDS = 0.18;
+
+    const parseSegmentWords = (
+        seg: TranscriptSegment,
+    ): Array<{ start: number; end: number; displayEnd: number; word: string }> => {
         if (!seg.words) return [];
         let words = [] as Array<{ start: number; end: number; word: string }>;
         try {
@@ -545,11 +552,26 @@ export function VideoDetailPage() {
         }
 
         words.sort((a, b) => a.start - b.start);
-        return words;
+        return words.map((w, idx) => {
+            const next = words[idx + 1];
+            let displayEnd = w.end;
+            if (next) {
+                const gapToNext = next.start - w.end;
+                if (gapToNext > 0 && gapToNext <= TRANSCRIPT_WORD_GAP_BRIDGE_SECONDS) {
+                    displayEnd = next.start;
+                }
+            } else if (Number.isFinite(segEnd)) {
+                displayEnd = Math.min(segEnd, w.end + TRANSCRIPT_SEGMENT_TRAIL_SECONDS);
+            }
+            if (displayEnd <= w.start) {
+                displayEnd = Math.max(w.end, w.start + 0.01);
+            }
+            return { ...w, displayEnd };
+        });
     };
 
     const normalizedWordsBySegmentId = useMemo(() => {
-        const map = new Map<number, Array<{ start: number; end: number; word: string }>>();
+        const map = new Map<number, Array<{ start: number; end: number; displayEnd: number; word: string }>>();
         for (const seg of segments) {
             if (typeof seg.id !== 'number') continue;
             map.set(seg.id, parseSegmentWords(seg));
@@ -557,11 +579,13 @@ export function VideoDetailPage() {
         return map;
     }, [segments]);
 
+    const transcriptPlaybackTime = currentTime + TRANSCRIPT_HIGHLIGHT_LEAD_SECONDS;
+
     const scrollTranscriptToTime = (time: number) => {
         if (segments.length === 0) return;
 
         const target =
-            segments.find(s => time >= s.start_time && time < s.end_time) ||
+            segments.find(s => time >= s.start_time && time < s.end_time + TRANSCRIPT_SEGMENT_TRAIL_SECONDS) ||
             segments.find(s => s.start_time >= time) ||
             segments[segments.length - 1];
 
@@ -659,7 +683,9 @@ export function VideoDetailPage() {
     useEffect(() => {
         if (activeTab === 'transcript' && followPlayback && segments.length > 0 && !selection && !searchQuery && !editingSegmentId) {
             // Don't auto-scroll while selecting text or searching, it's annoying
-            const activeSeg = segments.find(s => currentTime >= s.start_time && currentTime < s.end_time);
+            const activeSeg = segments.find(
+                s => transcriptPlaybackTime >= s.start_time && transcriptPlaybackTime < s.end_time + TRANSCRIPT_SEGMENT_TRAIL_SECONDS,
+            );
             if (activeSeg) {
                 if (lastAutoScrollSegIdRef.current !== activeSeg.id) {
                     lastAutoScrollSegIdRef.current = activeSeg.id;
@@ -668,7 +694,7 @@ export function VideoDetailPage() {
                 }
             }
         }
-    }, [currentTime, activeTab, followPlayback, segments, selection, searchQuery, editingSegmentId]);
+    }, [transcriptPlaybackTime, activeTab, followPlayback, segments, selection, searchQuery, editingSegmentId]);
 
     // Search: filter segments and compute matches
     const searchLower = searchQuery.toLowerCase().trim();
@@ -829,6 +855,22 @@ export function VideoDetailPage() {
         }
     };
 
+    const buildSpeakerPlaceholder = (speakerId: number, segment?: TranscriptSegment): Speaker | null => {
+        if (!video) return null;
+        const cached = speakerDetailCacheRef.current.get(speakerId);
+        if (cached) return cached;
+        return {
+            id: speakerId,
+            channel_id: video.channel_id,
+            name: segment?.speaker || `Speaker ${speakerId}`,
+            thumbnail_path: undefined,
+            is_extra: false,
+            total_speaking_time: 0,
+            embedding_count: 0,
+            created_at: '',
+        };
+    };
+
     const handleSpeakerClick = async (speakerId: number, segment?: TranscriptSegment) => {
         pauseMainPreview();
 
@@ -844,16 +886,26 @@ export function VideoDetailPage() {
             setInitialSample(null);
         }
 
+        const placeholder = buildSpeakerPlaceholder(speakerId, segment);
+        if (placeholder) {
+            setSelectedSpeaker(placeholder);
+        }
+
         try {
             const res = await api.get<Speaker>(`/speakers/${speakerId}`);
+            speakerDetailCacheRef.current.set(speakerId, res.data);
             setSelectedSpeaker(res.data);
         } catch (e) {
             console.error("Failed to fetch speaker details", e);
+            if (!placeholder) {
+                setSelectedSpeaker(null);
+            }
         }
     };
 
     const [purging, setPurging] = useState(false);
     const [redoing, setRedoing] = useState(false);
+    const [consolidatingTranscript, setConsolidatingTranscript] = useState(false);
 
     const handlePurgeTranscript = async () => {
         if (!video) return;
@@ -882,6 +934,24 @@ export function VideoDetailPage() {
             alert(e?.response?.data?.detail || 'Failed to redo transcription');
         } finally {
             setRedoing(false);
+        }
+    };
+
+    const handleConsolidateTranscript = async () => {
+        if (!video) return;
+        if (!confirm('Post-process this transcript to merge same-speaker fragments and smooth tiny diarization cuts?')) return;
+        setConsolidatingTranscript(true);
+        try {
+            const res = await api.post(`/videos/${video.id}/consolidate-transcript`);
+            setSegments([]);
+            fetchData();
+            const merged = Number(res?.data?.merged_count || 0);
+            const reassigned = Number(res?.data?.reassigned_islands || 0);
+            alert(`Transcript consolidated. ${merged} segment merges, ${reassigned} short speaker-island reassignment${reassigned === 1 ? '' : 's'}.`);
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to consolidate transcript');
+        } finally {
+            setConsolidatingTranscript(false);
         }
     };
 
@@ -2021,7 +2091,9 @@ export function VideoDetailPage() {
                                 ) : (
                                     filteredSegments.map((seg, filteredIdx) => {
                                         // Highlight logic
-                                        const isActiveSegment = currentTime >= seg.start_time && currentTime < seg.end_time;
+                                        const isActiveSegment =
+                                            transcriptPlaybackTime >= seg.start_time &&
+                                            transcriptPlaybackTime < seg.end_time + TRANSCRIPT_SEGMENT_TRAIL_SECONDS;
                                         const isActiveMatch = searchLower && filteredIdx === searchMatchIndex;
                                         const wordsFn = typeof seg.id === 'number'
                                             ? (normalizedWordsBySegmentId.get(seg.id) || [])
@@ -2175,7 +2247,9 @@ export function VideoDetailPage() {
                                                     <p className="text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
                                                         {wordsFn.length > 0 ? (
                                                             wordsFn.map((w: any, idx: number) => {
-                                                                const isWordActive = currentTime >= w.start && currentTime < w.end;
+                                                                const isWordActive =
+                                                                    transcriptPlaybackTime >= w.start &&
+                                                                    transcriptPlaybackTime < (w.displayEnd ?? w.end);
                                                                 return (
                                                                     <span
                                                                         key={idx}
@@ -2923,7 +2997,7 @@ export function VideoDetailPage() {
                     {(() => {
                         const activeStatuses = ['queued', 'downloading', 'transcribing', 'diarizing'];
                         const jobActive = activeStatuses.includes(video.status);
-                        const busy = purging || redoing || redoingDiarization || jobActive;
+                        const busy = purging || redoing || redoingDiarization || consolidatingTranscript || jobActive;
                         return (
                             <div className="flex items-center gap-2 shrink-0">
                                 {jobActive && (
@@ -2938,8 +3012,17 @@ export function VideoDetailPage() {
                                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                     title={jobActive ? `Cannot redo while ${video.status}` : "Re-run speaker diarization using improved speaker profiles"}
                                 >
-                                    {redoingDiarization ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
+                                        {redoingDiarization ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
                                     Redo Diarization
+                                </button>
+                                <button
+                                    onClick={handleConsolidateTranscript}
+                                    disabled={busy}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title={jobActive ? `Cannot consolidate while ${video.status}` : "Merge same-speaker transcript fragments without re-running ASR or diarization"}
+                                >
+                                    {consolidatingTranscript ? <Loader2 size={14} className="animate-spin" /> : <GitMerge size={14} />}
+                                    Consolidate Transcript
                                 </button>
                                 <button
                                     onClick={handleRedoTranscript}
@@ -3730,6 +3813,7 @@ export function VideoDetailPage() {
                     initialSample={initialSample}
                     onClose={() => { setSelectedSpeaker(null); setInitialSample(null); }}
                     onUpdate={(updatedSpeaker) => {
+                        speakerDetailCacheRef.current.set(updatedSpeaker.id, updatedSpeaker);
                         setSelectedSpeaker(updatedSpeaker);
                         // Update segments to reflect new name
                         setSegments(prev => prev.map(s =>

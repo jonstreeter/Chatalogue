@@ -165,8 +165,8 @@ echo.
 echo Installation complete.
 echo Project root: %PROJECT_ROOT%
 echo Backend venv: %VENV_DIR%
-IF EXIST "%PROJECT_ROOT%\run.bat" (
-  echo Start app with: "%PROJECT_ROOT%\run.bat"
+IF EXIST "%PROJECT_ROOT%\run_windows.bat" (
+  echo Start app with: "%PROJECT_ROOT%\run_windows.bat"
 ) ELSE (
   echo Start app by running backend/frontend manually from %PROJECT_ROOT%.
 )

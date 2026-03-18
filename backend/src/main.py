@@ -200,6 +200,27 @@ def system_cuda_health():
         raise HTTPException(status_code=500, detail=f"Failed to inspect CUDA health: {e}")
 
 
+@app.get("/system/cuda-restart-state")
+def get_cuda_restart_state():
+    state_file = BACKEND_RUNTIME_DIR / "cuda_restart_state.json"
+    if not state_file.exists():
+        return {"restart_timestamps": [], "permanent_cpu_mode": False}
+    try:
+        return json.loads(state_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {"restart_timestamps": [], "permanent_cpu_mode": False}
+
+
+@app.post("/system/cuda-restart-state/reset")
+def reset_cuda_restart_state():
+    state_file = BACKEND_RUNTIME_DIR / "cuda_restart_state.json"
+    try:
+        state_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return {"status": "cleared"}
+
+
 YOUTUBE_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube"
 YOUTUBE_OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 YOUTUBE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -4216,6 +4237,26 @@ def redo_diarization(video_id: int, session: Session = Depends(get_session)):
         "mode": "redo_diarization",
         "redo_diarization_backup_file": str(backup_path),
     }
+
+    # Inherit transcription timestamps from the last completed pipeline job
+    # so the frontend UI can display complete stats for this redo job
+    last_process_job = session.exec(
+        select(Job).where(
+            Job.video_id == video.id,
+            Job.job_type == "process",
+            Job.status == "completed"
+        ).order_by(Job.completed_at.desc())
+    ).first()
+
+    if last_process_job and last_process_job.payload_json:
+        try:
+            old_payload = json.loads(last_process_job.payload_json)
+            for k, v in old_payload.items():
+                if k.startswith("stage_transcribe") or k.startswith("parakeet_") or k.startswith("transcription_"):
+                    payload[k] = v
+        except Exception as e:
+            log(f"Failed to inherit transcription stats for redo: {e}")
+
     new_job = _enqueue_unique_job(session, video_id=video_id, job_type="process", payload=payload)
     _invalidate_speaker_query_caches()
 
@@ -4376,14 +4417,35 @@ def redo_channel_diarization(
             video.processed = False
             session.add(video)
 
+            payload = {
+                "mode": "redo_diarization",
+                "redo_diarization_backup_file": str(backup_path),
+            }
+
+            # Inherit transcription timestamps from the last completed pipeline job
+            last_process_job = session.exec(
+                select(Job).where(
+                    Job.video_id == video.id,
+                    Job.job_type == "process",
+                    Job.status == "completed"
+                ).order_by(Job.completed_at.desc())
+            ).first()
+
+            if last_process_job and last_process_job.payload_json:
+                try:
+                    old_payload = json.loads(last_process_job.payload_json)
+                    for k, pval in old_payload.items():
+                        if k.startswith("stage_transcribe") or k.startswith("parakeet_") or k.startswith("transcription_"):
+                            payload[k] = pval
+                except Exception as e:
+                    import logging
+                    logging.warning(f"Failed to inherit transcription stats for channel redo: {e}")
+
             job = _enqueue_unique_job(
                 session,
                 video_id=video.id,
                 job_type="process",
-                payload={
-                    "mode": "redo_diarization",
-                    "redo_diarization_backup_file": str(backup_path),
-                },
+                payload=payload,
             )
 
             result["counts"]["queued"] += 1
@@ -4450,6 +4512,125 @@ def redo_transcription(video_id: int, session: Session = Depends(get_session)):
         "deleted_funny_moments": len(funny_moments),
         "job_id": new_job.id,
     }
+
+
+@app.post("/videos/{video_id}/consolidate-transcript")
+def consolidate_video_transcript(video_id: int, session: Session = Depends(get_session)):
+    """Post-process an existing transcript to smooth tiny speaker islands and merge same-speaker neighbors."""
+    video = session.get(Video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    active_job = session.exec(
+        select(Job).where(
+            Job.video_id == video.id,
+            Job.status.in_(PIPELINE_ACTIVE_STATUSES)
+        )
+    ).first()
+    if active_job:
+        raise HTTPException(status_code=400, detail=f"Video has an active job {active_job.id} ({active_job.status})")
+
+    try:
+        result = ingestion_service.consolidate_existing_transcript(session, video_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to consolidate transcript: {e}")
+
+    _invalidate_speaker_query_caches()
+    return {
+        "status": "transcript_consolidated",
+        **result,
+    }
+
+
+@app.post("/channels/{channel_id}/consolidate-transcripts")
+def consolidate_channel_transcripts(
+    channel_id: int,
+    processed_only: bool = True,
+    include_muted: bool = False,
+    limit: int = 0,
+    session: Session = Depends(get_session),
+):
+    """Bulk post-process existing transcripts for a channel without re-transcribing or re-diarizing."""
+    channel = session.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+
+    query = select(Video).where(Video.channel_id == channel_id).order_by(Video.id.desc())
+    videos = session.exec(query).all()
+    if limit and limit > 0:
+        videos = videos[:limit]
+
+    result = {
+        "channel_id": int(channel_id),
+        "channel_name": channel.name,
+        "counts": {
+            "scanned": 0,
+            "eligible": 0,
+            "changed": 0,
+            "merged_segments": 0,
+            "reassigned_islands": 0,
+            "skipped_active": 0,
+            "skipped_muted": 0,
+            "skipped_unprocessed": 0,
+            "skipped_no_segments": 0,
+            "errors": 0,
+        },
+        "videos": [],
+        "sample_skips": [],
+    }
+
+    for video in videos:
+        result["counts"]["scanned"] += 1
+
+        if not include_muted and bool(video.muted):
+            result["counts"]["skipped_muted"] += 1
+            continue
+
+        if processed_only and not bool(video.processed):
+            result["counts"]["skipped_unprocessed"] += 1
+            continue
+
+        active_job = session.exec(
+            select(Job.id).where(
+                Job.video_id == video.id,
+                Job.status.in_(PIPELINE_ACTIVE_STATUSES),
+            )
+        ).first()
+        if active_job:
+            result["counts"]["skipped_active"] += 1
+            continue
+
+        seg_exists = session.exec(
+            select(TranscriptSegment.id).where(TranscriptSegment.video_id == video.id).limit(1)
+        ).first()
+        if not seg_exists:
+            result["counts"]["skipped_no_segments"] += 1
+            continue
+
+        result["counts"]["eligible"] += 1
+        try:
+            video_result = ingestion_service.consolidate_existing_transcript(session, int(video.id))
+            result["videos"].append(video_result)
+            if video_result["changed"]:
+                result["counts"]["changed"] += 1
+            result["counts"]["merged_segments"] += int(video_result["merged_count"])
+            result["counts"]["reassigned_islands"] += int(video_result["reassigned_islands"])
+        except Exception as e:
+            session.rollback()
+            result["counts"]["errors"] += 1
+            if len(result["sample_skips"]) < 25:
+                result["sample_skips"].append({
+                    "video_id": int(video.id),
+                    "title": video.title,
+                    "reason": f"error: {e}",
+                })
+
+    if result["counts"]["eligible"] > 0:
+        _invalidate_speaker_query_caches()
+    return result
 
 # --- Video Controls ---
 
@@ -4594,13 +4775,18 @@ def _compute_pipeline_focus_counts(session: Session) -> dict:
         "diarize_active": diarize_active,
         "diarize_queued": diarize_queued,
         "auto_diarize_ready": transcribe_active == 0 and transcribe_queued == 0 and (diarize_active > 0 or diarize_queued > 0),
+        "diarize_auto_start_threshold": int(os.getenv("DIARIZE_AUTO_START_THRESHOLD", "0")),
     }
 
 
 @app.get("/jobs/pipeline/focus", response_model=PipelineFocusRead)
 def get_pipeline_focus(session: Session = Depends(get_session)):
     counts = _compute_pipeline_focus_counts(session)
-    return {"mode": ingestion_service.get_pipeline_focus_mode(), **counts}
+    return {
+        "mode": ingestion_service.get_pipeline_focus_mode(),
+        "execution_mode": ingestion_service.get_pipeline_execution_mode(),
+        **counts,
+    }
 
 
 @app.post("/jobs/pipeline/focus", response_model=PipelineFocusRead)
@@ -4622,7 +4808,12 @@ def set_pipeline_focus(payload: PipelineFocusUpdate, session: Session = Depends(
             session.commit()
 
     counts = _compute_pipeline_focus_counts(session)
-    return {"mode": mode, **counts, "active_transcription_paused": paused_active_count}
+    return {
+        "mode": mode,
+        "execution_mode": ingestion_service.get_pipeline_execution_mode(),
+        **counts,
+        "active_transcription_paused": paused_active_count,
+    }
 
 
 @app.get("/settings/db-health")
@@ -4798,10 +4989,32 @@ def clear_queue(session: Session = Depends(get_session)):
 
 @app.delete("/jobs/history")
 def clear_history(session: Session = Depends(get_session)):
-    """Delete all completed and failed jobs"""
-    jobs = session.exec(select(Job).where(Job.status.in_(["completed", "failed"]))).all()
+    """Delete completed, failed, and waiting_diarize jobs.
+
+    Skips waiting_diarize jobs that still have an active child diarize job
+    (queued/running/diarizing) to avoid orphaning in-flight work.
+    """
+    active_child_statuses = {"queued", "running", "diarizing"}
+    active_child_parent_ids: set[int] = set()
+    active_children = session.exec(
+        select(Job).where(Job.job_type == "diarize", Job.status.in_(active_child_statuses))
+    ).all()
+    for child in active_children:
+        try:
+            payload = json.loads(child.payload_json) if child.payload_json else {}
+            pid = payload.get("parent_job_id")
+            if pid:
+                active_child_parent_ids.add(int(pid))
+        except Exception:
+            pass
+
+    jobs = session.exec(
+        select(Job).where(Job.status.in_(["completed", "failed", "waiting_diarize"]))
+    ).all()
     count = 0
     for job in jobs:
+        if job.status == "waiting_diarize" and job.id in active_child_parent_ids:
+            continue
         session.delete(job)
         count += 1
     session.commit()
@@ -4904,9 +5117,13 @@ def get_settings():
     llm_enabled = os.getenv("LLM_ENABLED")
     if llm_enabled is None:
         llm_enabled = os.getenv("OLLAMA_ENABLED", "false")
+    pipeline_execution_mode = (os.getenv("PIPELINE_EXECUTION_MODE") or "sequential").strip().lower()
+    if pipeline_execution_mode not in {"sequential", "staged"}:
+        pipeline_execution_mode = "sequential"
     return Settings(
         hf_token=os.getenv("HF_TOKEN") or "",
         transcription_engine=(os.getenv("TRANSCRIPTION_ENGINE") or "auto"),
+        pipeline_execution_mode=pipeline_execution_mode,
         transcription_model=os.getenv("TRANSCRIPTION_MODEL") or "medium",
         transcription_compute_type=os.getenv("TRANSCRIPTION_COMPUTE_TYPE") or "int8_float16",
         parakeet_model=os.getenv("PARAKEET_MODEL") or "nvidia/parakeet-tdt-0.6b-v2",
@@ -4956,6 +5173,7 @@ def get_settings():
         ytdlp_cookies_from_browser=os.getenv("YTDLP_COOKIES_FROM_BROWSER") or "",
         diarization_sensitivity=os.getenv("DIARIZATION_SENSITIVITY") or "balanced",
         speaker_match_threshold=float(os.getenv("SPEAKER_MATCH_THRESHOLD", "0.5")),
+        diarize_auto_start_threshold=int(os.getenv("DIARIZE_AUTO_START_THRESHOLD", "0")),
         funny_moments_max_saved=int(os.getenv("FUNNY_MOMENTS_MAX_SAVED", "25")),
         funny_moments_explain_batch_limit=int(os.getenv("FUNNY_MOMENTS_EXPLAIN_BATCH_LIMIT", "12")),
         setup_wizard_completed=os.getenv("SETUP_WIZARD_COMPLETED", "false").lower() == "true",
@@ -4967,6 +5185,9 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     normalized_transcription_engine = (getattr(settings, "transcription_engine", "auto") or "auto").strip().lower()
     if normalized_transcription_engine not in {"auto", "whisper", "parakeet"}:
         normalized_transcription_engine = "auto"
+    pipeline_execution_mode = (getattr(settings, "pipeline_execution_mode", "sequential") or "sequential").strip().lower()
+    if pipeline_execution_mode not in {"sequential", "staged"}:
+        pipeline_execution_mode = "sequential"
     parakeet_model = (getattr(settings, "parakeet_model", "") or "nvidia/parakeet-tdt-0.6b-v2").strip()
     parakeet_batch_size = max(1, min(int(getattr(settings, "parakeet_batch_size", 16)), 64))
     parakeet_batch_auto = bool(getattr(settings, "parakeet_batch_auto", True))
@@ -4978,6 +5199,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     allowed_providers = {"ollama", "nvidia_nim", "openai", "anthropic", "gemini", "groq", "openrouter", "xai"}
     if normalized_provider not in allowed_providers:
         normalized_provider = "ollama"
+    diarize_auto_start_threshold = max(0, int(getattr(settings, "diarize_auto_start_threshold", 0)))
     funny_moments_max_saved = max(1, min(int(getattr(settings, "funny_moments_max_saved", 25)), 200))
     funny_moments_explain_batch_limit = max(1, min(int(getattr(settings, "funny_moments_explain_batch_limit", 12)), 200))
     nvidia_nim_min_interval = max(0.0, min(float(getattr(settings, "nvidia_nim_min_request_interval_seconds", 2.5)), 30.0))
@@ -4987,6 +5209,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     # 1. Update .env file
     set_key(ENV_PATH, "HF_TOKEN", settings.hf_token)
     set_key(ENV_PATH, "TRANSCRIPTION_ENGINE", normalized_transcription_engine)
+    set_key(ENV_PATH, "PIPELINE_EXECUTION_MODE", pipeline_execution_mode)
     set_key(ENV_PATH, "TRANSCRIPTION_MODEL", settings.transcription_model)
     set_key(ENV_PATH, "TRANSCRIPTION_COMPUTE_TYPE", settings.transcription_compute_type)
     set_key(ENV_PATH, "PARAKEET_MODEL", parakeet_model)
@@ -5036,6 +5259,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     set_key(ENV_PATH, "YTDLP_COOKIES_FROM_BROWSER", (getattr(settings, "ytdlp_cookies_from_browser", "") or "").strip())
     set_key(ENV_PATH, "DIARIZATION_SENSITIVITY", settings.diarization_sensitivity)
     set_key(ENV_PATH, "SPEAKER_MATCH_THRESHOLD", str(settings.speaker_match_threshold))
+    set_key(ENV_PATH, "DIARIZE_AUTO_START_THRESHOLD", str(diarize_auto_start_threshold))
     set_key(ENV_PATH, "FUNNY_MOMENTS_MAX_SAVED", str(funny_moments_max_saved))
     set_key(ENV_PATH, "FUNNY_MOMENTS_EXPLAIN_BATCH_LIMIT", str(funny_moments_explain_batch_limit))
     set_key(ENV_PATH, "SETUP_WIZARD_COMPLETED", str(bool(getattr(settings, "setup_wizard_completed", False))).lower())
@@ -5043,6 +5267,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     # 2. Update current environment
     os.environ["HF_TOKEN"] = settings.hf_token
     os.environ["TRANSCRIPTION_ENGINE"] = normalized_transcription_engine
+    os.environ["PIPELINE_EXECUTION_MODE"] = pipeline_execution_mode
     os.environ["TRANSCRIPTION_MODEL"] = settings.transcription_model
     os.environ["TRANSCRIPTION_COMPUTE_TYPE"] = settings.transcription_compute_type
     os.environ["PARAKEET_MODEL"] = parakeet_model
@@ -5092,6 +5317,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     os.environ["YTDLP_COOKIES_FROM_BROWSER"] = (getattr(settings, "ytdlp_cookies_from_browser", "") or "").strip()
     os.environ["DIARIZATION_SENSITIVITY"] = settings.diarization_sensitivity
     os.environ["SPEAKER_MATCH_THRESHOLD"] = str(settings.speaker_match_threshold)
+    os.environ["DIARIZE_AUTO_START_THRESHOLD"] = str(diarize_auto_start_threshold)
     os.environ["FUNNY_MOMENTS_MAX_SAVED"] = str(funny_moments_max_saved)
     os.environ["FUNNY_MOMENTS_EXPLAIN_BATCH_LIMIT"] = str(funny_moments_explain_batch_limit)
     os.environ["SETUP_WIZARD_COMPLETED"] = str(bool(getattr(settings, "setup_wizard_completed", False))).lower()

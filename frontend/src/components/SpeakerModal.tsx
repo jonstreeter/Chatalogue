@@ -19,6 +19,8 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
     const [name, setName] = useState(speaker.name);
     const [savingName, setSavingName] = useState(false);
     const [nameError, setNameError] = useState<string | null>(null);
+    const nameInputRef = useRef<HTMLInputElement>(null);
+    const autoSelectNameRef = useRef(true);
 
     // Multiple samples state
     const [samples, setSamples] = useState<any[]>(initialSample ? [initialSample] : []);
@@ -47,6 +49,7 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
     const backendVideoId = currentSample?.video_id;
     const startTime = currentSample?.start_time || 0;
     const sampleText = currentSample?.text;
+    const isGeneratedSpeakerName = (value?: string | null) => /^Speaker\s+\d+$/i.test((value || '').trim());
 
     // Fetch multiple samples on mount (top 5 longest)
     useEffect(() => {
@@ -72,6 +75,11 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
         };
         fetchSamples();
     }, [speaker.id, initialSample]);
+
+    useEffect(() => {
+        setName(speaker.name);
+        autoSelectNameRef.current = isGeneratedSpeakerName(speaker.name);
+    }, [speaker.id, speaker.name]);
 
     // Fetch channel speakers for merge dropdown
     const fetchChannelSpeakers = async () => {
@@ -522,12 +530,26 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
                             <label className="block text-sm font-semibold text-slate-600 mb-3">Speaker Name</label>
                             <div className="flex gap-2">
                                 <input
+                                    ref={nameInputRef}
                                     value={name}
                                     onChange={e => {
                                         setName(e.target.value);
+                                        autoSelectNameRef.current = false;
                                         if (nameError) setNameError(null);
                                     }}
+                                    onFocus={(e) => {
+                                        if (autoSelectNameRef.current && isGeneratedSpeakerName(name)) {
+                                            e.currentTarget.select();
+                                        }
+                                    }}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (autoSelectNameRef.current && isGeneratedSpeakerName(name)) {
+                                            e.currentTarget.select();
+                                        }
+                                    }}
                                     onKeyDown={(e) => {
+                                        e.stopPropagation();
                                         if (e.key === 'Enter') {
                                             e.preventDefault();
                                             if (!savingName) {
@@ -535,6 +557,7 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
                                             }
                                         }
                                     }}
+                                    onMouseDown={(e) => e.stopPropagation()}
                                     className="flex-1 px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all placeholder:text-slate-400 font-medium"
                                     placeholder="Enter name..."
                                 />

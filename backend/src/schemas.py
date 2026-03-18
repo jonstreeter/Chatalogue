@@ -250,12 +250,14 @@ class JobRead(JobBase):
 
 class PipelineFocusRead(BaseModel):
     mode: Literal["transcribe", "diarize"]
+    execution_mode: Literal["sequential", "staged"] = "sequential"
     auto_diarize_ready: bool
     transcribe_active: int
     transcribe_queued: int
     diarize_active: int
     diarize_queued: int
     active_transcription_paused: int = 0
+    diarize_auto_start_threshold: int = 0
 
 
 class PipelineFocusUpdate(BaseModel):
@@ -268,6 +270,7 @@ class PipelineFocusUpdate(BaseModel):
 class Settings(BaseModel):
     hf_token: str
     transcription_engine: str = "auto"  # auto | whisper | parakeet
+    pipeline_execution_mode: Literal["sequential", "staged"] = "sequential"
     transcription_model: str = "medium"
     transcription_compute_type: str = "int8_float16"
     parakeet_model: str = "nvidia/parakeet-tdt-0.6b-v2"
@@ -317,6 +320,7 @@ class Settings(BaseModel):
     ytdlp_cookies_from_browser: str = ""
     diarization_sensitivity: str = "balanced"
     speaker_match_threshold: float = 0.5
+    diarize_auto_start_threshold: int = 0
     funny_moments_max_saved: int = 25
     funny_moments_explain_batch_limit: int = 12
     setup_wizard_completed: bool = False

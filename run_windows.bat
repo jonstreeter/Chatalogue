@@ -62,9 +62,22 @@ IF NOT EXIST "%FRONTEND_DIR%\node_modules" (
     call npm install --fund=false --audit=false --loglevel=warn
 )
 
-:: Start Backend (worker thread starts automatically inside the API server)
+:: Start Backend with auto-restart on CUDA faults (exit code 75)
 echo Starting Backend Server on http://localhost:%BACKEND_PORT% ...
-start /B "" cmd.exe /c ""%VENV_PYTHON%" -m uvicorn src.main:app --app-dir "%BACKEND_DIR%" --host 0.0.0.0 --port %BACKEND_PORT% 1>"%BACKEND_LOG%" 2>&1"
+SET "BACKEND_RESTART_SCRIPT=%BACKEND_DIR%\runtime\backend_restart_loop.bat"
+(
+echo @echo off
+echo :restart_loop
+echo del /f /q "%BACKEND_DIR%\runtime\cuda_restart_requested" ^>nul 2^>^&1
+echo del /f /q "%BACKEND_DIR%\runtime\backend.instance.lock" ^>nul 2^>^&1
+echo "%VENV_PYTHON%" -m uvicorn src.main:app --app-dir "%BACKEND_DIR%" --host 0.0.0.0 --port %BACKEND_PORT% 1^>^>"%BACKEND_LOG%" 2^>^&1
+echo if %%ERRORLEVEL%% EQU 75 ^(
+echo     echo [%%date%% %%time%%] Backend exited for CUDA auto-restart ^(code 75^). Respawning... ^>^>"%BACKEND_LOG%"
+echo     timeout /t 3 /nobreak ^>nul
+echo     goto restart_loop
+echo ^)
+) > "%BACKEND_RESTART_SCRIPT%"
+start /B "" cmd.exe /c ""%BACKEND_RESTART_SCRIPT%""
 
 :: Wait for backend readiness before starting frontend
 echo Waiting for backend to become ready (first run may take a few minutes to set up PostgreSQL)...
