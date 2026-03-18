@@ -77,3 +77,4 @@ backend/bin/*.exe
 backend/bin/*.dll
 backend/debug_output*.txt
 backend/jfk_test.ogg
+backend/*.db
