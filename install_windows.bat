@@ -19,9 +19,12 @@ exit /b %ERRORLEVEL%
 
 :core_install
 SETLOCAL EnableDelayedExpansion
-SET "INSTALLER_VERSION=2026-03-09.2"
+SET "INSTALLER_VERSION=2026-03-19.1"
 
-echo [Chatalogue Installer] Windows bootstrap v%INSTALLER_VERSION%
+echo.
+echo  ============================================
+echo    Chatalogue Installer  v%INSTALLER_VERSION%
+echo  ============================================
 echo.
 
 SET "SCRIPT_DIR=%~dp0"
@@ -35,6 +38,188 @@ IF "%REPO_BRANCH%"=="" SET "REPO_BRANCH=main"
 
 SET "REPO_DIR_NAME=%CHATALOGUE_REPO_DIR%"
 IF "%REPO_DIR_NAME%"=="" SET "REPO_DIR_NAME=Chatalogue"
+
+REM ===================================================================
+REM  PREREQUISITE CHECKS
+REM ===================================================================
+
+SET "HAS_WINGET=0"
+where winget >nul 2>&1 && SET "HAS_WINGET=1"
+
+SET "PREREQS_OK=1"
+
+REM --- Git ---
+echo [Prerequisites] Checking Git...
+where git >nul 2>&1
+IF ERRORLEVEL 1 (
+  echo   [!] Git is NOT installed.
+  IF "!HAS_WINGET!"=="1" (
+    echo.
+    SET /P "INSTALL_GIT=      Would you like to install Git automatically via winget? [Y/n]: "
+    IF /I "!INSTALL_GIT!"=="" SET "INSTALL_GIT=Y"
+    IF /I "!INSTALL_GIT!"=="Y" (
+      echo   Installing Git...
+      winget install --id Git.Git -e --source winget --accept-source-agreements --accept-package-agreements
+      REM Refresh PATH for this session
+      FOR /F "tokens=2*" %%A IN ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') DO SET "SYS_PATH=%%B"
+      FOR /F "tokens=2*" %%A IN ('reg query "HKCU\Environment" /v Path 2^>nul') DO SET "USR_PATH=%%B"
+      SET "PATH=!SYS_PATH!;!USR_PATH!"
+      where git >nul 2>&1
+      IF ERRORLEVEL 1 (
+        echo   [!] Git was installed but is not yet in your PATH.
+        echo       Close this terminal, open a NEW terminal, and re-run this installer.
+        SET "PREREQS_OK=0"
+      ) ELSE (
+        echo   [OK] Git installed successfully.
+      )
+    ) ELSE (
+      echo   Please install Git manually: https://git-scm.com/downloads
+      SET "PREREQS_OK=0"
+    )
+  ) ELSE (
+    echo   [!] winget is not available for automatic installation.
+    echo       Please install Git manually: https://git-scm.com/downloads
+    SET "PREREQS_OK=0"
+  )
+) ELSE (
+  FOR /F "tokens=3" %%V IN ('git --version 2^>nul') DO echo   [OK] Git %%V
+)
+
+REM --- Python ---
+echo [Prerequisites] Checking Python...
+SET "PYTHON_CMD="
+where py >nul 2>&1 && SET "PYTHON_CMD=py -3"
+IF "!PYTHON_CMD!"=="" (
+  where python >nul 2>&1 && SET "PYTHON_CMD=python"
+)
+IF "!PYTHON_CMD!"=="" (
+  echo   [!] Python is NOT installed.
+  IF "!HAS_WINGET!"=="1" (
+    echo.
+    SET /P "INSTALL_PY=      Would you like to install Python 3.12 automatically via winget? [Y/n]: "
+    IF /I "!INSTALL_PY!"=="" SET "INSTALL_PY=Y"
+    IF /I "!INSTALL_PY!"=="Y" (
+      echo   Installing Python 3.12...
+      winget install --id Python.Python.3.12 -e --source winget --accept-source-agreements --accept-package-agreements
+      REM Refresh PATH
+      FOR /F "tokens=2*" %%A IN ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') DO SET "SYS_PATH=%%B"
+      FOR /F "tokens=2*" %%A IN ('reg query "HKCU\Environment" /v Path 2^>nul') DO SET "USR_PATH=%%B"
+      SET "PATH=!SYS_PATH!;!USR_PATH!"
+      where py >nul 2>&1 && SET "PYTHON_CMD=py -3"
+      IF "!PYTHON_CMD!"=="" (
+        where python >nul 2>&1 && SET "PYTHON_CMD=python"
+      )
+      IF "!PYTHON_CMD!"=="" (
+        echo   [!] Python was installed but is not yet in your PATH.
+        echo       Close this terminal, open a NEW terminal, and re-run this installer.
+        SET "PREREQS_OK=0"
+      ) ELSE (
+        echo   [OK] Python installed successfully.
+      )
+    ) ELSE (
+      echo   Please install Python 3.10+ manually: https://www.python.org/downloads/
+      echo   IMPORTANT: Check "Add Python to PATH" during installation.
+      SET "PREREQS_OK=0"
+    )
+  ) ELSE (
+    echo   [!] winget is not available for automatic installation.
+    echo       Please install Python 3.10+ manually: https://www.python.org/downloads/
+    echo       IMPORTANT: Check "Add Python to PATH" during installation.
+    SET "PREREQS_OK=0"
+  )
+) ELSE (
+  FOR /F "tokens=*" %%V IN ('!PYTHON_CMD! --version 2^>nul') DO echo   [OK] %%V
+)
+
+REM --- Node.js ---
+echo [Prerequisites] Checking Node.js...
+where node >nul 2>&1
+IF ERRORLEVEL 1 (
+  echo   [!] Node.js is NOT installed.
+  IF "!HAS_WINGET!"=="1" (
+    echo.
+    SET /P "INSTALL_NODE=      Would you like to install Node.js LTS automatically via winget? [Y/n]: "
+    IF /I "!INSTALL_NODE!"=="" SET "INSTALL_NODE=Y"
+    IF /I "!INSTALL_NODE!"=="Y" (
+      echo   Installing Node.js LTS...
+      winget install --id OpenJS.NodeJS.LTS -e --source winget --accept-source-agreements --accept-package-agreements
+      REM Refresh PATH
+      FOR /F "tokens=2*" %%A IN ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') DO SET "SYS_PATH=%%B"
+      FOR /F "tokens=2*" %%A IN ('reg query "HKCU\Environment" /v Path 2^>nul') DO SET "USR_PATH=%%B"
+      SET "PATH=!SYS_PATH!;!USR_PATH!"
+      where node >nul 2>&1
+      IF ERRORLEVEL 1 (
+        echo   [!] Node.js was installed but is not yet in your PATH.
+        echo       Close this terminal, open a NEW terminal, and re-run this installer.
+        SET "PREREQS_OK=0"
+      ) ELSE (
+        echo   [OK] Node.js installed successfully.
+      )
+    ) ELSE (
+      echo   Please install Node.js 18+ manually: https://nodejs.org/en/download/
+      SET "PREREQS_OK=0"
+    )
+  ) ELSE (
+    echo   [!] winget is not available for automatic installation.
+    echo       Please install Node.js 18+ manually: https://nodejs.org/en/download/
+    SET "PREREQS_OK=0"
+  )
+) ELSE (
+  FOR /F "tokens=*" %%V IN ('node --version 2^>nul') DO echo   [OK] Node.js %%V
+)
+
+REM --- ffmpeg ---
+echo [Prerequisites] Checking ffmpeg...
+where ffmpeg >nul 2>&1
+IF ERRORLEVEL 1 (
+  echo   [!] ffmpeg is NOT installed (optional but recommended).
+  IF "!HAS_WINGET!"=="1" (
+    echo.
+    SET /P "INSTALL_FF=      Would you like to install ffmpeg automatically via winget? [Y/n]: "
+    IF /I "!INSTALL_FF!"=="" SET "INSTALL_FF=Y"
+    IF /I "!INSTALL_FF!"=="Y" (
+      echo   Installing ffmpeg...
+      winget install --id Gyan.FFmpeg -e --source winget --accept-source-agreements --accept-package-agreements
+      REM Refresh PATH
+      FOR /F "tokens=2*" %%A IN ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') DO SET "SYS_PATH=%%B"
+      FOR /F "tokens=2*" %%A IN ('reg query "HKCU\Environment" /v Path 2^>nul') DO SET "USR_PATH=%%B"
+      SET "PATH=!SYS_PATH!;!USR_PATH!"
+      where ffmpeg >nul 2>&1
+      IF ERRORLEVEL 1 (
+        echo   [WARN] ffmpeg was installed but is not yet in your PATH.
+        echo          Media conversion features may fail until PATH is refreshed.
+      ) ELSE (
+        echo   [OK] ffmpeg installed successfully.
+      )
+    ) ELSE (
+      echo   [WARN] ffmpeg not installed. Download/extract will work, but media conversion may fail.
+      echo          Download from: https://ffmpeg.org/download.html
+    )
+  ) ELSE (
+    echo   [WARN] ffmpeg not installed. Download/extract will work, but media conversion may fail.
+    echo          Download from: https://ffmpeg.org/download.html
+  )
+) ELSE (
+  FOR /F "tokens=1-3" %%A IN ('ffmpeg -version 2^>nul') DO (
+    IF "%%A"=="ffmpeg" echo   [OK] ffmpeg %%C
+    goto :ffmpeg_done
+  )
+  :ffmpeg_done
+)
+
+echo.
+IF "!PREREQS_OK!"=="0" (
+  echo [ERROR] One or more required prerequisites are missing.
+  echo         Install the missing tools listed above, then re-run this installer.
+  ENDLOCAL
+  EXIT /B 1
+)
+echo [Prerequisites] All checks passed.
+echo.
+
+REM ===================================================================
+REM  REPOSITORY SETUP
+REM ===================================================================
 
 SET "PROJECT_ROOT=%SCRIPT_DIR%"
 IF EXIST "%PROJECT_ROOT%\backend\src\main.py" IF EXIST "%PROJECT_ROOT%\frontend\package.json" GOTO :project_ready
@@ -70,6 +255,11 @@ IF EXIST "%CLONE_TARGET%\.git" (
 SET "PROJECT_ROOT=%CLONE_TARGET%"
 
 :project_ready
+
+REM ===================================================================
+REM  INSTALL DEPENDENCIES
+REM ===================================================================
+
 SET "BACKEND_DIR=%PROJECT_ROOT%\backend"
 SET "FRONTEND_DIR=%PROJECT_ROOT%\frontend"
 SET "VENV_DIR=%BACKEND_DIR%\.venv"
@@ -84,27 +274,6 @@ IF "%SKIP_MODEL_PRELOAD%"=="" SET "SKIP_MODEL_PRELOAD=0"
 
 SET "PRELOAD_ENGINE=%PRELOAD_ENGINE%"
 IF "%PRELOAD_ENGINE%"=="" SET "PRELOAD_ENGINE=auto"
-
-SET "PYTHON_CMD="
-where py >nul 2>&1 && SET "PYTHON_CMD=py -3"
-IF "!PYTHON_CMD!"=="" (
-  where python >nul 2>&1 && SET "PYTHON_CMD=python"
-)
-IF "!PYTHON_CMD!"=="" (
-  echo [ERROR] Python 3.10+ is required and was not found in PATH.
-  EXIT /B 1
-)
-
-where node >nul 2>&1
-IF ERRORLEVEL 1 (
-  echo [ERROR] Node.js 18+ is required and was not found in PATH.
-  EXIT /B 1
-)
-
-where ffmpeg >nul 2>&1
-IF ERRORLEVEL 1 (
-  echo [WARN] ffmpeg was not found in PATH. Download/extract will work, but media conversion may fail until ffmpeg is installed.
-)
 
 echo [1/8] Creating backend virtual environment...
 IF NOT EXIST "%VENV_PYTHON%" (
@@ -160,14 +329,42 @@ IF DEFINED OLLAMA_MODELS (
   )
 )
 
+REM ===================================================================
+REM  DONE — SUMMARY
+REM ===================================================================
+
 echo.
-echo Installation complete.
-echo Project root: %PROJECT_ROOT%
-echo Backend venv: %VENV_DIR%
+echo  ============================================
+echo    Installation complete!
+echo  ============================================
+echo.
+echo  Project root : %PROJECT_ROOT%
+echo  Backend venv : %VENV_DIR%
+echo.
+echo  HOW TO START THE APP:
+echo  ---------------------
 IF EXIST "%PROJECT_ROOT%\run_windows.bat" (
-  echo Start app with: "%PROJECT_ROOT%\run_windows.bat"
+  echo   Double-click or run:
+  echo     "%PROJECT_ROOT%\run_windows.bat"
 ) ELSE (
-  echo Start app by running backend/frontend manually from %PROJECT_ROOT%.
+  echo   Start backend/frontend manually from %PROJECT_ROOT%.
 )
+echo.
+echo  Once running, open your browser to:
+echo    Frontend : http://localhost:5173
+echo    API docs : http://localhost:8011/docs
+echo.
+echo  HOW TO UPDATE LATER:
+echo  --------------------
+IF EXIST "%PROJECT_ROOT%\update_windows.bat" (
+  echo   Run: "%PROJECT_ROOT%\update_windows.bat"
+) ELSE (
+  echo   cd into %PROJECT_ROOT% and run: git pull
+)
+echo.
+echo  CONFIGURATION:
+echo  --------------
+echo   Copy backend\.env.example to backend\.env and set:
+echo     HF_TOKEN  = your Hugging Face token (for diarization models)
 echo.
 ENDLOCAL
