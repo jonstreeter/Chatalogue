@@ -32,6 +32,24 @@ class JobDeferredException(Exception):
     pass
 
 
+class JobNoticeException(Exception):
+    """Raised when a job should surface a user-facing notice instead of a hard error."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "notice",
+        video_status: str = "pending",
+        technical_detail: str | None = None,
+    ):
+        super().__init__(message)
+        self.notice_message = str(message or "Notice")
+        self.notice_code = str(code or "notice")
+        self.video_status = str(video_status or "pending")
+        self.technical_detail = str(technical_detail or self.notice_message)
+
+
 def _env_float(name: str, default: str) -> float:
     """Parse a float from an environment variable with a fallback default."""
     try:
@@ -746,6 +764,51 @@ class IngestionService:
         ]
         return any(token in msg for token in checks)
 
+    def _classify_ytdlp_download_notice(self, exc: Exception) -> dict | None:
+        msg = str(exc or "").strip()
+        lowered = msg.lower()
+        if not lowered:
+            return None
+
+        if (
+            "members-only content" in lowered
+            or "join this channel to get access to members-only content" in lowered
+        ):
+            return {
+                "code": "youtube_members_only",
+                "message": (
+                    "This video is members-only. Chatalogue could not download it with the "
+                    "current YouTube session."
+                ),
+                "video_status": "pending",
+            }
+
+        if (
+            "private video" in lowered
+            or "granted access to this video" in lowered
+            or "this video is private" in lowered
+        ):
+            return {
+                "code": "youtube_private_video",
+                "message": (
+                    "This video is private or access-restricted. Chatalogue could not "
+                    "download it with the current YouTube session."
+                ),
+                "video_status": "pending",
+            }
+
+        if self._is_ytdlp_auth_required_error(exc):
+            return {
+                "code": "youtube_auth_required",
+                "message": (
+                    "This video requires a signed-in YouTube session or browser cookies "
+                    "before it can be downloaded."
+                ),
+                "video_status": "pending",
+            }
+
+        return None
+
     def _set_prefetch_backoff(self, video_id: int, seconds: float):
         until = time.time() + max(1.0, float(seconds))
         with self._prefetch_backoff_guard:
@@ -980,6 +1043,47 @@ class IngestionService:
             job.completed_at = datetime.now()
             job.status_detail = None
             session.add(job)
+            session.commit()
+
+    def _mark_job_notice(
+        self,
+        job_id: int | None,
+        video_id: int | None,
+        *,
+        code: str,
+        message: str,
+        technical_detail: str | None = None,
+        video_status: str = "pending",
+    ):
+        with Session(engine) as session:
+            if job_id:
+                job = session.get(Job, job_id)
+                if job:
+                    payload = self._load_job_payload(job.payload_json)
+                    payload.update(
+                        {
+                            "result_kind": "notice",
+                            "result_notice_code": str(code or "notice"),
+                            "result_notice_message": str(message or "Notice"),
+                            "result_notice_source": "download",
+                            "result_notice_retryable": True,
+                        }
+                    )
+                    if technical_detail:
+                        payload["result_notice_detail"] = str(technical_detail)[:1000]
+                    job.payload_json = json.dumps(payload, sort_keys=True)
+                    job.status = "failed"
+                    job.error = _truncate_error(message)
+                    job.completed_at = datetime.now()
+                    job.status_detail = None
+                    session.add(job)
+
+            if video_id:
+                video = session.get(Video, video_id)
+                if video:
+                    video.status = str(video_status or "pending")
+                    session.add(video)
+
             session.commit()
 
     def _load_job_payload(self, payload_json: str | None) -> dict:
@@ -6678,8 +6782,19 @@ class IngestionService:
         }
         ydl_opts = self._apply_ytdlp_auth_opts(ydl_opts, purpose="download_audio")
         log_verbose(f"Downloading audio for {video.youtube_id}...")
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video.youtube_id}"])
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([f"https://www.youtube.com/watch?v={video.youtube_id}"])
+        except Exception as e:
+            notice = self._classify_ytdlp_download_notice(e)
+            if notice:
+                raise JobNoticeException(
+                    str(notice.get("message") or "This video could not be downloaded."),
+                    code=str(notice.get("code") or "notice"),
+                    video_status=str(notice.get("video_status") or "pending"),
+                    technical_detail=str(e),
+                ) from e
+            raise
 
         # Handle the downloaded file
         actual_file = Path(downloaded_file[0]) if downloaded_file[0] else None
@@ -6953,6 +7068,25 @@ class IngestionService:
                     # Job status already set to "paused" by the API endpoint;
                     # video status reset to "pending" by the pipeline phase handlers.
 
+                except JobNoticeException as e:
+                    log(f"Notice processing job {job_id}: {e.notice_message}")
+                    self._mark_job_notice(
+                        job_id,
+                        video_id,
+                        code=e.notice_code,
+                        message=e.notice_message,
+                        technical_detail=e.technical_detail,
+                        video_status=e.video_status,
+                    )
+                    # If this was a destructive redo-diarization run, restore backup transcript rows.
+                    try:
+                        with Session(engine) as session:
+                            job = session.get(Job, job_id)
+                            if job:
+                                self._restore_redo_backup_if_needed(session, job, reason="job notice")
+                    except Exception as re:
+                        log(f"Redo-backup restore failed after job notice {job_id}: {re}")
+
                 except Exception as e:
                     import traceback
                     tb = traceback.format_exc()
@@ -7202,12 +7336,20 @@ class IngestionService:
                     self._clear_prefetch_backoff(video.id)
                     log_verbose(f"Prefetch complete for video {video.id}")
                 except Exception as e:
-                    if self._is_ytdlp_auth_required_error(e):
+                    notice = e if isinstance(e, JobNoticeException) else None
+                    if notice is None:
+                        classified = self._classify_ytdlp_download_notice(e)
+                        if classified:
+                            notice = JobNoticeException(
+                                str(classified.get("message") or "This video could not be downloaded."),
+                                code=str(classified.get("code") or "notice"),
+                                video_status=str(classified.get("video_status") or "pending"),
+                                technical_detail=str(e),
+                            )
+
+                    if notice is not None:
                         self._set_prefetch_backoff(video.id, 600)
-                        log(
-                            f"Audio prefetch blocked for queued video {video.id}: YouTube sign-in/cookies required. "
-                            f"Set YTDLP_COOKIES_FILE or YTDLP_COOKIES_FROM_BROWSER in Settings."
-                        )
+                        log(f"Audio prefetch notice for queued video {video.id}: {notice.notice_message}")
                     else:
                         self._set_prefetch_backoff(video.id, 60)
                         log(f"Audio prefetch failed for queued video {video.id}: {e}")
@@ -7460,6 +7602,24 @@ class IngestionService:
                     session.add(v)
                     session.commit()
             raise
+        except JobNoticeException as e:
+            log(f"Notice processing video {video_id}: {e.notice_message}")
+            with Session(engine) as session:
+                v = session.get(Video, video_id)
+                if v:
+                    v.status = e.video_status
+                    session.add(v)
+                    session.commit()
+            if job_id:
+                self._mark_job_notice(
+                    job_id,
+                    video_id,
+                    code=e.notice_code,
+                    message=e.notice_message,
+                    technical_detail=e.technical_detail,
+                    video_status=e.video_status,
+                )
+            raise RuntimeError(e.notice_message) from e
         except Exception as e:
             import traceback
             tb = traceback.format_exc()

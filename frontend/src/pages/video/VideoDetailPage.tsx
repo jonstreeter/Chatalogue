@@ -494,7 +494,8 @@ export function VideoDetailPage() {
 
     const TRANSCRIPT_HIGHLIGHT_LEAD_SECONDS = 0.08;
     const TRANSCRIPT_SEGMENT_TRAIL_SECONDS = 0.05;
-    const TRANSCRIPT_WORD_GAP_BRIDGE_SECONDS = 0.18;
+    const TRANSCRIPT_WORD_GAP_BRIDGE_SECONDS = 0.85;
+    const TRANSCRIPT_MIN_WORD_HIGHLIGHT_SECONDS = 0.12;
 
     const parseSegmentWords = (
         seg: TranscriptSegment,
@@ -507,10 +508,10 @@ export function VideoDetailPage() {
             words = parsed
                 .map((w: any) => ({
                     start: Number(w?.start),
-                    end: Number(w?.end),
+                    end: Number.isFinite(Number(w?.end)) ? Number(w?.end) : Number(w?.start),
                     word: String(w?.word || '').trim(),
                 }))
-                .filter((w) => Number.isFinite(w.start) && Number.isFinite(w.end) && w.end > w.start && !!w.word);
+                .filter((w) => Number.isFinite(w.start) && Number.isFinite(w.end) && !!w.word);
         } catch {
             return [];
         }
@@ -545,26 +546,39 @@ export function VideoDetailPage() {
             words = words
                 .map(w => {
                     const s = Math.max(segStart, w.start);
-                    const e = Math.min(segEnd, Math.max(w.end, s + 0.001));
+                    const e = Math.min(segEnd, Math.max(w.end, s));
                     return { ...w, start: s, end: e };
                 })
-                .filter(w => w.end > w.start + 0.0005);
+                .filter(w => w.end >= w.start);
         }
 
         words.sort((a, b) => a.start - b.start);
         return words.map((w, idx) => {
             const next = words[idx + 1];
-            let displayEnd = w.end;
+            const naturalEnd = Math.max(w.end, w.start);
+            let displayEnd = naturalEnd;
+
+            const minHighlightEnd = w.start + TRANSCRIPT_MIN_WORD_HIGHLIGHT_SECONDS;
+            if (displayEnd < minHighlightEnd) {
+                if (next && next.start > w.start) {
+                    displayEnd = Math.min(minHighlightEnd, next.start);
+                } else if (Number.isFinite(segEnd)) {
+                    displayEnd = Math.min(segEnd, minHighlightEnd);
+                } else {
+                    displayEnd = minHighlightEnd;
+                }
+            }
+
             if (next) {
-                const gapToNext = next.start - w.end;
+                const gapToNext = next.start - naturalEnd;
                 if (gapToNext > 0 && gapToNext <= TRANSCRIPT_WORD_GAP_BRIDGE_SECONDS) {
                     displayEnd = next.start;
                 }
             } else if (Number.isFinite(segEnd)) {
-                displayEnd = Math.min(segEnd, w.end + TRANSCRIPT_SEGMENT_TRAIL_SECONDS);
+                displayEnd = Math.min(segEnd, Math.max(displayEnd, naturalEnd + TRANSCRIPT_SEGMENT_TRAIL_SECONDS));
             }
             if (displayEnd <= w.start) {
-                displayEnd = Math.max(w.end, w.start + 0.01);
+                displayEnd = w.start + 0.01;
             }
             return { ...w, displayEnd };
         });

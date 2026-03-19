@@ -4665,29 +4665,69 @@ def read_jobs(
     channel_id: Optional[int] = None,
     job_type: Optional[str] = None,
     limit: int = 500,
+    sort_by: Optional[str] = None,
+    sort_dir: Optional[str] = "desc",
     session: Session = Depends(get_session)
 ):
-    from sqlalchemy import case
+    from sqlalchemy import case, asc, desc
     from sqlalchemy.orm import selectinload
+    
     query = select(Job).options(selectinload(Job.video))
     active_like_statuses = ["running", "downloading", "transcribing", "diarizing"]
+    
     if status:
-        query = query.where(Job.status == status).order_by(Job.created_at.desc())
+        query = query.where(Job.status == status)
     else:
         query = query.where(Job.status != "waiting_diarize")
-        # Ensure active jobs are always included near the top even when limit truncates.
-        query = query.order_by(
-            case((Job.status.in_(active_like_statuses), 0), else_=1),
-            Job.created_at.desc(),
-        )
+        
     if job_type:
         job_types = [jt.strip() for jt in str(job_type).split(",") if jt.strip()]
         if len(job_types) == 1:
             query = query.where(Job.job_type == job_types[0])
         elif len(job_types) > 1:
             query = query.where(Job.job_type.in_(job_types))
+            
     if channel_id:
-        query = query.join(Video).where(Video.channel_id == channel_id)
+        query = query.join(Video, Job.video_id == Video.id).where(Video.channel_id == channel_id)
+
+    # Determine sorting behavior
+    s_dir = asc if sort_dir == "asc" else desc
+
+    if sort_by == "duration":
+        # we need the video join to sort by duration
+        if not channel_id:
+            query = query.join(Video, Job.video_id == Video.id)
+        # Pin active jobs first, then sort by duration
+        if not status:
+            query = query.order_by(
+                case((Job.status.in_(active_like_statuses), 0), else_=1),
+                s_dir(Video.duration)
+            )
+        else:
+            query = query.order_by(s_dir(Video.duration))
+            
+    elif sort_by == "name":
+        # we need the video join to sort by title
+        if not channel_id:
+            query = query.join(Video, Job.video_id == Video.id)
+        if not status:
+            query = query.order_by(
+                case((Job.status.in_(active_like_statuses), 0), else_=1),
+                s_dir(Video.title)
+            )
+        else:
+            query = query.order_by(s_dir(Video.title))
+            
+    else:
+        # Default sort by created_at (Order Added)
+        if not status:
+            query = query.order_by(
+                case((Job.status.in_(active_like_statuses), 0), else_=1),
+                s_dir(Job.created_at)
+            )
+        else:
+            query = query.order_by(s_dir(Job.created_at))
+
     safe_limit = max(1, min(limit, 2000))
     return session.exec(query.limit(safe_limit)).all()
 

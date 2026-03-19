@@ -87,13 +87,18 @@ export function JobQueue() {
     const [workerStatus, setWorkerStatus] = useState<'online' | 'offline' | 'stalled'>('offline');
     const [lowerTab, setLowerTab] = useState<'transcribe' | 'diarize' | 'history'>('transcribe');
     const [pipelineFocus, setPipelineFocus] = useState<PipelineFocus | null>(null);
+    const [sortBy, setSortBy] = useState<'created_at' | 'duration' | 'name'>('created_at');
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
     const mountedRef = useRef(false);
 
     const byDescCreated = (a: Job, b: Job) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
 
     const fetchJobs = usePollingFetch<Job[]>({
         mountedRef,
-        request: (signal) => api.get('/jobs', { params: { limit: JOBS_FETCH_LIMIT }, signal }),
+        request: (signal) => api.get('/jobs', { 
+            params: { limit: JOBS_FETCH_LIMIT, sort_by: sortBy, sort_dir: sortDir }, 
+            signal 
+        }),
         onSuccess: (data) => setJobs(Array.isArray(data) ? data : []),
         onError: (e) => console.error('Failed to fetch jobs:', e),
         onFinally: () => { if (mountedRef.current) setLoading(false); },
@@ -178,6 +183,13 @@ export function JobQueue() {
             clearInterval(workerInterval);
         };
     }, []);
+
+    // Effect to refetch jobs immediately when sort changes
+    useEffect(() => {
+        if (!loading) {
+            fetchJobs(true);
+        }
+    }, [sortBy, sortDir]);
 
     const handlePause = async (jobId: number) => {
         try { await api.post(`/jobs/${jobId}/pause`); fetchJobs(true); fetchHistoryJobs(true); fetchQueueSummary(true); } catch (e) { console.error(e); }
@@ -1235,7 +1247,34 @@ const getStatusLabel = (status: string): string => {
                             renderQueueSection(isStagedExecution ? 'Transcription Queue' : 'Pipeline Queue', FileText, transcriptionRunningJobs, transcriptionQueuedJobs, transcriptionPausedJobs)
                         ) : isStagedExecution && lowerTab === 'diarize' ? (
                             renderQueueSection('Diarization Queue', Users, diarizeRunningJobs, diarizeQueuedJobs, diarizePausedJobs)
-                        ) : (
+                        <div className="space-y-4">
+                            {historyJobs.length > 0 && (
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                    <div className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm flex flex-col">
+                                        <span className="text-[11px] font-semibold uppercase text-slate-500 mb-1">Total Completed</span>
+                                        <span className="text-2xl font-bold text-green-600">{historyJobs.filter(j => j.status === 'completed').length}</span>
+                                    </div>
+                                    <div className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm flex flex-col">
+                                        <span className="text-[11px] font-semibold uppercase text-slate-500 mb-1">Total Failed</span>
+                                        <span className="text-2xl font-bold text-red-600">{historyJobs.filter(j => j.status === 'failed').length}</span>
+                                    </div>
+                                    <div className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm flex flex-col">
+                                        <span className="text-[11px] font-semibold uppercase text-slate-500 mb-1">Success Rate</span>
+                                        <span className="text-2xl font-bold text-slate-700">
+                                            {historyJobs.length > 0 
+                                                ? Math.round((historyJobs.filter(j => j.status === 'completed').length / ((historyJobs.filter(j => j.status === 'completed').length + historyJobs.filter(j => j.status === 'failed').length) || 1)) * 100) 
+                                                : 0}%
+                                        </span>
+                                    </div>
+                                    {isStagedExecution && (
+                                        <div className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm flex flex-col">
+                                            <span className="text-[11px] font-semibold uppercase text-slate-500 mb-1">Waiting Diarize</span>
+                                            <span className="text-2xl font-bold text-blue-600">{historyJobs.filter(j => j.status === 'waiting_diarize').length}</span>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
                                 {historyJobs.length === 0 ? (
                                     <div className="p-8 text-center text-slate-400 text-sm">
@@ -1369,7 +1408,8 @@ const getStatusLabel = (status: string): string => {
                                     </div>
                                 )}
                             </div>
-                        )}
+                        </div>
+                    )}
                     </section>
                 </>
             )}
