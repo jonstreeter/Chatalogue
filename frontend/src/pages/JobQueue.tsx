@@ -1247,6 +1247,7 @@ const getStatusLabel = (status: string): string => {
                             renderQueueSection(isStagedExecution ? 'Transcription Queue' : 'Pipeline Queue', FileText, transcriptionRunningJobs, transcriptionQueuedJobs, transcriptionPausedJobs)
                         ) : isStagedExecution && lowerTab === 'diarize' ? (
                             renderQueueSection('Diarization Queue', Users, diarizeRunningJobs, diarizeQueuedJobs, diarizePausedJobs)
+                        ) : (
                         <div className="space-y-4">
                             {historyJobs.length > 0 && (
                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
