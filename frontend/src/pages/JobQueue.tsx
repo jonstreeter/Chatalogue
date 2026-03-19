@@ -1248,29 +1248,29 @@ const getStatusLabel = (status: string): string => {
                         ) : isStagedExecution && lowerTab === 'diarize' ? (
                             renderQueueSection('Diarization Queue', Users, diarizeRunningJobs, diarizeQueuedJobs, diarizePausedJobs)
                         ) : (
-                        <div className="space-y-4">
+                        <div className="space-y-3">
                             {historyJobs.length > 0 && (
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                    <div className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm flex flex-col">
-                                        <span className="text-[11px] font-semibold uppercase text-slate-500 mb-1">Total Completed</span>
-                                        <span className="text-2xl font-bold text-green-600">{historyJobs.filter(j => j.status === 'completed').length}</span>
+                                <div className="flex flex-wrap items-center gap-4 text-xs bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="text-slate-500 font-medium">Completed:</span>
+                                        <span className="font-bold text-green-600">{historyJobs.filter(j => j.status === 'completed').length}</span>
                                     </div>
-                                    <div className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm flex flex-col">
-                                        <span className="text-[11px] font-semibold uppercase text-slate-500 mb-1">Total Failed</span>
-                                        <span className="text-2xl font-bold text-red-600">{historyJobs.filter(j => j.status === 'failed').length}</span>
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="text-slate-500 font-medium">Failed:</span>
+                                        <span className="font-bold text-red-600">{historyJobs.filter(j => j.status === 'failed').length}</span>
                                     </div>
-                                    <div className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm flex flex-col">
-                                        <span className="text-[11px] font-semibold uppercase text-slate-500 mb-1">Success Rate</span>
-                                        <span className="text-2xl font-bold text-slate-700">
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="text-slate-500 font-medium">Success Rate:</span>
+                                        <span className="font-bold text-slate-700">
                                             {historyJobs.length > 0 
                                                 ? Math.round((historyJobs.filter(j => j.status === 'completed').length / ((historyJobs.filter(j => j.status === 'completed').length + historyJobs.filter(j => j.status === 'failed').length) || 1)) * 100) 
                                                 : 0}%
                                         </span>
                                     </div>
                                     {isStagedExecution && (
-                                        <div className="bg-white rounded-xl border border-slate-200 p-3 shadow-sm flex flex-col">
-                                            <span className="text-[11px] font-semibold uppercase text-slate-500 mb-1">Waiting Diarize</span>
-                                            <span className="text-2xl font-bold text-blue-600">{historyJobs.filter(j => j.status === 'waiting_diarize').length}</span>
+                                        <div className="flex items-center gap-1.5">
+                                            <span className="text-slate-500 font-medium">Waiting Diarize:</span>
+                                            <span className="font-bold text-blue-600">{historyJobs.filter(j => j.status === 'waiting_diarize').length}</span>
                                         </div>
                                     )}
                                 </div>
