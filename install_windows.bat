@@ -116,18 +116,17 @@ echo [2/8] Upgrading pip tooling...
 "%VENV_PYTHON%" -m pip install --upgrade pip wheel "setuptools<81"
 
 echo [3/8] Installing PyTorch nightly cu128 (RTX 50xx friendly)...
-"%PIP_CMD%" install --pre torch torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+"%PIP_CMD%" install --pre -r "%BACKEND_DIR%\requirements-windows-cu128.txt"
 IF ERRORLEVEL 1 (
-  echo [WARN] Nightly cu128 install failed. Falling back to default torch wheels...
-  "%PIP_CMD%" install torch torchaudio
+  echo [WARN] Nightly cu128 install failed. Falling back to stable torch pins...
+  "%PIP_CMD%" install -r "%BACKEND_DIR%\requirements-macos.txt"
 )
 
 echo [4/8] Installing core backend dependencies...
-"%PIP_CMD%" install fastapi uvicorn yt-dlp python-dotenv sqlmodel aiosqlite psycopg[binary] "setuptools<81" faster-whisper "ctranslate2<4.6" python-multipart sympy
+"%PIP_CMD%" install -r "%BACKEND_DIR%\requirements.txt"
 
 echo [5/8] Installing pyannote stack...
-"%PIP_CMD%" install pyannote.audio --no-deps
-"%PIP_CMD%" install asteroid-filterbanks einops huggingface-hub lightning matplotlib opentelemetry-api opentelemetry-exporter-otlp opentelemetry-sdk pyannote-core pyannote-database pyannote-metrics pyannote-pipeline pytorch-metric-learning rich safetensors soundfile torch-audiomentations torchmetrics torchcodec pyannoteai-sdk av onnxruntime tokenizers
+"%PIP_CMD%" install pyannote.audio==4.0.4 --no-deps
 
 IF /I "%INSTALL_PARAKEET%"=="1" (
   echo [6/8] Installing optional Parakeet dependencies...

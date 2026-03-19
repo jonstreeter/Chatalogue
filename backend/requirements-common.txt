@@ -1,0 +1,25 @@
+# Shared backend pins for Windows and macOS.
+
+# App
+fastapi==0.135.1
+uvicorn==0.42.0
+yt-dlp==2026.3.17
+python-dotenv==1.2.2
+sqlmodel==0.0.37
+aiosqlite==0.22.1
+psycopg[binary]==3.3.3
+python-multipart==0.0.22
+
+# Keep setuptools below 81 until the Windows pkg_resources compatibility shim
+# can be removed from the transcription stack.
+setuptools==80.10.2
+
+# Shared ML / transcription
+faster-whisper==1.2.1
+ctranslate2==4.7.1
+av==16.1.0
+huggingface-hub==0.36.2
+onnxruntime==1.23.2
+soundfile==0.13.1
+sympy==1.14.0
+tokenizers==0.22.2

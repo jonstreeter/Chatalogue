@@ -33,7 +33,7 @@ IF ERRORLEVEL 1 (
 )
 
 :: Pull latest changes
-echo [1/4] Pulling latest changes from GitHub...
+echo [1/7] Pulling latest changes from GitHub...
 cd /d "%PROJECT_ROOT%"
 git pull --ff-only
 IF !ERRORLEVEL! NEQ 0 (
@@ -46,24 +46,48 @@ IF !ERRORLEVEL! NEQ 0 (
 
 :: Update backend dependencies
 echo.
-echo [2/4] Updating backend dependencies...
+echo [2/7] Updating torch + torchaudio...
 IF NOT EXIST "%VENV_PYTHON%" (
     echo [WARN] Backend venv not found. Run install_windows.bat first.
     pause
     exit /b 1
 )
-"%PIP_CMD%" install --upgrade --quiet fastapi uvicorn yt-dlp python-dotenv sqlmodel aiosqlite psycopg[binary] "setuptools<81" faster-whisper "ctranslate2<4.6" python-multipart sympy
-echo    Backend dependencies up to date.
+"%PIP_CMD%" install --upgrade --quiet --pre -r "%BACKEND_DIR%\requirements-windows-cu128.txt"
+IF ERRORLEVEL 1 (
+    echo [WARN] Nightly cu128 update failed. Falling back to stable torch pins...
+    "%PIP_CMD%" install --upgrade --quiet -r "%BACKEND_DIR%\requirements-macos.txt"
+)
+echo    Torch stack up to date.
+
+echo.
+echo [3/7] Updating shared backend dependencies...
+"%PIP_CMD%" install --upgrade --quiet -r "%BACKEND_DIR%\requirements.txt"
+echo    Shared backend dependencies up to date.
+
+echo.
+echo [4/7] Updating pyannote stack...
+"%PIP_CMD%" install --upgrade --quiet pyannote.audio==4.0.4 --no-deps
+echo    Pyannote stack up to date.
+
+echo.
+echo [5/7] Updating optional Parakeet dependencies...
+"%PIP_CMD%" show nemo-toolkit >nul 2>&1
+IF ERRORLEVEL 1 (
+    echo    Parakeet not installed; skipping optional NeMo stack.
+) ELSE (
+    "%PIP_CMD%" install --upgrade --quiet -r "%BACKEND_DIR%\requirements-parakeet.txt"
+    echo    Optional Parakeet dependencies up to date.
+)
 
 :: Update frontend dependencies
 echo.
-echo [3/4] Updating frontend dependencies...
+echo [6/7] Updating frontend dependencies...
 cd /d "%FRONTEND_DIR%"
 call npm install --fund=false --audit=false --loglevel=warn
 
 :: Done
 echo.
-echo [4/4] Update complete!
+echo [7/7] Update complete!
 echo.
 echo Run "%PROJECT_ROOT%\run_windows.bat" to start Chatalogue.
 echo.

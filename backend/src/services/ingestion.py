@@ -27,6 +27,11 @@ class JobPausedException(Exception):
     pass
 
 
+class JobDeferredException(Exception):
+    """Raised when a queued job should be deferred and retried later."""
+    pass
+
+
 def _env_float(name: str, default: str) -> float:
     """Parse a float from an environment variable with a fallback default."""
     try:
@@ -997,6 +1002,26 @@ class IngestionService:
             ).first()
             return row is not None
 
+    def _set_oldest_queued_job_status_detail(self, job_type: str, detail: str | None):
+        with Session(engine) as session:
+            job = session.exec(
+                select(Job)
+                .where(Job.status == "queued", Job.job_type == job_type)
+                .order_by(Job.created_at.asc(), Job.id.asc())
+            ).first()
+            if not job:
+                return
+            normalized = detail or None
+            if (job.status_detail or None) == normalized:
+                return
+            job.status_detail = normalized
+            session.add(job)
+            session.commit()
+
+    def _has_active_pipeline_gpu_work(self) -> bool:
+        active_statuses = {"running", "downloading", "transcribing", "diarizing"}
+        return self._has_jobs_of_types(PROCESS_JOB_TYPES | DIARIZE_JOB_TYPES, active_statuses)
+
     def _get_detached_video(self, video_id: int) -> Video:
         with Session(engine) as session:
             video = session.get(Video, video_id)
@@ -1284,7 +1309,7 @@ class IngestionService:
                     limit = None
             self._update_job_status_detail(job_id, "Generating funny-moment explanations...")
             self._update_job_progress(job_id, 5)
-            self.explain_funny_moments(video_id, force=force, limit=limit)
+            self.explain_funny_moments(video_id, force=force, limit=limit, job_id=job_id)
             self._update_job_progress(job_id, 100)
             self._update_job_status_detail(job_id, None)
             return
@@ -3001,6 +3026,64 @@ class IngestionService:
         self._finish_component_memory_profile("parakeet", memory_profile, loaded=True)
         log("Parakeet model loaded.")
 
+    def _set_parakeet_decoding_profile(self, profile: str = "optimized", job_id: int = None):
+        """Apply a bounded set of decode-time profiles for Parakeet retries."""
+        if self.parakeet_model is None:
+            return
+
+        from omegaconf import open_dict
+
+        name = str(profile or "optimized").strip().lower()
+        if name == "optimized":
+            target_strategy = "greedy_batch"
+            target_preserve_alignments = False
+            target_use_cuda_graph_decoder = True
+        elif name == "safe_no_graph":
+            target_strategy = "greedy_batch"
+            target_preserve_alignments = True
+            target_use_cuda_graph_decoder = False
+        elif name == "safe_greedy":
+            target_strategy = "greedy"
+            target_preserve_alignments = True
+            target_use_cuda_graph_decoder = False
+        else:
+            raise ValueError(f"Unknown Parakeet decoding profile: {profile}")
+
+        cfg = self.parakeet_model.cfg.decoding
+        changed = False
+        with open_dict(cfg):
+            if cfg.get("compute_timestamps", None) is not True:
+                cfg.compute_timestamps = True
+                changed = True
+            if bool(cfg.get("preserve_alignments", False)) != target_preserve_alignments:
+                cfg.preserve_alignments = target_preserve_alignments
+                changed = True
+            if str(cfg.get("strategy") or "greedy_batch") != target_strategy:
+                cfg.strategy = target_strategy
+                changed = True
+            if bool(cfg.greedy.get("use_cuda_graph_decoder", True)) != target_use_cuda_graph_decoder:
+                cfg.greedy.use_cuda_graph_decoder = target_use_cuda_graph_decoder
+                changed = True
+
+        if changed:
+            self.parakeet_model.change_decoding_strategy(cfg, verbose=False)
+
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "parakeet_decode_profile": name,
+                "parakeet_decode_strategy": target_strategy,
+                "parakeet_preserve_alignments": bool(target_preserve_alignments),
+                "parakeet_use_cuda_graph_decoder": bool(target_use_cuda_graph_decoder),
+            },
+        )
+        log_verbose(
+            "Parakeet decoding profile "
+            f"{name}: strategy={target_strategy}, "
+            f"preserve_alignments={target_preserve_alignments}, "
+            f"use_cuda_graph_decoder={target_use_cuda_graph_decoder}"
+        )
+
     def _probe_audio_duration_seconds(self, audio_path: Path) -> float:
         ffprobe_cmd = self._get_ffprobe_cmd()
         try:
@@ -3365,11 +3448,52 @@ class IngestionService:
             return 14
         return 0
 
+    def _resolve_parakeet_chunk_reload_floor_gb(self, total_gb: float) -> float:
+        """Minimum free VRAM required before attempting a mid-job Parakeet reload."""
+        if total_gb >= 36:
+            default_gb = 8.0
+        elif total_gb >= 28:
+            default_gb = 6.0
+        elif total_gb >= 20:
+            default_gb = 5.0
+        else:
+            default_gb = 4.0
+        raw = (os.getenv("PARAKEET_CHUNK_RELOAD_MIN_FREE_GB") or "").strip()
+        try:
+            if raw:
+                return max(0.0, float(raw))
+        except Exception:
+            pass
+        return default_gb
+
+    def _should_disable_parakeet_chunk_recycle(self, job_id: int = None) -> tuple[bool, str, float, float]:
+        """Return whether chunk-mode model recycling should be disabled for the rest of the job."""
+        if self.device != "cuda":
+            return False, "non_cuda", 0.0, 0.0
+
+        snap = self._cuda_memory_snapshot()
+        total_b = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
+        free_b = int(snap.get("free") or 0)
+        total_gb = float(total_b) / (1024 ** 3) if total_b > 0 else 0.0
+        free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
+        floor_gb = self._resolve_parakeet_chunk_reload_floor_gb(total_gb)
+        max_soft_resets = max(1, int((os.getenv("PARAKEET_CHUNK_RECYCLE_MAX_SOFT_RESETS") or "2").strip() or "2"))
+        dynamic_cap = int(self._parakeet_dynamic_batch_cap) if self._parakeet_dynamic_batch_cap is not None else 999
+
+        if free_gb < floor_gb:
+            return True, f"low_reload_headroom_{free_gb:.1f}gb_below_{floor_gb:.1f}gb", free_gb, floor_gb
+        if self._cuda_soft_reset_count >= max_soft_resets and dynamic_cap <= 1:
+            return True, f"soft_reset_limit_{self._cuda_soft_reset_count}_cap_{dynamic_cap}", free_gb, floor_gb
+        return False, "ok", free_gb, floor_gb
+
     def _should_force_parakeet_long_audio_chunked(self, duration_seconds: float, job_id: int = None) -> tuple[bool, str]:
         try:
-            threshold_seconds = _env_float("PARAKEET_LONG_AUDIO_SECONDS", "1800")
+            # NVIDIA's Parakeet TDT v2 model card documents efficient single-pass
+            # transcription up to roughly 24 minutes; above that, chunking is the
+            # stable path on long-form episodes.
+            threshold_seconds = _env_float("PARAKEET_LONG_AUDIO_SECONDS", "1440")
         except Exception:
-            threshold_seconds = 1800.0
+            threshold_seconds = 1440.0
         if duration_seconds < threshold_seconds:
             return False, "below_threshold"
 
@@ -3422,20 +3546,40 @@ class IngestionService:
         segments = []
         chunk_start = 0.0
         chunk_index = 0
+        chunk_recycle_disabled = False
 
         while chunk_start < total_duration - 0.01:
             chunk_index += 1
 
             if recycle_every > 0 and chunk_index > 1 and ((chunk_index - 1) % recycle_every == 0):
-                if job_id:
-                    est_chunks = max(1, int(total_duration // max(1, chunk_seconds)) + 1)
-                    self._update_job_status_detail(
+                disable_recycle, disable_reason, free_gb, floor_gb = self._should_disable_parakeet_chunk_recycle(job_id=job_id)
+                if disable_recycle:
+                    recycle_every = 0
+                    chunk_recycle_disabled = True
+                    self._upsert_job_payload_fields(
                         job_id,
-                        f"Refreshing Parakeet model for stability (chunk {chunk_index}/{est_chunks})..."
+                        {
+                            "parakeet_chunk_recycle_disabled": True,
+                            "parakeet_chunk_recycle_disabled_reason": disable_reason,
+                            "parakeet_chunk_reload_free_gb": round(free_gb, 2),
+                            "parakeet_chunk_reload_floor_gb": round(floor_gb, 2),
+                            "parakeet_chunk_recycle_every_effective": 0,
+                        },
                     )
-                self._release_parakeet_model("chunk_recycle")
-                self._clear_cuda_cache()
-                gc.collect()
+                    log(
+                        "Disabling Parakeet chunk model recycle for the remainder of this job "
+                        f"({disable_reason}). Continuing with the resident model."
+                    )
+                else:
+                    if job_id:
+                        est_chunks = max(1, int(total_duration // max(1, chunk_seconds)) + 1)
+                        self._update_job_status_detail(
+                            job_id,
+                            f"Refreshing Parakeet model for stability (chunk {chunk_index}/{est_chunks})..."
+                        )
+                    self._release_parakeet_model("chunk_recycle")
+                    self._clear_cuda_cache()
+                    gc.collect()
 
             remaining = max(0.0, total_duration - chunk_start)
             attempt_chunk_seconds = min(chunk_seconds, remaining)
@@ -3468,6 +3612,14 @@ class IngestionService:
                     # Keep GPU memory pressure stable over long chunk loops.
                     self._clear_cuda_cache()
                     gc.collect()
+                    if chunk_recycle_disabled:
+                        self._upsert_job_payload_fields(
+                            job_id,
+                            {
+                                "parakeet_chunk_recycle_disabled": True,
+                                "parakeet_chunk_recycle_every_effective": 0,
+                            },
+                        )
                     # Sync barrier: catch latent corruption between chunks before
                     # the next chunk triggers a harder-to-diagnose fault.
                     if self.device == "cuda" and not self._safe_cuda_sync(timeout_s=10.0):
@@ -3513,6 +3665,7 @@ class IngestionService:
         raw_words = None
         raw_segments = None
         try:
+            input_duration = float(self._probe_audio_duration_seconds(parakeet_input) or 0.0)
             parakeet_input_mode = "path"
             transcribe_input = [str(parakeet_input)]
             try:
@@ -3529,6 +3682,8 @@ class IngestionService:
             else:
                 parakeet_batch_size_requested = max(1, min(int(os.getenv("PARAKEET_BATCH_SIZE", "16")), 64))
                 parakeet_batch_size = self._resolve_parakeet_batch_size(parakeet_batch_size_requested)
+                if len(transcribe_input) == 1 and parakeet_batch_size > 1:
+                    parakeet_batch_size = 1
             mem_snap = self._cuda_memory_snapshot()
             self._upsert_job_payload_fields(
                 job_id,
@@ -3574,128 +3729,184 @@ class IngestionService:
                 {"return_hypotheses": True},
                 {},
             ]
+            retry_profiles = ["optimized", "safe_no_graph"]
+            if self.device == "cuda":
+                retry_profiles.append("safe_greedy")
             last_error = None
             transcribe_started = False
-            current_batch = parakeet_batch_size
-            while result is None:
+            profile_attempt_count = 0
+            for profile_index, retry_profile in enumerate(retry_profiles):
+                profile_attempt_count += 1
+                self._set_parakeet_decoding_profile(retry_profile, job_id=job_id)
+                result = None
+                hypothesis = None
+                raw_words = None
+                raw_segments = None
+                current_batch = parakeet_batch_size
                 oom_hit = False
-                for kwargs in call_variants:
-                    try:
-                        if not transcribe_started:
-                            # Start transcribe timer only when model loading/prep is done and
-                            # we're about to execute actual decoder inference.
-                            self._record_job_stage_start(job_id, "transcribe")
-                            transcribe_started = True
-                        import torch
-                        with torch.inference_mode():
-                            transcribe_kwargs = dict(kwargs)
-                            # Explicitly pin to 0 workers on Windows to reduce file
-                            # handle contention in transcribe dataloaders.
-                            transcribe_kwargs["num_workers"] = 0
-                            if parakeet_input_mode == "tensor":
-                                # Tensor input path bypasses temporary manifest files.
-                                transcribe_kwargs["use_lhotse"] = False
-                            result = self.parakeet_model.transcribe(transcribe_input, batch_size=current_batch, **transcribe_kwargs)
-                        break
-                    except TypeError as e:
-                        last_error = e
-                        continue
-                    except Exception as e:
-                        last_error = e
-                        if self._is_cuda_oom(e):
-                            oom_hit = True
-                            break
-                        if "unexpected keyword" in str(e).lower():
-                            continue
-                        break
 
-                if result is not None:
-                    break
-                if oom_hit and self.device == "cuda" and current_batch > 1:
-                    next_batch = max(1, current_batch // 2)
-                    self._record_parakeet_oom_batch_cap(next_batch, job_id=job_id)
-                    log(
-                        f"Parakeet CUDA OOM at batch_size={current_batch}. "
-                        f"Retrying with batch_size={next_batch}."
-                    )
-                    if job_id:
-                        self._update_job_status_detail(
-                            job_id,
-                            f"Parakeet VRAM pressure detected. Retrying with smaller batch ({next_batch})..."
+                while result is None:
+                    for kwargs in call_variants:
+                        try:
+                            if not transcribe_started:
+                                # Start transcribe timer only when model loading/prep is done and
+                                # we're about to execute actual decoder inference.
+                                self._record_job_stage_start(job_id, "transcribe")
+                                transcribe_started = True
+                            import torch
+                            with torch.inference_mode():
+                                transcribe_kwargs = dict(kwargs)
+                                # Explicitly pin to 0 workers on Windows to reduce file
+                                # handle contention in transcribe dataloaders.
+                                transcribe_kwargs["num_workers"] = 0
+                                if parakeet_input_mode == "tensor":
+                                    # Tensor input path bypasses temporary manifest files.
+                                    transcribe_kwargs["use_lhotse"] = False
+                                result = self.parakeet_model.transcribe(
+                                    transcribe_input,
+                                    batch_size=current_batch,
+                                    **transcribe_kwargs,
+                                )
+                            break
+                        except TypeError as e:
+                            last_error = e
+                            continue
+                        except Exception as e:
+                            last_error = e
+                            if self._is_cuda_oom(e):
+                                oom_hit = True
+                                break
+                            if "unexpected keyword" in str(e).lower():
+                                continue
+                            break
+
+                    if result is not None:
+                        break
+                    if oom_hit and self.device == "cuda" and current_batch > 1:
+                        next_batch = max(1, current_batch // 2)
+                        self._record_parakeet_oom_batch_cap(next_batch, job_id=job_id)
+                        log(
+                            f"Parakeet CUDA OOM at batch_size={current_batch}. "
+                            f"Retrying with batch_size={next_batch}."
                         )
-                    self._clear_cuda_cache()
-                    current_batch = next_batch
-                    continue
-                if oom_hit and current_batch <= 1:
-                    if allow_oom_chunk_retry and self._parakeet_oom_chunk_retry_enabled():
-                        self._clear_cuda_cache()
                         if job_id:
                             self._update_job_status_detail(
                                 job_id,
-                                "Parakeet hit VRAM limit. Retrying in adaptive chunked mode..."
+                                f"Parakeet VRAM pressure detected. Retrying with smaller batch ({next_batch})..."
                             )
-                        return self._transcribe_with_parakeet_in_chunks(
-                            audio_path, start_time_offset=start_time_offset, job_id=job_id
+                        self._clear_cuda_cache()
+                        current_batch = next_batch
+                        continue
+                    if oom_hit and current_batch <= 1:
+                        if allow_oom_chunk_retry and self._parakeet_oom_chunk_retry_enabled():
+                            self._clear_cuda_cache()
+                            if job_id:
+                                self._update_job_status_detail(
+                                    job_id,
+                                    "Parakeet hit VRAM limit. Retrying in adaptive chunked mode..."
+                                )
+                            return self._transcribe_with_parakeet_in_chunks(
+                                audio_path, start_time_offset=start_time_offset, job_id=job_id
+                            )
+                        raise RuntimeError(
+                            "Parakeet failed due to CUDA OOM even at batch_size=1. "
+                            "Use Whisper or enable lower-VRAM settings."
                         )
-                    raise RuntimeError(
-                        "Parakeet failed due to CUDA OOM even at batch_size=1. "
-                        "Use Whisper or enable lower-VRAM settings."
+                    break
+
+                if result is None:
+                    if (
+                        profile_index + 1 < len(retry_profiles)
+                        and last_error is not None
+                        and not self._is_cuda_illegal_access(last_error)
+                        and not self._is_cuda_oom(last_error)
+                    ):
+                        log(
+                            f"Parakeet decode failed under profile {retry_profile}: {last_error}. "
+                            f"Retrying with {retry_profiles[profile_index + 1]}."
+                        )
+                        self._upsert_job_payload_fields(
+                            job_id,
+                            {
+                                "parakeet_profile_retry_from": retry_profile,
+                                "parakeet_profile_retry_to": retry_profiles[profile_index + 1],
+                                "parakeet_profile_retry_reason": str(last_error)[:300],
+                            },
+                        )
+                        continue
+                    raise RuntimeError(f"Parakeet transcription failed: {last_error}")
+
+                hypothesis = self._normalize_parakeet_hypothesis(result)
+                transcript_text, raw_words, raw_segments = self._extract_parakeet_transcript_items(hypothesis)
+
+                words = []
+                for item in raw_words:
+                    if not isinstance(item, dict):
+                        continue
+                    ws = item.get("start", item.get("t0"))
+                    we = item.get("end", item.get("t1", ws))
+                    ww = item.get("word", item.get("text", ""))
+                    if ws is None or ww is None:
+                        continue
+                    try:
+                        ws_f = float(ws) + start_time_offset
+                        we_f = float(we) + start_time_offset
+                    except Exception:
+                        continue
+                    if not str(ww).strip():
+                        continue
+                    words.append(self._build_whisper_style_word(ws_f, we_f, str(ww).strip()))
+
+                segments = []
+                seg_id = 0
+                for item in raw_segments:
+                    if not isinstance(item, dict):
+                        continue
+                    seg_start = item.get("start", item.get("t0"))
+                    seg_end = item.get("end", item.get("t1", seg_start))
+                    seg_text = item.get("text", item.get("segment", ""))
+                    if seg_start is None:
+                        continue
+                    try:
+                        seg_start_f = float(seg_start) + start_time_offset
+                        seg_end_f = float(seg_end) + start_time_offset
+                    except Exception:
+                        continue
+                    seg_words = [
+                        w for w in words
+                        if float(getattr(w, "start", 0.0)) >= seg_start_f - 0.01 and float(getattr(w, "end", 0.0)) <= seg_end_f + 0.01
+                    ]
+                    segments.append(
+                        self._build_whisper_style_segment(
+                            seg_id,
+                            seg_start_f,
+                            seg_end_f,
+                            str(seg_text or "").strip(),
+                            seg_words,
+                        )
                     )
-                break
+                    seg_id += 1
 
-            if result is None:
-                raise RuntimeError(f"Parakeet transcription failed: {last_error}")
-
-            hypothesis = self._normalize_parakeet_hypothesis(result)
-            transcript_text, raw_words, raw_segments = self._extract_parakeet_transcript_items(hypothesis)
-
-            words = []
-            for item in raw_words:
-                if not isinstance(item, dict):
-                    continue
-                ws = item.get("start", item.get("t0"))
-                we = item.get("end", item.get("t1", ws))
-                ww = item.get("word", item.get("text", ""))
-                if ws is None or ww is None:
-                    continue
-                try:
-                    ws_f = float(ws) + start_time_offset
-                    we_f = float(we) + start_time_offset
-                except Exception:
-                    continue
-                if not str(ww).strip():
-                    continue
-                words.append(self._build_whisper_style_word(ws_f, we_f, str(ww).strip()))
-
-            segments = []
-            seg_id = 0
-            for item in raw_segments:
-                if not isinstance(item, dict):
-                    continue
-                seg_start = item.get("start", item.get("t0"))
-                seg_end = item.get("end", item.get("t1", seg_start))
-                seg_text = item.get("text", item.get("segment", ""))
-                if seg_start is None:
-                    continue
-                try:
-                    seg_start_f = float(seg_start) + start_time_offset
-                    seg_end_f = float(seg_end) + start_time_offset
-                except Exception:
-                    continue
-                seg_words = [
-                    w for w in words
-                    if float(getattr(w, "start", 0.0)) >= seg_start_f - 0.01 and float(getattr(w, "end", 0.0)) <= seg_end_f + 0.01
-                ]
-                segments.append(self._build_whisper_style_segment(seg_id, seg_start_f, seg_end_f, str(seg_text or "").strip(), seg_words))
-                seg_id += 1
-
-            if not segments and words:
-                # Chunk into sentence-like segments if explicit segment timestamps are missing.
-                chunk = []
-                for w in words:
-                    chunk.append(w)
-                    token = (getattr(w, "word", "") or "").strip()
-                    if token.endswith((".", "!", "?")) or len(chunk) >= 30:
+                if not segments and words:
+                    # Chunk into sentence-like segments if explicit segment timestamps are missing.
+                    chunk = []
+                    for w in words:
+                        chunk.append(w)
+                        token = (getattr(w, "word", "") or "").strip()
+                        if token.endswith((".", "!", "?")) or len(chunk) >= 30:
+                            seg_text = " ".join((getattr(x, "word", "") or "").strip() for x in chunk).strip()
+                            segments.append(
+                                self._build_whisper_style_segment(
+                                    seg_id,
+                                    float(getattr(chunk[0], "start", 0.0)),
+                                    float(getattr(chunk[-1], "end", getattr(chunk[-1], "start", 0.0))),
+                                    seg_text,
+                                    list(chunk),
+                                )
+                            )
+                            seg_id += 1
+                            chunk = []
+                    if chunk:
                         seg_text = " ".join((getattr(x, "word", "") or "").strip() for x in chunk).strip()
                         segments.append(
                             self._build_whisper_style_segment(
@@ -3706,63 +3917,67 @@ class IngestionService:
                                 list(chunk),
                             )
                         )
-                        seg_id += 1
-                        chunk = []
-                if chunk:
-                    seg_text = " ".join((getattr(x, "word", "") or "").strip() for x in chunk).strip()
-                    segments.append(
+
+                if not segments and transcript_text.strip():
+                    segments = [
                         self._build_whisper_style_segment(
-                            seg_id,
-                            float(getattr(chunk[0], "start", 0.0)),
-                            float(getattr(chunk[-1], "end", getattr(chunk[-1], "start", 0.0))),
-                            seg_text,
-                            list(chunk),
+                            0,
+                            start_time_offset,
+                            start_time_offset + max(0.1, input_duration),
+                            transcript_text.strip(),
+                            words or None,
                         )
+                    ]
+
+                require_word_timestamps = os.getenv("PARAKEET_REQUIRE_WORD_TIMESTAMPS", "true").lower() == "true"
+                word_coverage = 0.0
+                if segments:
+                    with_words = sum(1 for s in segments if getattr(s, "words", None))
+                    word_coverage = with_words / max(len(segments), 1)
+                if require_word_timestamps and word_coverage < 0.9:
+                    payload = {
+                        "parakeet_word_coverage": round(word_coverage, 4),
+                        "parakeet_hypothesis_type": type(hypothesis).__name__ if hypothesis is not None else "NoneType",
+                        "parakeet_result_type": type(result).__name__ if result is not None else "NoneType",
+                        "parakeet_timestamp_payload": self._describe_parakeet_timestamp_payload(hypothesis),
+                        "parakeet_raw_word_count": len(raw_words or []),
+                        "parakeet_raw_segment_count": len(raw_segments or []),
+                        "parakeet_segment_count": len(segments or []),
+                        "parakeet_decode_profile_attempts": int(profile_attempt_count),
+                    }
+                    self._upsert_job_payload_fields(job_id, payload)
+                    log(
+                        "Parakeet low timestamp coverage: "
+                        f"coverage={word_coverage:.1%}, hypothesis={payload['parakeet_hypothesis_type']}, "
+                        f"result={payload['parakeet_result_type']}, timestamp_payload={payload['parakeet_timestamp_payload']}, "
+                        f"raw_words={payload['parakeet_raw_word_count']}, raw_segments={payload['parakeet_raw_segment_count']}, "
+                        f"segments={payload['parakeet_segment_count']}"
+                    )
+                    if profile_index + 1 < len(retry_profiles):
+                        next_profile = retry_profiles[profile_index + 1]
+                        log(
+                            f"Parakeet low timestamp coverage under profile {retry_profile}. "
+                            f"Retrying with {next_profile}."
+                        )
+                        self._upsert_job_payload_fields(
+                            job_id,
+                            {
+                                "parakeet_profile_retry_from": retry_profile,
+                                "parakeet_profile_retry_to": next_profile,
+                                "parakeet_profile_retry_reason": (
+                                    f"low_word_coverage_{word_coverage:.3f}"
+                                ),
+                            },
+                        )
+                        continue
+                    raise RuntimeError(
+                        f"Parakeet returned low word timestamp coverage ({word_coverage:.1%}); falling back to Whisper."
                     )
 
-            if not segments and transcript_text.strip():
-                duration = self._probe_audio_duration_seconds(parakeet_input)
-                segments = [
-                    self._build_whisper_style_segment(
-                        0,
-                        start_time_offset,
-                        start_time_offset + max(0.1, duration),
-                        transcript_text.strip(),
-                        words or None,
-                    )
-                ]
-
-            require_word_timestamps = os.getenv("PARAKEET_REQUIRE_WORD_TIMESTAMPS", "true").lower() == "true"
-            word_coverage = 0.0
-            if segments:
-                with_words = sum(1 for s in segments if getattr(s, "words", None))
-                word_coverage = with_words / max(len(segments), 1)
-            if require_word_timestamps and word_coverage < 0.9:
-                payload = {
-                    "parakeet_word_coverage": round(word_coverage, 4),
-                    "parakeet_hypothesis_type": type(hypothesis).__name__ if hypothesis is not None else "NoneType",
-                    "parakeet_result_type": type(result).__name__ if result is not None else "NoneType",
-                    "parakeet_timestamp_payload": self._describe_parakeet_timestamp_payload(hypothesis),
-                    "parakeet_raw_word_count": len(raw_words or []),
-                    "parakeet_raw_segment_count": len(raw_segments or []),
-                    "parakeet_segment_count": len(segments or []),
-                }
-                self._upsert_job_payload_fields(job_id, payload)
-                log(
-                    "Parakeet low timestamp coverage: "
-                    f"coverage={word_coverage:.1%}, hypothesis={payload['parakeet_hypothesis_type']}, "
-                    f"result={payload['parakeet_result_type']}, timestamp_payload={payload['parakeet_timestamp_payload']}, "
-                    f"raw_words={payload['parakeet_raw_word_count']}, raw_segments={payload['parakeet_raw_segment_count']}, "
-                    f"segments={payload['parakeet_segment_count']}"
-                )
-                raise RuntimeError(
-                    f"Parakeet returned low word timestamp coverage ({word_coverage:.1%}); falling back to Whisper."
-                )
-
-            duration_guess = 0.0
-            if segments:
-                duration_guess = float(getattr(segments[-1], "end", 0.0))
-            return segments, duration_guess
+                duration_guess = 0.0
+                if segments:
+                    duration_guess = float(getattr(segments[-1], "end", 0.0))
+                return segments, duration_guess
         finally:
             try:
                 del waveform
@@ -4801,6 +5016,100 @@ class IngestionService:
         if raw is None:
             raw = os.getenv("OLLAMA_ENABLED", "false")
         return str(raw).lower() == "true"
+
+    def _is_local_ollama_provider_active(self) -> bool:
+        return self._is_llm_enabled() and self._get_llm_provider() == "ollama"
+
+    def _resolve_local_ollama_min_free_vram_gb(self, total_gb: float) -> float:
+        default_gb = 6.0
+        if total_gb >= 28.0:
+            default_gb = 10.0
+        elif total_gb >= 20.0:
+            default_gb = 8.0
+        raw = (os.getenv("OLLAMA_LOCAL_LLM_MIN_FREE_VRAM_GB") or "").strip()
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except Exception:
+                pass
+        return default_gb
+
+    def _get_local_ollama_vram_guard(self) -> tuple[bool, str, float | None, float | None]:
+        if not self._is_local_ollama_provider_active():
+            return True, "non_local_ollama_provider", None, None
+
+        if self._has_active_pipeline_gpu_work():
+            return False, "pipeline_gpu_work_active", None, None
+
+        self._ensure_device()
+        if self.device != "cuda":
+            return True, "non_cuda_worker", None, None
+
+        snap = self._cuda_memory_snapshot()
+        free_b, total_b, _, _, free_gb, _ = self._snap_unpack(snap)
+        total_gb = float(total_b) / (1024 ** 3) if total_b > 0 else 0.0
+        min_free_gb = self._resolve_local_ollama_min_free_vram_gb(total_gb)
+        if free_gb < min_free_gb:
+            return False, f"low_vram_headroom_{free_gb:.1f}gb_below_{min_free_gb:.1f}gb", free_gb, min_free_gb
+        return True, "ok", free_gb, min_free_gb
+
+    def _prepare_for_local_ollama_llm_work(self, job_id: int | None = None) -> tuple[float | None, float | None]:
+        if not self._is_local_ollama_provider_active():
+            return None, None
+        self._ensure_device()
+        if self.device != "cuda":
+            return None, None
+
+        self._release_parakeet_model("pre_local_ollama_llm", job_id=job_id)
+        self._release_whisper_model("pre_local_ollama_llm", job_id=job_id)
+        self._release_diarization_models("pre_local_ollama_llm", job_id=job_id)
+        self._clear_cuda_cache()
+
+        snap = self._cuda_memory_snapshot()
+        free_b, total_b, _, _, free_gb, _ = self._snap_unpack(snap)
+        total_gb = float(total_b) / (1024 ** 3) if total_b > 0 else 0.0
+        if job_id:
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "local_ollama_prepared": True,
+                    "local_ollama_free_gb_after_prepare": round(free_gb, 2) if free_b > 0 else 0.0,
+                    "local_ollama_total_gb_after_prepare": round(total_gb, 2) if total_gb > 0 else 0.0,
+                },
+            )
+        return free_gb, total_gb
+
+    def _raise_if_local_ollama_llm_is_blocked(self, job_id: int | None = None):
+        allowed, reason, free_gb, min_free_gb = self._get_local_ollama_vram_guard()
+        if allowed:
+            self._prepare_for_local_ollama_llm_work(job_id=job_id)
+            return
+
+        detail = {
+            "pipeline_gpu_work_active": "Local Ollama funny-moment explanation is blocked while pipeline GPU work is active.",
+            "non_local_ollama_provider": "",
+            "non_cuda_worker": "",
+        }.get(reason)
+        if not detail:
+            if free_gb is not None and min_free_gb is not None:
+                detail = (
+                    "Local Ollama funny-moment explanation is blocked until VRAM headroom recovers "
+                    f"({free_gb:.1f} GB free, needs at least {min_free_gb:.1f} GB)."
+                )
+            else:
+                detail = "Local Ollama funny-moment explanation is temporarily blocked."
+
+        if job_id:
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "local_ollama_blocked": True,
+                    "local_ollama_block_reason": reason,
+                    "local_ollama_free_gb": round(float(free_gb), 2) if free_gb is not None else None,
+                    "local_ollama_min_free_gb": round(float(min_free_gb), 2) if min_free_gb is not None else None,
+                },
+            )
+        raise RuntimeError(detail)
 
     def _get_llm_provider(self) -> str:
         provider = (os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
@@ -6085,7 +6394,14 @@ class IngestionService:
             session.refresh(video)
             return video
 
-    def explain_funny_moments(self, video_id: int, force: bool = False, limit: int | None = None) -> list[FunnyMoment]:
+    def explain_funny_moments(
+        self,
+        video_id: int,
+        force: bool = False,
+        limit: int | None = None,
+        *,
+        job_id: int | None = None,
+    ) -> list[FunnyMoment]:
         """Generate AI summaries for detected funny moments using transcript context + Ollama."""
         if limit is None:
             try:
@@ -6093,6 +6409,7 @@ class IngestionService:
             except Exception:
                 limit = 12
         limit = max(1, min(int(limit), 200))
+        self._raise_if_local_ollama_llm_is_blocked(job_id=job_id)
         self._set_funny_task_progress(
             video_id,
             task="explain",
@@ -6752,7 +7069,53 @@ class IngestionService:
 
     def process_funny_queue(self):
         """Process funny-moment analysis/explanation jobs."""
-        self._run_worker_loop("funny", FUNNY_JOB_TYPES, self._handle_funny_job)
+        log("Starting funny queue worker...")
+        sleep_empty = 2.0
+        while True:
+            try:
+                claimed = self._claim_next_queued_job({"funny_detect"})
+                if not claimed:
+                    allowed, reason, free_gb, min_free_gb = self._get_local_ollama_vram_guard()
+                    if not allowed and self._has_jobs_of_types({"funny_explain"}, {"queued"}):
+                        if reason == "pipeline_gpu_work_active":
+                            detail = "Waiting for pipeline GPU work to finish before local Ollama funny explanation."
+                        elif free_gb is not None and min_free_gb is not None:
+                            detail = (
+                                "Waiting for VRAM headroom before local Ollama funny explanation "
+                                f"({free_gb:.1f}/{min_free_gb:.1f} GB free)."
+                            )
+                        else:
+                            detail = "Waiting for local Ollama funny explanation resources."
+                        self._set_oldest_queued_job_status_detail("funny_explain", detail)
+                        time.sleep(sleep_empty)
+                        continue
+                    claimed = self._claim_next_queued_job({"funny_explain"})
+
+                if not claimed:
+                    time.sleep(sleep_empty)
+                    continue
+
+                job_id = claimed["id"]
+                video_id = claimed["video_id"]
+                job_type = claimed["job_type"]
+                payload = self._load_job_payload(claimed.get("payload_json"))
+                try:
+                    self._handle_funny_job(job_id, video_id, job_type, payload)
+                    self._mark_job_success(job_id)
+                except JobPausedException:
+                    log(f"Job {job_id} paused by user")
+                except Exception as e:
+                    log(f"funny job {job_id} failed: {e}")
+                    if is_verbose():
+                        import traceback
+                        traceback.print_exc()
+                    self._mark_job_failure(job_id, str(e))
+            except Exception as e:
+                log(f"funny worker loop error: {e}")
+                if is_verbose():
+                    import traceback
+                    traceback.print_exc()
+                time.sleep(3)
 
     def process_youtube_queue(self):
         """Process YouTube summary/chapter generation jobs."""

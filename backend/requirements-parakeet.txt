@@ -1,9 +1,9 @@
-# Optional: NVIDIA Parakeet transcription engine support
+# Optional NVIDIA Parakeet transcription engine support.
 #
-# Install inside the app venv:
+# Install inside the app venv after torch/torchaudio and backend/requirements.txt:
 #   pip install -r backend/requirements-parakeet.txt
 #
-# Chatalogue will automatically fall back to faster-whisper when Parakeet
-# dependencies are unavailable or Parakeet cannot return usable word timestamps.
+# Keep this pinned to the tested NeMo line; newer NeMo releases are not assumed
+# to be safer on Windows/macOS without validation.
 
-nemo_toolkit[asr]
+nemo_toolkit[asr]==2.7.0

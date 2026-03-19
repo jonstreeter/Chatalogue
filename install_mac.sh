@@ -76,14 +76,13 @@ echo "[2/8] Upgrading pip tooling..."
 "$VENV_PYTHON" -m pip install --upgrade pip wheel "setuptools<81"
 
 echo "[3/8] Installing torch + torchaudio..."
-"$PIP_CMD" install torch torchaudio
+"$PIP_CMD" install -r "$BACKEND_DIR/requirements-macos.txt"
 
 echo "[4/8] Installing core backend dependencies..."
-"$PIP_CMD" install fastapi uvicorn yt-dlp python-dotenv sqlmodel aiosqlite psycopg[binary] "setuptools<81" faster-whisper "ctranslate2<4.6" python-multipart sympy
+"$PIP_CMD" install -r "$BACKEND_DIR/requirements.txt"
 
 echo "[5/8] Installing pyannote stack..."
-"$PIP_CMD" install pyannote.audio --no-deps
-"$PIP_CMD" install asteroid-filterbanks einops huggingface-hub lightning matplotlib opentelemetry-api opentelemetry-exporter-otlp opentelemetry-sdk pyannote-core pyannote-database pyannote-metrics pyannote-pipeline pytorch-metric-learning rich safetensors soundfile torch-audiomentations torchmetrics torchcodec pyannoteai-sdk av onnxruntime tokenizers
+"$PIP_CMD" install pyannote.audio==4.0.4 --no-deps
 
 if [ "$INSTALL_PARAKEET" = "1" ]; then
   echo "[6/8] Installing optional Parakeet dependencies..."

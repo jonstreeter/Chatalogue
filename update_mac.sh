@@ -27,7 +27,7 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 # Pull latest changes
-echo "[1/4] Pulling latest changes from GitHub..."
+echo "[1/7] Pulling latest changes from GitHub..."
 cd "$ROOT_DIR"
 if ! git pull --ff-only; then
   echo
@@ -38,17 +38,36 @@ fi
 
 # Update backend dependencies
 echo
-echo "[2/4] Updating backend dependencies..."
+echo "[2/7] Updating torch + torchaudio..."
 if [ ! -x "$VENV_PYTHON" ]; then
   echo "[WARN] Backend venv not found. Run install_mac.sh first."
   exit 1
 fi
-"$PIP_CMD" install --upgrade --quiet fastapi uvicorn yt-dlp python-dotenv sqlmodel aiosqlite psycopg[binary] "setuptools<81" faster-whisper "ctranslate2<4.6" python-multipart sympy
-echo "   Backend dependencies up to date."
+"$PIP_CMD" install --upgrade --quiet -r "$BACKEND_DIR/requirements-macos.txt"
+echo "   Torch stack up to date."
+
+echo
+echo "[3/7] Updating shared backend dependencies..."
+"$PIP_CMD" install --upgrade --quiet -r "$BACKEND_DIR/requirements.txt"
+echo "   Shared backend dependencies up to date."
+
+echo
+echo "[4/7] Updating pyannote stack..."
+"$PIP_CMD" install --upgrade --quiet pyannote.audio==4.0.4 --no-deps
+echo "   Pyannote stack up to date."
+
+echo
+echo "[5/7] Updating optional Parakeet dependencies..."
+if "$PIP_CMD" show nemo-toolkit >/dev/null 2>&1; then
+  "$PIP_CMD" install --upgrade --quiet -r "$BACKEND_DIR/requirements-parakeet.txt"
+  echo "   Optional Parakeet dependencies up to date."
+else
+  echo "   Parakeet not installed; skipping optional NeMo stack."
+fi
 
 # Update frontend dependencies
 echo
-echo "[3/4] Updating frontend dependencies..."
+echo "[6/7] Updating frontend dependencies..."
 (
   cd "$FRONTEND_DIR"
   npm install --fund=false --audit=false --loglevel=warn
@@ -56,6 +75,6 @@ echo "[3/4] Updating frontend dependencies..."
 
 # Done
 echo
-echo "[4/4] Update complete!"
+echo "[7/7] Update complete!"
 echo
 echo "Run $ROOT_DIR/run_mac.sh to start Chatalogue."
