@@ -156,11 +156,22 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
     };
 
     useEffect(() => {
-        setSpeakers([]);
-        setHasMore(false);
-        setLoading(true);
-        void fetchSpeakers();
-        void fetchSpeakerCounts();
+        let cancelled = false;
+
+        const load = async () => {
+            setSpeakers([]);
+            setHasMore(false);
+            setLoading(true);
+            await fetchSpeakers();
+            if (!cancelled) {
+                void fetchSpeakerCounts();
+            }
+        };
+
+        void load();
+        return () => {
+            cancelled = true;
+        };
     }, [channelId, videoId]);
 
     const isUnknownSpeaker = (speaker: Speaker) => {

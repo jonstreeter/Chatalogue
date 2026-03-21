@@ -1,15 +1,15 @@
-import { useState, useRef, useEffect, memo } from 'react';
+import { useState, useRef, useEffect, memo, type SyntheticEvent } from 'react';
 import YouTube from 'react-youtube';
 import api from '../lib/api';
 import { toApiUrl } from '../lib/api';
-import type { Speaker } from '../types';
+import type { Speaker, SpeakerSample } from '../types';
 import { X, Check, Camera, Loader2, ChevronLeft, ChevronRight, UserMinus, UserPlus, GitMerge, Search, Trash2 } from 'lucide-react';
 
 const SAMPLE_STOP_EARLY_SECONDS = 0.35;
 
 interface SpeakerModalProps {
     speaker: Speaker;
-    initialSample?: any; // Optional initial sample to play
+    initialSample?: SpeakerSample; // Optional initial sample to play
     onClose: () => void;
     onUpdate: (updatedSpeaker: Speaker) => void;
     onMerge?: (mergedIntoSpeaker?: Speaker) => void; // Called after a successful merge to refresh parent data
@@ -23,7 +23,7 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
     const autoSelectNameRef = useRef(true);
 
     // Multiple samples state
-    const [samples, setSamples] = useState<any[]>(initialSample ? [initialSample] : []);
+    const [samples, setSamples] = useState<SpeakerSample[]>(initialSample ? [initialSample] : []);
     const [currentSampleIndex, setCurrentSampleIndex] = useState(0);
     const [loading, setLoading] = useState(!initialSample);
     const [player, setPlayer] = useState<any>(null);
@@ -42,6 +42,7 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
     const [cropStart, setCropStart] = useState<{ x: number, y: number } | null>(null);
     const [cropRect, setCropRect] = useState<{ x: number, y: number, w: number, h: number } | null>(null);
     const overlayRef = useRef<HTMLDivElement>(null);
+    const nativeMediaRef = useRef<HTMLMediaElement | null>(null);
 
     // Derived from current sample
     const currentSample = samples[currentSampleIndex];
@@ -49,13 +50,68 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
     const backendVideoId = currentSample?.video_id;
     const startTime = currentSample?.start_time || 0;
     const sampleText = currentSample?.text;
+    const sampleMediaSourceType = String(currentSample?.media_source_type || 'youtube').toLowerCase();
+    const isSampleYoutube = sampleMediaSourceType === 'youtube';
+    const isSampleLocal = sampleMediaSourceType === 'upload' || sampleMediaSourceType === 'tiktok';
+    const isSampleAudioOnly = isSampleLocal && String(currentSample?.media_kind || '').toLowerCase() === 'audio';
+    const previewMediaUrl = backendVideoId ? toApiUrl(`/videos/${backendVideoId}/media`) : '';
+    const previewKey = isSampleYoutube ? `yt-${videoId || backendVideoId || currentSampleIndex}` : `local-${backendVideoId || currentSampleIndex}`;
     const isGeneratedSpeakerName = (value?: string | null) => /^Speaker\s+\d+$/i.test((value || '').trim());
+    const canCaptureThumbnail = !!backendVideoId && !isSampleAudioOnly && (isSampleLocal || !!videoId);
+
+    const isSameSampleVideo = (a?: SpeakerSample, b?: SpeakerSample): boolean => {
+        if (!a || !b) return false;
+        if (a.video_id && b.video_id) return a.video_id === b.video_id;
+        const aSource = String(a.media_source_type || 'youtube').toLowerCase();
+        const bSource = String(b.media_source_type || 'youtube').toLowerCase();
+        return aSource === bSource && !!a.youtube_id && a.youtube_id === b.youtube_id;
+    };
+
+    const buildNativePlayerController = (media: HTMLMediaElement) => ({
+        getCurrentTime: () => media.currentTime || 0,
+        seekTo: (seconds: number) => {
+            media.currentTime = Math.max(0, seconds || 0);
+        },
+        playVideo: async () => {
+            try {
+                await media.play();
+            } catch {
+                // Ignore autoplay rejections inside the modal.
+            }
+        },
+        pauseVideo: () => media.pause(),
+    });
+
+    const getPreviewFrameRect = (): { x: number; y: number; w: number; h: number } | null => {
+        const overlay = overlayRef.current;
+        const media = nativeMediaRef.current;
+        if (!overlay || !media || !isSampleLocal || isSampleAudioOnly) {
+            return null;
+        }
+        const containerW = overlay.clientWidth;
+        const containerH = overlay.clientHeight;
+        const sourceW = media.videoWidth || 0;
+        const sourceH = media.videoHeight || 0;
+        if (!(containerW > 0 && containerH > 0 && sourceW > 0 && sourceH > 0)) {
+            return null;
+        }
+        const containerAspect = containerW / containerH;
+        const sourceAspect = sourceW / sourceH;
+        if (sourceAspect > containerAspect) {
+            const w = containerW;
+            const h = w / sourceAspect;
+            return { x: 0, y: (containerH - h) / 2, w, h };
+        }
+        const h = containerH;
+        const w = h * sourceAspect;
+        return { x: (containerW - w) / 2, y: 0, w, h };
+    };
 
     // Fetch multiple samples on mount (top 5 longest)
     useEffect(() => {
         const fetchSamples = async () => {
             try {
-                const res = await api.get<any[]>(`/speakers/${speaker.id}/samples?strategy=longest&count=5`);
+                const res = await api.get<SpeakerSample[]>(`/speakers/${speaker.id}/samples?strategy=longest&count=5`);
                 if (res.data && res.data.length > 0) {
                     // If we have an initial sample, append new ones that aren't duplicates
                     if (initialSample) {
@@ -126,7 +182,7 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
         if (currentSampleIndex > 0) {
             const newIndex = currentSampleIndex - 1;
             const nextSample = samples[newIndex];
-            const sameVideo = nextSample && currentSample && nextSample.youtube_id === currentSample.youtube_id;
+            const sameVideo = isSameSampleVideo(nextSample, currentSample);
             setCurrentSampleIndex(newIndex);
             setCropRect(null);
             setIsCropping(false);
@@ -147,7 +203,7 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
         if (currentSampleIndex < samples.length - 1) {
             const newIndex = currentSampleIndex + 1;
             const nextSample = samples[newIndex];
-            const sameVideo = nextSample && currentSample && nextSample.youtube_id === currentSample.youtube_id;
+            const sameVideo = isSameSampleVideo(nextSample, currentSample);
             setCurrentSampleIndex(newIndex);
             setCropRect(null);
             setIsCropping(false);
@@ -208,8 +264,17 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
     // Player Ready
     const onReady = (event: any) => {
         setPlayer(event.target);
-        event.target.seekTo(startTime);
+        event.target.seekTo(startTime, true);
         event.target.playVideo();
+    };
+
+    const handleNativeLoadedMetadata = (event: SyntheticEvent<HTMLMediaElement>) => {
+        const media = event.currentTarget;
+        nativeMediaRef.current = media;
+        const controller = buildNativePlayerController(media);
+        setPlayer(controller);
+        controller.seekTo(startTime);
+        void controller.playVideo();
     };
 
     // Keep playback scoped to the selected sample clip to avoid overlapping audio
@@ -258,6 +323,16 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
         const rect = overlayRef.current.getBoundingClientRect();
         const x = e.clientX - rect.left;
         const y = e.clientY - rect.top;
+        const frameRect = getPreviewFrameRect();
+
+        if (frameRect) {
+            const insideFrame =
+                x >= frameRect.x &&
+                x <= frameRect.x + frameRect.w &&
+                y >= frameRect.y &&
+                y <= frameRect.y + frameRect.h;
+            if (!insideFrame) return;
+        }
 
         // If clicking inside existing crop box, start dragging it
         if (cropRect && cropRect.w > 0 && isInsideCropRect(x, y)) {
@@ -276,11 +351,16 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
         const rect = overlayRef.current.getBoundingClientRect();
         const currentX = e.clientX - rect.left;
         const currentY = e.clientY - rect.top;
+        const frameRect = getPreviewFrameRect();
 
         // If dragging existing box, move it
         if (isDragging && cropRect && dragOffset) {
-            const newX = Math.max(0, Math.min(currentX - dragOffset.x, rect.width - cropRect.w));
-            const newY = Math.max(0, Math.min(currentY - dragOffset.y, rect.height - cropRect.h));
+            const minX = frameRect ? frameRect.x : 0;
+            const minY = frameRect ? frameRect.y : 0;
+            const maxX = frameRect ? frameRect.x + frameRect.w - cropRect.w : rect.width - cropRect.w;
+            const maxY = frameRect ? frameRect.y + frameRect.h - cropRect.h : rect.height - cropRect.h;
+            const newX = Math.max(minX, Math.min(currentX - dragOffset.x, maxX));
+            const newY = Math.max(minY, Math.min(currentY - dragOffset.y, maxY));
             setCropRect({ ...cropRect, x: newX, y: newY });
             return;
         }
@@ -298,12 +378,16 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
         const y = deltaY < 0 ? cropStart.y - size : cropStart.y;
         // Clamp square selection inside the overlay bounds so backend crop coords
         // never exceed 0..1, which would make ffmpeg crop fail.
-        const clampedX = Math.max(0, Math.min(x, rect.width));
-        const clampedY = Math.max(0, Math.min(y, rect.height));
+        const minX = frameRect ? frameRect.x : 0;
+        const minY = frameRect ? frameRect.y : 0;
+        const maxWidth = frameRect ? frameRect.w : rect.width;
+        const maxHeight = frameRect ? frameRect.h : rect.height;
+        const clampedX = Math.max(minX, Math.min(x, minX + maxWidth));
+        const clampedY = Math.max(minY, Math.min(y, minY + maxHeight));
         const maxSizeByBounds = Math.max(0, Math.min(
             size,
-            rect.width - clampedX,
-            rect.height - clampedY
+            minX + maxWidth - clampedX,
+            minY + maxHeight - clampedY
         ));
 
         setCropRect({ x: clampedX, y: clampedY, w: maxSizeByBounds, h: maxSizeByBounds });
@@ -325,24 +409,29 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
             // Convert to relative 0-1 coords
             const containerW = overlayRef.current.clientWidth;
             const containerH = overlayRef.current.clientHeight;
+            const frameRect = getPreviewFrameRect();
 
             const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
             const minPx = 12;
+            const cropMinX = frameRect ? frameRect.x : 0;
+            const cropMinY = frameRect ? frameRect.y : 0;
+            const cropMaxW = frameRect ? frameRect.w : containerW;
+            const cropMaxH = frameRect ? frameRect.h : containerH;
             const safeRect = {
-                x: Math.max(0, Math.min(cropRect.x, containerW - minPx)),
-                y: Math.max(0, Math.min(cropRect.y, containerH - minPx)),
-                w: Math.max(minPx, Math.min(cropRect.w, containerW)),
-                h: Math.max(minPx, Math.min(cropRect.h, containerH))
+                x: Math.max(cropMinX, Math.min(cropRect.x, cropMinX + cropMaxW - minPx)),
+                y: Math.max(cropMinY, Math.min(cropRect.y, cropMinY + cropMaxH - minPx)),
+                w: Math.max(minPx, Math.min(cropRect.w, cropMaxW)),
+                h: Math.max(minPx, Math.min(cropRect.h, cropMaxH))
             };
             // Ensure width/height do not overflow the overlay bounds
-            safeRect.w = Math.min(safeRect.w, containerW - safeRect.x);
-            safeRect.h = Math.min(safeRect.h, containerH - safeRect.y);
+            safeRect.w = Math.min(safeRect.w, cropMinX + cropMaxW - safeRect.x);
+            safeRect.h = Math.min(safeRect.h, cropMinY + cropMaxH - safeRect.y);
 
             const relCoords = {
-                x: clamp01(safeRect.x / containerW),
-                y: clamp01(safeRect.y / containerH),
-                w: clamp01(safeRect.w / containerW),
-                h: clamp01(safeRect.h / containerH)
+                x: frameRect ? clamp01((safeRect.x - frameRect.x) / frameRect.w) : clamp01(safeRect.x / containerW),
+                y: frameRect ? clamp01((safeRect.y - frameRect.y) / frameRect.h) : clamp01(safeRect.y / containerH),
+                w: frameRect ? clamp01(safeRect.w / frameRect.w) : clamp01(safeRect.w / containerW),
+                h: frameRect ? clamp01(safeRect.h / frameRect.h) : clamp01(safeRect.h / containerH)
             };
 
             const res = await api.post(`/speakers/${speaker.id}/thumbnail/extract`, {
@@ -391,10 +480,10 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
                         <div className="text-white flex items-center gap-2">
                             <Loader2 className="animate-spin" /> Loading Video...
                         </div>
-                    ) : videoId ? (
+                    ) : isSampleYoutube && videoId ? (
                         <div className="relative w-full aspect-video group shadow-lg mx-auto">
                             <YouTube
-                                key={videoId || `sample-${currentSampleIndex}`}
+                                key={previewKey}
                                 videoId={videoId}
                                 className="w-full h-full"
                                 iframeClassName="w-full h-full"
@@ -472,6 +561,97 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
                                         </>
                                     )}
                                 </div>
+                            )}
+                        </div>
+                    ) : isSampleLocal && backendVideoId ? (
+                        <div className="relative w-full aspect-video group shadow-lg mx-auto">
+                            {isSampleAudioOnly ? (
+                                <div className="flex h-full w-full flex-col items-center justify-center gap-6 px-8 text-center text-white">
+                                    <div>
+                                        <p className="text-lg font-semibold">Audio preview available</p>
+                                        <p className="mt-2 text-sm text-white/70">
+                                            This sample is from audio-only media, so a face thumbnail cannot be captured.
+                                        </p>
+                                    </div>
+                                    <audio
+                                        key={previewKey}
+                                        controls
+                                        className="w-full max-w-xl"
+                                        src={previewMediaUrl}
+                                        onLoadedMetadata={handleNativeLoadedMetadata}
+                                    />
+                                </div>
+                            ) : (
+                                <>
+                                    <video
+                                        key={previewKey}
+                                        controls={!isCropping}
+                                        playsInline
+                                        className="w-full h-full bg-black object-contain"
+                                        src={previewMediaUrl}
+                                        onLoadedMetadata={handleNativeLoadedMetadata}
+                                    />
+
+                                    {/* Crop Overlay */}
+                                    {isCropping && (
+                                        <div
+                                            ref={overlayRef}
+                                            className="absolute inset-0 z-10 cursor-crosshair"
+                                            onMouseDown={handleMouseDown}
+                                            onMouseMove={handleMouseMove}
+                                            onMouseUp={handleMouseUp}
+                                            onMouseLeave={handleMouseUp}
+                                        >
+                                            {!cropRect && (
+                                                <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
+                                                    <div className="text-white text-center">
+                                                        <p className="text-lg font-medium">Draw a square around the face</p>
+                                                        <p className="text-sm opacity-75 mt-1">Click and drag to select</p>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {cropRect && cropRect.w > 0 && (
+                                                <>
+                                                    <div
+                                                        className="absolute border-4 border-green-400 rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.6)] cursor-move"
+                                                        style={{
+                                                            left: cropRect.x,
+                                                            top: cropRect.y,
+                                                            width: cropRect.w,
+                                                            height: cropRect.h
+                                                        }}
+                                                    />
+                                                    <div
+                                                        className="absolute flex gap-2 z-20"
+                                                        style={{
+                                                            left: cropRect.x,
+                                                            top: cropRect.y + cropRect.h + 8
+                                                        }}
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                    >
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); handleExtractThumbnail(); }}
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                            disabled={extracting}
+                                                            className="px-4 py-2 bg-green-500 text-white rounded-lg font-medium hover:bg-green-600 disabled:opacity-50 flex items-center gap-2 shadow-lg"
+                                                        >
+                                                            {extracting ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />}
+                                                            Save
+                                                        </button>
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); setIsCropping(false); setCropRect(null); }}
+                                                            onMouseDown={(e) => e.stopPropagation()}
+                                                            className="px-4 py-2 bg-red-500 text-white rounded-lg font-medium hover:bg-red-600 flex items-center gap-2 shadow-lg"
+                                                        >
+                                                            <X size={16} /> Cancel
+                                                        </button>
+                                                    </div>
+                                                </>
+                                            )}
+                                        </div>
+                                    )}
+                                </>
                             )}
                         </div>
                     ) : (
@@ -694,17 +874,25 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
                                 {/* Camera Button */}
                                 <button
                                     onClick={() => {
+                                        if (!canCaptureThumbnail) return;
                                         setIsCropping(!isCropping);
                                         if (!isCropping && player) {
                                             player.pauseVideo();
                                         }
                                         setCropRect(null);
                                     }}
+                                    disabled={!canCaptureThumbnail}
                                     className={`absolute top-0 right-0 p-2 rounded-full shadow-md transition-all z-10 ${isCropping
                                         ? 'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100'
-                                        : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                                        : canCaptureThumbnail
+                                            ? 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                                            : 'bg-slate-100 text-slate-300 border border-slate-200 cursor-not-allowed'
                                         }`}
-                                    title={isCropping ? "Cancel Crop" : "Capture New Thumbnail"}
+                                    title={!canCaptureThumbnail
+                                        ? "Thumbnail capture requires a video sample"
+                                        : isCropping
+                                            ? "Cancel Crop"
+                                            : "Capture New Thumbnail"}
                                 >
                                     {isCropping ? <X size={16} /> : <Camera size={16} />}
                                 </button>
@@ -724,6 +912,11 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
                                     </div>
                                 )}
                             </div>
+                            {!canCaptureThumbnail && (
+                                <p className="text-xs text-slate-500 text-center">
+                                    This sample does not have playable video, so thumbnail capture is unavailable.
+                                </p>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -751,6 +944,8 @@ function areSpeakerModalPropsEqual(prev: SpeakerModalProps, next: SpeakerModalPr
             !!nextSample &&
             prevSample.video_id === nextSample.video_id &&
             prevSample.youtube_id === nextSample.youtube_id &&
+            prevSample.media_source_type === nextSample.media_source_type &&
+            prevSample.media_kind === nextSample.media_kind &&
             prevSample.start_time === nextSample.start_time &&
             prevSample.end_time === nextSample.end_time);
 

@@ -34,6 +34,11 @@ for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":5173.*LISTENING" 2^>nul') d
 )
 timeout /t 2 /nobreak >nul
 
+:: Reset per-run launcher logs so stale tracebacks from an older session do not
+:: trip the readiness probe for the current startup attempt.
+if exist "%BACKEND_LOG%" del /f /q "%BACKEND_LOG%" >nul 2>&1
+if exist "%FRONTEND_LOG%" del /f /q "%FRONTEND_LOG%" >nul 2>&1
+
 :: Ensure backend/frontend dependencies exist
 IF NOT EXIST "%VENV_PYTHON%" (
     echo Backend venv missing. Running install_windows.bat...

@@ -1,5 +1,26 @@
 # Future Features
 
+## Implemented Since Original Draft
+
+### Preliminary YouTube-Caption Placeholder Transcript
+- Status: implemented in March 2026.
+- New channel refresh and manual episode ingest now attempt to fetch available YouTube captions and store them as searchable placeholder transcript segments.
+- Placeholder transcripts are marked in the UI until local transcription/diarization completes.
+- Final local transcription replaces the placeholder transcript automatically.
+
+### Secure External Access Mode (Gradio-Style Sharing)
+- Status: implemented in March 2026.
+- Chatalogue can now run in LAN-share mode or public tunnel mode with short-lived share sessions.
+- Share sessions support token/password protection, IP allowlists, expiry, audit logging, and operator controls in Settings.
+- Remote sessions can access the main app and backend-streamed local media through the share URL.
+
+### TikTok Channel Source Ingest
+- Status: core implementation completed in March 2026; hardening remains.
+- TikTok creator channels and individual TikTok videos can now be added and processed through the existing local-media pipeline.
+- TikTok media is downloaded locally and played through the native media player instead of an embed, preserving word-level transcript sync and seek behavior.
+- TikTok profile refresh now imports creator-feed videos, resolves creator artwork metadata, and supports placeholder captions when TikTok subtitle metadata is available.
+- Remaining work is mostly platform hardening: rate-limit/auth edge cases, broader validation on live creator feeds, and further UI polish.
+
 ## 1. Speaker Wordcloud Tab
 - Add an automated wordcloud generation tab on each speaker profile.
 - Candidate implementation: [`minimaxir/stylecloud`](https://github.com/minimaxir/stylecloud) or a similar library.
@@ -15,11 +36,6 @@
 - Implement semantic search across episodes/transcripts using embedding similarity.
 - Goal: support meaning-based discovery beyond exact keyword matches.
 
-## 4. Preliminary YouTube-Caption Placeholder Transcript
-- On new channel or episode ingest, fetch available YouTube captions and store a preliminary transcript as a searchable placeholder.
-- Mark placeholder transcripts clearly in the UI until local high-quality transcription/diarization completes.
-- Automatically replace placeholder content when local transcription finishes.
-
 ## 5. AI Voice Clone Per Speaker
 - Add a feature to create an AI voice clone for a selected speaker profile.
 - Define guardrails for consent/authorization and provenance tracking before enabling generation.
@@ -34,11 +50,6 @@
 - Incorporate visual lip-reading signals alongside audio ASR to improve transcription robustness in noisy/crosstalk conditions.
 - Detect and track speaker faces during playback to improve speaker identity linkage and auto-generate better speaker thumbnails.
 - Aggregate speaker face crops across multiple videos to build a curated dataset for optional AI LoRA model training workflows.
-
-## 8. Secure External Access Mode (Gradio-Style Sharing)
-- Add an opt-in way to expose the local Chatalogue server externally, similar to Gradio share links.
-- Support short-lived public URLs/tunnels with clear status, manual stop control, and expiry defaults.
-- Include access controls (token/password/IP allowlist), audit logging, and explicit warning banners while sharing is enabled.
 
 ## 9. Intelligent Video Editing via Transcript Instructions
 - Add support for AI-driven video editing directly from word-level diarized transcripts.

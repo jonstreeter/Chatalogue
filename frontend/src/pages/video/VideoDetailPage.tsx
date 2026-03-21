@@ -1,12 +1,25 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { startTransition, useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import YouTube from 'react-youtube';
 import api from '../../lib/api';
 import { toApiUrl } from '../../lib/api';
-import type { Video, TranscriptSegment, Clip, Speaker, FunnyMoment, VideoChapterSuggestion, VideoDescriptionRevision, ClipExportArtifact } from '../../types';
+import type { Video, TranscriptSegment, Clip, Speaker, SpeakerSample, FunnyMoment, VideoChapterSuggestion, VideoDescriptionRevision, ClipExportArtifact } from '../../types';
 import { Loader2, ArrowLeft, FileText, Scissors, Users, X, CheckCircle2, Play, Pause, Plus, Trash2, Mic, Search, ChevronUp, ChevronDown, GitMerge, RotateCcw, Eraser, AudioLines, Smile, RefreshCw, Bot, Copy, Pencil, Save, XCircle, Download, Upload, Clock } from 'lucide-react';
 import { SpeakerList } from '../../components/SpeakerList';
 import { SpeakerModal } from '../../components/SpeakerModal';
+
+type UnifiedPlayer = {
+    getCurrentTime?: () => number;
+    seekTo?: (seconds: number, allowSeekAhead?: boolean) => void;
+    playVideo?: () => void | Promise<void>;
+    pauseVideo?: () => void;
+    getPlaybackRate?: () => number;
+    setPlaybackRate?: (rate: number) => void;
+    getPlayerState?: () => number;
+};
+
+const PLAYER_UI_UPDATE_INTERVAL_MS = 120;
+const PLAYER_UI_MIN_DELTA_SECONDS = 0.12;
 
 export function VideoDetailPage() {
     const { id } = useParams<{ id: string }>();
@@ -29,8 +42,12 @@ export function VideoDetailPage() {
     const lastAutoScrollSegIdRef = useRef<number | null>(null);
 
     // Player State
-    const [player, setPlayer] = useState<any>(null);
+    const [player, setPlayer] = useState<UnifiedPlayer | null>(null);
     const [currentTime, setCurrentTime] = useState(0);
+    const [playbackRate, setPlaybackRate] = useState(1);
+    const nativeMediaRef = useRef<HTMLMediaElement | null>(null);
+    const lastCurrentTimeUiUpdateMsRef = useRef(0);
+    const lastPublishedCurrentTimeRef = useRef(0);
     const playerClockRef = useRef<{
         mediaTime: number;
         wallTimeMs: number;
@@ -50,7 +67,7 @@ export function VideoDetailPage() {
 
     // Speaker Modal State
     const [selectedSpeaker, setSelectedSpeaker] = useState<Speaker | null>(null);
-    const [initialSample, setInitialSample] = useState<any>(null);
+    const [initialSample, setInitialSample] = useState<SpeakerSample | null>(null);
     const speakerDetailCacheRef = useRef<Map<number, Speaker>>(new Map());
 
     // Clips State
@@ -127,6 +144,14 @@ export function VideoDetailPage() {
     const [splittingSegmentId, setSplittingSegmentId] = useState<number | null>(null);
     const activeEditingClip = editingClipId != null ? (clips.find(c => c.id === editingClipId) || null) : null;
     const showClipEditorMain = activeTab === 'clips' && !!activeEditingClip && !!clipEditorDraft;
+    const mediaSourceType = String(video?.media_source_type || 'youtube').toLowerCase();
+    const isYoutubeMedia = mediaSourceType === 'youtube';
+    const isUploadedMedia = mediaSourceType === 'upload';
+    const isTikTokMedia = mediaSourceType === 'tiktok';
+    const isLocallyHostedMedia = isUploadedMedia || isTikTokMedia;
+    const isUploadedAudio = isLocallyHostedMedia && String(video?.media_kind || '').toLowerCase() === 'audio';
+    const canShowYoutubeTab = isYoutubeMedia;
+    const localMediaPending = isTikTokMedia && ['pending', 'queued'].includes(String(video?.status || '').toLowerCase());
 
     const fetchFunnyMoments = async () => {
         if (!id) return;
@@ -205,6 +230,25 @@ export function VideoDetailPage() {
         });
     };
 
+    const publishCurrentTime = (mediaTime: number, options?: { force?: boolean }) => {
+        if (!Number.isFinite(mediaTime)) return;
+        const now = performance.now();
+        const force = !!options?.force;
+        const lastUpdateMs = lastCurrentTimeUiUpdateMsRef.current;
+        const lastPublished = lastPublishedCurrentTimeRef.current;
+
+        if (!force) {
+            if ((now - lastUpdateMs) < PLAYER_UI_UPDATE_INTERVAL_MS) return;
+            if (Math.abs(mediaTime - lastPublished) < PLAYER_UI_MIN_DELTA_SECONDS) return;
+        }
+
+        lastCurrentTimeUiUpdateMsRef.current = now;
+        lastPublishedCurrentTimeRef.current = mediaTime;
+        startTransition(() => {
+            setCurrentTime(prev => (Math.abs(prev - mediaTime) >= 0.01 ? mediaTime : prev));
+        });
+    };
+
     const samplePlayerClock = (ytPlayer: any) => {
         if (!ytPlayer) return;
         try {
@@ -225,7 +269,7 @@ export function VideoDetailPage() {
                 playbackRate: nextRate,
                 playerState: nextState,
             };
-            setCurrentTime(prev => (Math.abs(prev - mediaTime) >= 0.015 ? mediaTime : prev));
+            publishCurrentTime(mediaTime);
         } catch {
             // Ignore transient iframe/player API failures.
         }
@@ -399,6 +443,7 @@ export function VideoDetailPage() {
     const onPlayerReady = (event: any) => {
         setPlayer(event.target);
         samplePlayerClock(event.target);
+        setPlaybackRate(Number(event?.target?.getPlaybackRate?.()) || 1);
         if (!initialSeekDoneRef.current && Number.isFinite(requestedJumpTime) && requestedJumpTime >= 0) {
             initialSeekDoneRef.current = true;
             window.setTimeout(() => {
@@ -436,7 +481,7 @@ export function VideoDetailPage() {
             mediaTime,
             wallTimeMs: now,
         };
-        setCurrentTime(mediaTime);
+        publishCurrentTime(mediaTime, { force: true });
     };
 
     const onPlayerPlaybackRateChange = (event: any) => {
@@ -456,7 +501,8 @@ export function VideoDetailPage() {
             mediaTime,
             wallTimeMs: now,
         };
-        setCurrentTime(mediaTime);
+        setPlaybackRate(rate);
+        publishCurrentTime(mediaTime, { force: true });
     };
 
     const handleSeek = (time: number) => {
@@ -476,9 +522,85 @@ export function VideoDetailPage() {
                 playerState: 1,
                 playbackRate: Number.isFinite(rate) && rate > 0 ? rate : playerClockRef.current.playbackRate,
             };
-            setCurrentTime(time);
+            publishCurrentTime(time, { force: true });
         } catch (e) {
             console.warn('Failed to seek video player', e);
+        }
+    };
+
+    useEffect(() => {
+        if (isLocallyHostedMedia && activeTab === 'youtube') {
+            setActiveTab('transcript');
+        }
+    }, [activeTab, isLocallyHostedMedia]);
+
+    const buildNativePlayerAdapter = (element: HTMLMediaElement): UnifiedPlayer => ({
+        getCurrentTime: () => Number(element.currentTime || 0),
+        seekTo: (seconds: number) => {
+            element.currentTime = Math.max(0, Number(seconds || 0));
+        },
+        playVideo: () => {
+            void element.play().catch(() => {});
+        },
+        pauseVideo: () => {
+            element.pause();
+        },
+        getPlaybackRate: () => Number(element.playbackRate || 1),
+        setPlaybackRate: (rate: number) => {
+            element.playbackRate = rate;
+        },
+        getPlayerState: () => {
+            if (element.ended) return 0;
+            return element.paused ? 2 : 1;
+        },
+    });
+
+    const syncNativePlayerClock = (element: HTMLMediaElement) => {
+        const nextRate = Number(element.playbackRate || 1);
+        const nextState = element.ended ? 0 : (element.paused ? 2 : 1);
+        const mediaTime = Number(element.currentTime || 0);
+        playerClockRef.current = {
+            mediaTime,
+            wallTimeMs: performance.now(),
+            playbackRate: nextRate,
+            playerState: nextState,
+        };
+        setPlaybackRate(nextRate);
+        publishCurrentTime(mediaTime, { force: true });
+    };
+
+    const handleNativeMediaReady = (element: HTMLMediaElement) => {
+        nativeMediaRef.current = element;
+        const adapter = buildNativePlayerAdapter(element);
+        setPlayer(adapter);
+        syncNativePlayerClock(element);
+        if (!initialSeekDoneRef.current && Number.isFinite(requestedJumpTime) && requestedJumpTime >= 0) {
+            initialSeekDoneRef.current = true;
+            window.setTimeout(() => {
+                try {
+                    element.currentTime = Math.max(0, requestedJumpTime);
+                    element.pause();
+                    syncNativePlayerClock(element);
+                } catch (e) {
+                    console.warn('Initial timestamp seek failed', e);
+                    initialSeekDoneRef.current = false;
+                }
+            }, 120);
+        }
+    };
+
+    const handlePlayerRateChange = (rate: number) => {
+        const nextRate = Number(rate);
+        if (!Number.isFinite(nextRate) || nextRate <= 0 || !player) return;
+        try {
+            player.setPlaybackRate?.(nextRate);
+            if (nativeMediaRef.current) {
+                nativeMediaRef.current.playbackRate = nextRate;
+                syncNativePlayerClock(nativeMediaRef.current);
+            }
+            setPlaybackRate(nextRate);
+        } catch (e) {
+            console.warn('Failed to change playback rate', e);
         }
     };
 
@@ -491,6 +613,29 @@ export function VideoDetailPage() {
             ? `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
             : `${m}:${s.toString().padStart(2, '0')}`;
     };
+
+    const placeholderTranscriptSourceLabel = (() => {
+        const source = String(video?.transcript_source || '').toLowerCase();
+        if (source === 'youtube_auto_captions') return 'YouTube auto-captions';
+        if (source === 'youtube_subtitles') return 'YouTube captions';
+        if (source === 'tiktok_auto_captions') return 'TikTok auto-captions';
+        if (source === 'tiktok_subtitles') return 'TikTok captions';
+        return 'Preliminary captions';
+    })();
+    const placeholderTranscriptLanguage = String(video?.transcript_language || '').trim();
+    const isPlaceholderTranscript = !!video?.transcript_is_placeholder && segments.length > 0;
+    const accessRestrictionReason = String(video?.access_restriction_reason || '').trim();
+    const accessRestrictionLabel = (() => {
+        const reason = accessRestrictionReason.toLowerCase();
+        if (reason.includes('members-only') || reason.includes('members only')) return 'Members-only video';
+        if (reason.includes('private')) return 'Private video';
+        if (reason.includes('sign in') || reason.includes('auth')) return 'Sign-in required';
+        return 'Access restricted';
+    })();
+    const localMediaUrl = useMemo(() => {
+        if (!video || !isLocallyHostedMedia) return '';
+        return toApiUrl(`/videos/${video.id}/media`);
+    }, [isLocallyHostedMedia, video]);
 
     const TRANSCRIPT_HIGHLIGHT_LEAD_SECONDS = 0.08;
     const TRANSCRIPT_SEGMENT_TRAIL_SECONDS = 0.05;
@@ -889,11 +1034,14 @@ export function VideoDetailPage() {
         pauseMainPreview();
 
         if (segment && video) {
-            const sample = {
+            const sample: SpeakerSample = {
                 youtube_id: video.youtube_id,
                 video_id: video.id,
                 start_time: segment.start_time,
-                text: segment.text
+                end_time: segment.end_time,
+                text: segment.text,
+                media_source_type: video.media_source_type,
+                media_kind: video.media_kind,
             };
             setInitialSample(sample);
         } else {
@@ -1971,6 +2119,116 @@ export function VideoDetailPage() {
                 ? 'Re-generating global humor context and joke explanations...'
                 : 'Generating global humor context and joke explanations...'))
             : null;
+    const renderPlaybackRateControl = () => (
+        <div className="mt-2 flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 shadow-sm">
+            <span>
+                {isUploadedMedia
+                    ? (isUploadedAudio ? 'Uploaded audio' : 'Uploaded video')
+                    : isTikTokMedia
+                        ? 'TikTok local media'
+                        : 'YouTube player'}
+            </span>
+            <div className="flex items-center gap-2">
+                <span>Speed</span>
+                <select
+                    value={String(playbackRate || 1)}
+                    onChange={(e) => handlePlayerRateChange(Number(e.target.value))}
+                    className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                >
+                    {[0.75, 1, 1.25, 1.5, 1.75, 2].map(rate => (
+                        <option key={rate} value={rate}>{rate}x</option>
+                    ))}
+                </select>
+            </div>
+        </div>
+    );
+
+    const renderMainPlayer = (containerClassName: string) => (
+        <>
+            <div className={containerClassName}>
+                {isLocallyHostedMedia ? (
+                    localMediaPending ? (
+                        <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(circle_at_top,rgba(236,72,153,.22),transparent_45%),linear-gradient(135deg,#111827,#1f2937)] px-8 text-white">
+                            <div className="max-w-lg rounded-2xl border border-white/10 bg-white/10 p-6 text-center backdrop-blur-sm">
+                                <div className="text-sm font-semibold">Local TikTok media is not ready yet</div>
+                                <div className="mt-2 text-xs leading-relaxed text-white/75">
+                                    Playback switches to the native player after the TikTok file has been downloaded locally. Start processing or wait for the download stage to complete.
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                    isUploadedAudio ? (
+                        <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(circle_at_top,rgba(59,130,246,.24),transparent_45%),linear-gradient(135deg,#0f172a,#1e293b)] px-8">
+                            <div className="w-full max-w-2xl rounded-2xl border border-white/10 bg-white/10 p-6 text-white backdrop-blur-sm">
+                                <div className="mb-4 flex items-center gap-3">
+                                    <AudioLines size={18} className="text-blue-200" />
+                                    <div>
+                                        <div className="text-sm font-semibold">Audio Episode</div>
+                                        <div className="text-xs text-blue-100/80">{video?.title}</div>
+                                    </div>
+                                </div>
+                                <audio
+                                    ref={(element) => {
+                                        nativeMediaRef.current = element;
+                                    }}
+                                    src={localMediaUrl}
+                                    controls
+                                    preload="metadata"
+                                    className="w-full"
+                                    onLoadedMetadata={(e) => handleNativeMediaReady(e.currentTarget)}
+                                    onTimeUpdate={(e) => syncNativePlayerClock(e.currentTarget)}
+                                    onPlay={(e) => syncNativePlayerClock(e.currentTarget)}
+                                    onPause={(e) => syncNativePlayerClock(e.currentTarget)}
+                                    onRateChange={(e) => syncNativePlayerClock(e.currentTarget)}
+                                    onEnded={(e) => syncNativePlayerClock(e.currentTarget)}
+                                />
+                            </div>
+                        </div>
+                    ) : (
+                        <video
+                            ref={(element) => {
+                                nativeMediaRef.current = element;
+                            }}
+                            src={localMediaUrl}
+                            controls
+                            preload="metadata"
+                            className="h-full w-full bg-black"
+                            onLoadedMetadata={(e) => handleNativeMediaReady(e.currentTarget)}
+                            onTimeUpdate={(e) => syncNativePlayerClock(e.currentTarget)}
+                            onPlay={(e) => syncNativePlayerClock(e.currentTarget)}
+                            onPause={(e) => syncNativePlayerClock(e.currentTarget)}
+                            onRateChange={(e) => syncNativePlayerClock(e.currentTarget)}
+                            onEnded={(e) => syncNativePlayerClock(e.currentTarget)}
+                        />
+                    )
+                    )
+                ) : (
+                    <YouTube
+                        videoId={video?.youtube_id || ''}
+                        className="w-full h-full"
+                        iframeClassName="w-full h-full"
+                        onReady={onPlayerReady}
+                        onStateChange={onPlayerStateChange}
+                        onPlaybackRateChange={onPlayerPlaybackRateChange}
+                        opts={{
+                            height: '100%',
+                            width: '100%',
+                            playerVars: {
+                                autoplay: 0,
+                                modestbranding: 1,
+                                rel: 0,
+                                ...(Number.isFinite(requestedJumpTime) && requestedJumpTime >= 0
+                                    ? { start: Math.floor(requestedJumpTime) }
+                                    : {}),
+                            },
+                        }}
+                    />
+                )}
+            </div>
+            {renderPlaybackRateControl()}
+        </>
+    );
+
     return (
         <div className="flex h-[calc(100vh-64px)] overflow-hidden bg-slate-50">
             {/* Left Column: Tools */}
@@ -1995,13 +2253,15 @@ export function VideoDetailPage() {
                     >
                         <Users size={16} /> Speakers
                     </button>
-                    <button
-                        onClick={() => setActiveTab('youtube')}
-                        className={`py-3 px-3 text-sm font-medium flex items-center justify-center gap-2 border-b-2 transition-colors ${activeTab === 'youtube' ? 'border-emerald-500 text-emerald-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'} flex-1`}
-                        title="AI-generated YouTube summary and chapters"
-                    >
-                        <Bot size={16} /> YouTube
-                    </button>
+                    {canShowYoutubeTab && (
+                        <button
+                            onClick={() => setActiveTab('youtube')}
+                            className={`py-3 px-3 text-sm font-medium flex items-center justify-center gap-2 border-b-2 transition-colors ${activeTab === 'youtube' ? 'border-emerald-500 text-emerald-600' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'} flex-1`}
+                            title="AI-generated YouTube summary and chapters"
+                        >
+                            <Bot size={16} /> YouTube
+                        </button>
+                    )}
                 </div>
 
                 {/* Content Area */}
@@ -2057,6 +2317,20 @@ export function VideoDetailPage() {
                                             </span>
                                         </label>
                                     </div>
+                                    {isPlaceholderTranscript && (
+                                        <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                            <Clock size={14} className="mt-0.5 shrink-0 text-amber-600" />
+                                            <div>
+                                                <div className="font-semibold">
+                                                    {placeholderTranscriptSourceLabel}
+                                                    {placeholderTranscriptLanguage ? ` (${placeholderTranscriptLanguage})` : ''}
+                                                </div>
+                                                <div className="mt-0.5 text-amber-800/90">
+                                                    This searchable transcript is a temporary placeholder and will be replaced automatically after local transcription and diarization finish.
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             )}
                             <div
@@ -2070,7 +2344,14 @@ export function VideoDetailPage() {
                                             <FileText size={28} className="text-slate-300" />
                                         </div>
                                         <h3 className="text-sm font-semibold text-slate-600 mb-1">No transcript available</h3>
-                                        {video && !video.processed && video.status !== 'queued' && video.status !== 'running' && video.status !== 'downloading' && video.status !== 'transcribing' && video.status !== 'diarizing' ? (
+                                        {video?.access_restricted ? (
+                                            <div className="w-full max-w-md rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-left text-sm text-slate-700">
+                                                <div className="font-semibold text-slate-800">{accessRestrictionLabel}</div>
+                                                <div className="mt-1 text-xs leading-relaxed text-slate-500">
+                                                    {accessRestrictionReason || 'This episode is not accessible with the current YouTube session, so it will be skipped instead of being downloaded or processed.'}
+                                                </div>
+                                            </div>
+                                        ) : video && !video.processed && video.status !== 'queued' && video.status !== 'running' && video.status !== 'downloading' && video.status !== 'transcribing' && video.status !== 'diarizing' ? (
                                             <>
                                                 <p className="text-xs text-slate-400 mb-5 text-center">Start a transcription job to generate the transcript for this episode.</p>
                                                 <button
@@ -2079,9 +2360,9 @@ export function VideoDetailPage() {
                                                         try {
                                                             await api.post(`/videos/${video.id}/process`);
                                                             setVideo({ ...video, status: 'queued' });
-                                                        } catch (e) {
+                                                        } catch (e: any) {
                                                             console.error('Failed to start transcription:', e);
-                                                            alert('Failed to start transcription');
+                                                            alert(e?.response?.data?.detail || 'Failed to start transcription');
                                                         } finally {
                                                             setStartingTranscription(false);
                                                         }
@@ -3000,22 +3281,24 @@ export function VideoDetailPage() {
             {/* Right Column: Video Stage */}
             <div className="flex-1 bg-slate-100 flex flex-col min-w-0 relative">
                 {/* Header */}
-                <div className="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-4 shadow-sm z-0">
-                    <button onClick={() => navigate(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-700 transition-colors">
-                        <ArrowLeft size={20} />
-                    </button>
-                    <div className="flex-1 min-w-0">
-                        <h1 className="font-semibold text-slate-800 line-clamp-1">{video.title}</h1>
-                        <p className="text-xs text-slate-500">{new Date(video.published_at || '').toLocaleDateString()}</p>
+                <div className="bg-white border-b border-slate-200 px-4 sm:px-6 py-3 flex flex-col gap-3 shadow-sm z-0">
+                    <div className="flex items-center gap-3 min-w-0">
+                        <button onClick={() => navigate(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-700 transition-colors shrink-0">
+                            <ArrowLeft size={20} />
+                        </button>
+                        <div className="flex-1 min-w-0">
+                            <h1 className="font-semibold text-slate-800 line-clamp-1">{video.title}</h1>
+                            <p className="text-xs text-slate-500">{new Date(video.published_at || '').toLocaleDateString()}</p>
+                        </div>
                     </div>
                     {(() => {
                         const activeStatuses = ['queued', 'downloading', 'transcribing', 'diarizing'];
                         const jobActive = activeStatuses.includes(video.status);
                         const busy = purging || redoing || redoingDiarization || consolidatingTranscript || jobActive;
                         return (
-                            <div className="flex items-center gap-2 shrink-0">
+                            <div className="flex flex-wrap items-stretch gap-2 w-full">
                                 {jobActive && (
-                                    <span className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-500 bg-slate-100 rounded-lg">
+                                    <span className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-500 bg-slate-100 rounded-lg sm:min-h-9">
                                         <Loader2 size={14} className="animate-spin" />
                                         {video.status.charAt(0).toUpperCase() + video.status.slice(1)}...
                                     </span>
@@ -3023,7 +3306,7 @@ export function VideoDetailPage() {
                                 <button
                                     onClick={handleRedoDiarization}
                                     disabled={busy}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
                                     title={jobActive ? `Cannot redo while ${video.status}` : "Re-run speaker diarization using improved speaker profiles"}
                                 >
                                         {redoingDiarization ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
@@ -3032,7 +3315,7 @@ export function VideoDetailPage() {
                                 <button
                                     onClick={handleConsolidateTranscript}
                                     disabled={busy}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
                                     title={jobActive ? `Cannot consolidate while ${video.status}` : "Merge same-speaker transcript fragments without re-running ASR or diarization"}
                                 >
                                     {consolidatingTranscript ? <Loader2 size={14} className="animate-spin" /> : <GitMerge size={14} />}
@@ -3041,7 +3324,7 @@ export function VideoDetailPage() {
                                 <button
                                     onClick={handleRedoTranscript}
                                     disabled={busy}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
                                     title={jobActive ? `Cannot redo while ${video.status}` : "Re-run transcription and then diarization"}
                                 >
                                     {redoing ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
@@ -3050,7 +3333,7 @@ export function VideoDetailPage() {
                                 <button
                                     onClick={handlePurgeTranscript}
                                     disabled={busy}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
                                     title={jobActive ? `Cannot purge while ${video.status}` : "Purge transcript & diarization data"}
                                 >
                                     {purging ? <Loader2 size={14} className="animate-spin" /> : <Eraser size={14} />}
@@ -3402,28 +3685,7 @@ export function VideoDetailPage() {
                             </div>
 
                             <div className="space-y-4">
-                                <div className="w-full bg-black rounded-2xl overflow-hidden shadow-2xl aspect-video">
-                                    <YouTube
-                                        videoId={video?.youtube_id || ''}
-                                        className="w-full h-full"
-                                        iframeClassName="w-full h-full"
-                                        onReady={onPlayerReady}
-                                        onStateChange={onPlayerStateChange}
-                                        onPlaybackRateChange={onPlayerPlaybackRateChange}
-                                        opts={{
-                                            height: '100%',
-                                            width: '100%',
-                                            playerVars: {
-                                                autoplay: 0,
-                                                modestbranding: 1,
-                                                rel: 0,
-                                                ...(Number.isFinite(requestedJumpTime) && requestedJumpTime >= 0
-                                                    ? { start: Math.floor(requestedJumpTime) }
-                                                    : {}),
-                                            },
-                                        }}
-                                    />
-                                </div>
+                                {renderMainPlayer("w-full bg-black rounded-2xl overflow-hidden shadow-2xl aspect-video")}
                                 <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
                                     <div className="flex items-center justify-between gap-2 mb-2">
                                         <div className="text-[11px] font-semibold tracking-wide text-slate-600">Burn/Crop Preview (draw to set crop)</div>
@@ -3529,27 +3791,8 @@ export function VideoDetailPage() {
                     </div>
                 ) : (
                     <div className="flex-1 flex items-center justify-center p-8 overflow-y-auto">
-                        <div className="w-full max-w-5xl bg-black rounded-2xl overflow-hidden shadow-2xl aspect-video">
-                            <YouTube
-                                videoId={video?.youtube_id || ''}
-                                className="w-full h-full"
-                                iframeClassName="w-full h-full"
-                                onReady={onPlayerReady}
-                                onStateChange={onPlayerStateChange}
-                                onPlaybackRateChange={onPlayerPlaybackRateChange}
-                                opts={{
-                                    height: '100%',
-                                    width: '100%',
-                                    playerVars: {
-                                        autoplay: 0,
-                                        modestbranding: 1,
-                                        rel: 0,
-                                        ...(Number.isFinite(requestedJumpTime) && requestedJumpTime >= 0
-                                            ? { start: Math.floor(requestedJumpTime) }
-                                            : {}),
-                                    },
-                                }}
-                            />
+                        <div className="w-full max-w-5xl">
+                            {renderMainPlayer("w-full bg-black rounded-2xl overflow-hidden shadow-2xl aspect-video")}
                         </div>
                     </div>
                 )}

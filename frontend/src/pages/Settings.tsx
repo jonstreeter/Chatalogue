@@ -38,6 +38,45 @@ interface LlmConnectionTestResult {
     tags_latency_ms?: number;
 }
 
+interface ExternalShareAuditEntry {
+    at: string;
+    action: string;
+    allowed: boolean;
+    reason?: string | null;
+    client_ip?: string | null;
+    path?: string | null;
+}
+
+interface ExternalShareStatus {
+    active: boolean;
+    mode: string;
+    enable_tunnel: boolean;
+    tunnel_provider?: string | null;
+    started_at?: string | null;
+    expires_at?: string | null;
+    frontend_local_url?: string | null;
+    api_local_url?: string | null;
+    frontend_lan_url?: string | null;
+    api_lan_url?: string | null;
+    frontend_public_url?: string | null;
+    api_public_url?: string | null;
+    share_url?: string | null;
+    token_required: boolean;
+    password_required: boolean;
+    ip_allowlist: string[];
+    cloudflared_available: boolean;
+    audit_log_path?: string | null;
+    audit_entries: ExternalShareAuditEntry[];
+}
+
+interface CloudflaredInstallInfo {
+    platform: string;
+    package_manager: string;
+    package_manager_available: boolean;
+    download_url: string;
+    installed: boolean;
+}
+
 interface TranscriptionEngineTestResult {
     status: 'ok' | 'error' | string;
     requested_engine: 'auto' | 'whisper' | 'parakeet' | string;
@@ -415,6 +454,22 @@ export function Settings() {
     const [dbHealth, setDbHealth] = useState<DbHealthResponse | null>(null);
     const [loadingDbHealth, setLoadingDbHealth] = useState(false);
     const [dbHealthError, setDbHealthError] = useState<string | null>(null);
+    const [externalShareStatus, setExternalShareStatus] = useState<ExternalShareStatus | null>(null);
+    const [loadingExternalShareStatus, setLoadingExternalShareStatus] = useState(false);
+    const [startingExternalShare, setStartingExternalShare] = useState(false);
+    const [stoppingExternalShare, setStoppingExternalShare] = useState(false);
+    const [copiedExternalShareUrl, setCopiedExternalShareUrl] = useState(false);
+    const [externalShareTunnelEnabled, setExternalShareTunnelEnabled] = useState(true);
+    const [externalShareFrontendPort, setExternalShareFrontendPort] = useState<number>(() => {
+        if (typeof window === 'undefined') return 5173;
+        return Number(window.location.port || 5173) || 5173;
+    });
+    const [externalShareBackendPort, setExternalShareBackendPort] = useState(8011);
+    const [externalShareDurationHours, setExternalShareDurationHours] = useState(1);
+    const [externalSharePassword, setExternalSharePassword] = useState('');
+    const [externalShareIpAllowlist, setExternalShareIpAllowlist] = useState('');
+    const [cloudflaredInstallInfo, setCloudflaredInstallInfo] = useState<CloudflaredInstallInfo | null>(null);
+    const [installingCloudflared, setInstallingCloudflared] = useState(false);
 
     useEffect(() => {
         loadSettings();
@@ -545,6 +600,113 @@ export function Settings() {
             setDbHealthError(String(message));
         } finally {
             if (!silent) setLoadingDbHealth(false);
+        }
+    };
+
+    const loadExternalShareStatus = async (silent = false) => {
+        if (!silent) setLoadingExternalShareStatus(true);
+        try {
+            const res = await api.get<ExternalShareStatus>('/share/status');
+            setExternalShareStatus(res.data);
+            if (!res.data.active && !res.data.cloudflared_available) {
+                setExternalShareTunnelEnabled(false);
+            }
+        } catch (e) {
+            console.error('Failed to load external share status:', e);
+            if (!silent) {
+                setExternalShareStatus(null);
+            }
+        } finally {
+            if (!silent) setLoadingExternalShareStatus(false);
+        }
+    };
+
+    const loadCloudflaredInstallInfo = async () => {
+        try {
+            const res = await api.get<CloudflaredInstallInfo>('/system/cloudflared/install-info');
+            setCloudflaredInstallInfo(res.data);
+        } catch (e) {
+            console.error('Failed to load cloudflared install info:', e);
+            setCloudflaredInstallInfo(null);
+        }
+    };
+
+    useEffect(() => {
+        void loadExternalShareStatus();
+        void loadCloudflaredInstallInfo();
+    }, []);
+
+    useEffect(() => {
+        if (!externalShareStatus?.active) return;
+        const timer = window.setInterval(() => {
+            void loadExternalShareStatus(true);
+        }, 10000);
+        return () => window.clearInterval(timer);
+    }, [externalShareStatus?.active]);
+
+    const handleStartExternalShare = async () => {
+        if (externalShareTunnelEnabled && externalShareStatus && !externalShareStatus.cloudflared_available) {
+            alert('cloudflared is not installed or not on PATH. Install cloudflared first, or turn off Public tunnel to start a LAN-guarded share session.');
+            return;
+        }
+        setStartingExternalShare(true);
+        try {
+            const res = await api.post<ExternalShareStatus>('/share/start', {
+                enable_tunnel: externalShareTunnelEnabled,
+                frontend_port: externalShareFrontendPort,
+                backend_port: externalShareBackendPort,
+                duration_minutes: externalShareDurationHours * 60,
+                password: externalSharePassword,
+                ip_allowlist: externalShareIpAllowlist,
+            });
+            setExternalShareStatus(res.data);
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to start external share mode');
+        } finally {
+            setStartingExternalShare(false);
+        }
+    };
+
+    const handleStopExternalShare = async () => {
+        setStoppingExternalShare(true);
+        try {
+            const res = await api.post<ExternalShareStatus>('/share/stop');
+            setExternalShareStatus(res.data);
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to stop external share mode');
+        } finally {
+            setStoppingExternalShare(false);
+        }
+    };
+
+    const handleCopyExternalShareUrl = async () => {
+        const shareUrl = String(externalShareStatus?.share_url || '').trim();
+        if (!shareUrl) return;
+        try {
+            await navigator.clipboard.writeText(shareUrl);
+            setCopiedExternalShareUrl(true);
+            window.setTimeout(() => setCopiedExternalShareUrl(false), 1500);
+        } catch {
+            alert('Failed to copy share URL');
+        }
+    };
+
+    const handleInstallCloudflared = async () => {
+        if (!cloudflaredInstallInfo?.package_manager_available) return;
+        const label = cloudflaredInstallInfo.package_manager || 'package manager';
+        if (!confirm(`Install cloudflared using ${label}?`)) return;
+        setInstallingCloudflared(true);
+        try {
+            const res = await api.post('/system/cloudflared/install');
+            alert(res.data?.status === 'installed'
+                ? 'cloudflared installed successfully.'
+                : 'cloudflared is already installed.');
+            await loadCloudflaredInstallInfo();
+            await loadExternalShareStatus();
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to install cloudflared automatically.');
+        } finally {
+            setInstallingCloudflared(false);
         }
     };
 
@@ -2762,6 +2924,245 @@ export function Settings() {
                                         <p className="text-xs text-slate-500 mt-2">
                                             Walk through initial configuration again: HuggingFace token, transcription engine, and LLM provider.
                                         </p>
+                                    </div>
+                                </div>
+
+                                <div className="pt-4 border-t border-slate-100">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                                            <Link2 size={16} />
+                                            Secure External Access
+                                        </h3>
+                                        <button
+                                            type="button"
+                                            onClick={() => void loadExternalShareStatus()}
+                                            disabled={loadingExternalShareStatus}
+                                            className="px-3 py-1.5 text-xs rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-50 inline-flex items-center gap-1"
+                                        >
+                                            {loadingExternalShareStatus ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                                            Refresh
+                                        </button>
+                                    </div>
+                                    <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-4">
+                                        <div className="text-sm text-amber-900">
+                                            <div className="font-semibold">Opt-in share mode</div>
+                                            <p className="mt-1 text-amber-800/85">
+                                                Creates a short-lived LAN or public share session with token gating, optional password, optional IP allowlist, audit logging, and a stop control.
+                                            </p>
+                                        </div>
+
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            <label className="rounded-lg border border-amber-200 bg-white px-3 py-3 text-sm">
+                                                <div className="font-medium text-slate-700">Frontend Port</div>
+                                                <input
+                                                    type="number"
+                                                    min={1}
+                                                    max={65535}
+                                                    value={externalShareFrontendPort}
+                                                    onChange={(e) => setExternalShareFrontendPort(Number(e.target.value || 5173))}
+                                                    className="mt-2 w-full rounded-md border border-slate-200 px-3 py-2"
+                                                />
+                                            </label>
+                                            <label className="rounded-lg border border-amber-200 bg-white px-3 py-3 text-sm">
+                                                <div className="font-medium text-slate-700">Backend Port</div>
+                                                <input
+                                                    type="number"
+                                                    min={1}
+                                                    max={65535}
+                                                    value={externalShareBackendPort}
+                                                    onChange={(e) => setExternalShareBackendPort(Number(e.target.value || 8011))}
+                                                    className="mt-2 w-full rounded-md border border-slate-200 px-3 py-2"
+                                                />
+                                            </label>
+                                            <label className="rounded-lg border border-amber-200 bg-white px-3 py-3 text-sm">
+                                                <div className="flex items-center justify-between gap-3">
+                                                    <div className="font-medium text-slate-700">Expiry</div>
+                                                    <div className="text-xs font-semibold text-amber-700">
+                                                        {externalShareDurationHours} hour{externalShareDurationHours === 1 ? '' : 's'}
+                                                    </div>
+                                                </div>
+                                                <input
+                                                    type="range"
+                                                    min={1}
+                                                    max={24}
+                                                    step={1}
+                                                    value={externalShareDurationHours}
+                                                    onChange={(e) => setExternalShareDurationHours(Math.max(1, Math.min(24, Number(e.target.value || 1))))}
+                                                    className="mt-3 w-full accent-amber-600"
+                                                />
+                                                <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+                                                    <span>1 hour</span>
+                                                    <span>24 hours</span>
+                                                </div>
+                                            </label>
+                                            <label className="rounded-lg border border-amber-200 bg-white px-3 py-3 text-sm">
+                                                <div className="flex items-center justify-between gap-3">
+                                                    <div>
+                                                        <div className="font-medium text-slate-700">Public tunnel</div>
+                                                        <div className="text-xs text-slate-500 mt-0.5">
+                                                            On: public share URL via `cloudflared`. Off: LAN share URL on your local network.
+                                                        </div>
+                                                    </div>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={externalShareTunnelEnabled}
+                                                        onChange={(e) => setExternalShareTunnelEnabled(e.target.checked)}
+                                                        className="h-4 w-4"
+                                                        disabled={!externalShareStatus?.cloudflared_available && !externalShareStatus?.active}
+                                                    />
+                                                </div>
+                                            </label>
+                                        </div>
+
+                                        {externalShareStatus && !externalShareStatus.cloudflared_available && !externalShareStatus.active && (
+                                            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                                                <span className="font-medium">`cloudflared` was not found.</span>{' '}
+                                                Install it from{' '}
+                                                <a
+                                                    href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="font-medium underline"
+                                                >
+                                                    Cloudflare&apos;s download page
+                                                </a>{' '}
+                                                or set <code className="rounded bg-white px-1 py-0.5 text-[12px]">CLOUDFLARED_BIN</code> to the executable path to enable public share links. LAN share mode still works without it.
+                                                {cloudflaredInstallInfo?.package_manager_available && (
+                                                    <div className="mt-3">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => void handleInstallCloudflared()}
+                                                            disabled={installingCloudflared}
+                                                            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+                                                        >
+                                                            {installingCloudflared ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                                                            {installingCloudflared
+                                                                ? 'Installing...'
+                                                                : `Install Automatically${cloudflaredInstallInfo.package_manager ? ` (${cloudflaredInstallInfo.package_manager})` : ''}`}
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            <label className="rounded-lg border border-amber-200 bg-white px-3 py-3 text-sm">
+                                                <div className="font-medium text-slate-700">Optional password</div>
+                                                <input
+                                                    type="password"
+                                                    value={externalSharePassword}
+                                                    onChange={(e) => setExternalSharePassword(e.target.value)}
+                                                    className="mt-2 w-full rounded-md border border-slate-200 px-3 py-2"
+                                                    placeholder="Leave blank to require token only"
+                                                />
+                                            </label>
+                                            <label className="rounded-lg border border-amber-200 bg-white px-3 py-3 text-sm">
+                                                <div className="font-medium text-slate-700">IP allowlist</div>
+                                                <input
+                                                    type="text"
+                                                    value={externalShareIpAllowlist}
+                                                    onChange={(e) => setExternalShareIpAllowlist(e.target.value)}
+                                                    className="mt-2 w-full rounded-md border border-slate-200 px-3 py-2"
+                                                    placeholder="203.0.113.7, 198.51.100.0/24"
+                                                />
+                                            </label>
+                                        </div>
+
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => void handleStartExternalShare()}
+                                                disabled={startingExternalShare}
+                                                className="px-4 py-2 rounded-lg bg-amber-600 text-white hover:bg-amber-700 font-semibold disabled:opacity-50 inline-flex items-center gap-2"
+                                            >
+                                                {startingExternalShare ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
+                                                {startingExternalShare ? 'Starting...' : (externalShareTunnelEnabled ? 'Start Public Share' : 'Start LAN Share')}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => void handleStopExternalShare()}
+                                                disabled={stoppingExternalShare || !externalShareStatus?.active}
+                                                className="px-4 py-2 rounded-lg bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 font-semibold disabled:opacity-50 inline-flex items-center gap-2"
+                                            >
+                                                {stoppingExternalShare ? <Loader2 size={14} className="animate-spin" /> : <Power size={14} />}
+                                                {stoppingExternalShare ? 'Stopping...' : 'Stop Share Mode'}
+                                            </button>
+                                        </div>
+
+                                        <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm space-y-2">
+                                            {!externalShareStatus ? (
+                                                <div className="text-slate-500">Loading share status...</div>
+                                            ) : !externalShareStatus.active ? (
+                                                <div className="text-slate-600">
+                                                    Share mode is inactive. {externalShareStatus.cloudflared_available ? 'Public tunnel and LAN modes are available.' : 'Public tunnel is unavailable because cloudflared is not on PATH. LAN mode is still available.'}
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    <div className="font-semibold text-slate-800">Share session is active</div>
+                                                    <div className="text-slate-600">
+                                                        Mode: {externalShareStatus.mode === 'public_tunnel' ? 'Public tunnel share' : externalShareStatus.mode === 'lan' ? 'LAN share' : externalShareStatus.mode}
+                                                    </div>
+                                                    <div className="text-slate-600">
+                                                        Expires: {externalShareStatus.expires_at ? new Date(externalShareStatus.expires_at).toLocaleString() : 'unknown'}
+                                                    </div>
+                                                    {externalShareStatus.share_url && (
+                                                        <div className="rounded-md border border-slate-200 bg-slate-50 p-3 space-y-2">
+                                                            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Share URL</div>
+                                                            <div className="text-slate-700 break-all">
+                                                                <a href={externalShareStatus.share_url} target="_blank" rel="noreferrer" className="text-blue-600 underline">
+                                                                    {externalShareStatus.share_url}
+                                                                </a>
+                                                            </div>
+                                                            <div className="flex flex-wrap items-center gap-2">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => void handleCopyExternalShareUrl()}
+                                                                    className="px-3 py-1.5 text-xs rounded-md border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 inline-flex items-center gap-1"
+                                                                >
+                                                                    {copiedExternalShareUrl ? <CheckCircle2 size={12} /> : <Link2 size={12} />}
+                                                                    {copiedExternalShareUrl ? 'Copied' : 'Copy Link'}
+                                                                </button>
+                                                                <a
+                                                                    href={externalShareStatus.share_url}
+                                                                    target="_blank"
+                                                                    rel="noreferrer"
+                                                                    className="px-3 py-1.5 text-xs rounded-md border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 inline-flex items-center gap-1"
+                                                                >
+                                                                    <ExternalLink size={12} />
+                                                                    Open
+                                                                </a>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {externalShareStatus.api_public_url && (
+                                                        <div className="text-slate-600 break-all">API URL: {externalShareStatus.api_public_url}</div>
+                                                    )}
+                                                    {!externalShareStatus.api_public_url && externalShareStatus.api_lan_url && (
+                                                        <div className="text-slate-600 break-all">LAN API URL: {externalShareStatus.api_lan_url}</div>
+                                                    )}
+                                                    {!externalShareStatus.frontend_public_url && externalShareStatus.frontend_lan_url && (
+                                                        <div className="text-slate-600 break-all">LAN App URL: {externalShareStatus.frontend_lan_url}</div>
+                                                    )}
+                                                    <div className="text-slate-600">
+                                                        Password required: {externalShareStatus.password_required ? 'yes' : 'no'} · Allowlist: {externalShareStatus.ip_allowlist.length ? externalShareStatus.ip_allowlist.join(', ') : 'none'}
+                                                    </div>
+                                                    <div className="text-[11px] text-slate-500">
+                                                        Audit log: {externalShareStatus.audit_log_path || 'runtime only'}
+                                                    </div>
+                                                    {externalShareStatus.audit_entries.length > 0 && (
+                                                        <div className="rounded-md border border-slate-200 bg-slate-50 max-h-40 overflow-y-auto">
+                                                            {externalShareStatus.audit_entries.slice(0, 10).map((entry, index) => (
+                                                                <div key={`${entry.at}-${index}`} className="border-b border-slate-200 last:border-b-0 px-3 py-2 text-[11px] text-slate-600">
+                                                                    <span className="font-medium text-slate-700">{entry.allowed ? 'ALLOW' : 'DENY'}</span>{' '}
+                                                                    {entry.action} {entry.client_ip ? `· ${entry.client_ip}` : ''} {entry.reason ? `· ${entry.reason}` : ''}<br />
+                                                                    <span className="text-slate-500">{new Date(entry.at).toLocaleString()}</span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
 

@@ -66,6 +66,21 @@ export function Videos() {
     });
 
     const getChannelName = (id: number) => channels.find(c => c.id === id)?.name || 'Unknown';
+    const getPlaceholderLabel = (video: Video) => {
+        const source = String(video.transcript_source || '').toLowerCase();
+        if (source === 'youtube_auto_captions' || source === 'tiktok_auto_captions') return 'Auto-captions';
+        if (source === 'youtube_subtitles') return 'YT captions';
+        if (source === 'tiktok_subtitles') return 'TikTok captions';
+        return 'Placeholder captions';
+    };
+
+    const getAccessRestrictionLabel = (video: Video) => {
+        const reason = String(video.access_restriction_reason || '').toLowerCase();
+        if (reason.includes('members-only') || reason.includes('members only')) return 'Members only';
+        if (reason.includes('private')) return 'Private';
+        if (reason.includes('sign in') || reason.includes('auth')) return 'Sign-in required';
+        return 'Access restricted';
+    };
 
     return (
         <div className="h-[calc(100vh-2rem)] flex flex-col space-y-4">
@@ -125,7 +140,7 @@ export function Videos() {
                             </thead>
                             <tbody className="divide-y divide-slate-100">
                                 {filtered.map((video) => (
-                                    <tr key={video.id} className="hover:bg-slate-50/50 transition-colors group">
+                                    <tr key={video.id} className={`transition-colors group ${video.access_restricted ? 'bg-slate-50/90 opacity-65' : 'hover:bg-slate-50/50'}`}>
                                         <td className="px-6 py-3">
                                             <div className="w-24 aspect-video bg-slate-200 rounded-md overflow-hidden relative">
                                                 {video.thumbnail_url ? (
@@ -139,6 +154,19 @@ export function Videos() {
                                         </td>
                                         <td className="px-6 py-3">
                                             <div className="font-medium text-slate-800 line-clamp-2" title={video.title}>{video.title}</div>
+                                            {video.access_restricted && (
+                                                <div
+                                                    className="mt-1 inline-flex items-center rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-700"
+                                                    title={video.access_restriction_reason || 'This video is not accessible with the current YouTube session.'}
+                                                >
+                                                    {getAccessRestrictionLabel(video)}
+                                                </div>
+                                            )}
+                                            {video.transcript_is_placeholder && (
+                                                <div className="mt-1 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                                                    {getPlaceholderLabel(video)}
+                                                </div>
+                                            )}
                                             {video.description && (
                                                 <div className="text-xs text-slate-400 line-clamp-1 mt-0.5">{video.description}</div>
                                             )}
@@ -153,7 +181,8 @@ export function Videos() {
                                             <VideoStatusBadge
                                                 status={video.status}
                                                 processed={video.processed}
-                                                className={video.muted ? 'bg-slate-100 text-slate-500' : ''}
+                                                accessRestricted={video.access_restricted}
+                                                className={video.muted || video.access_restricted ? 'bg-slate-100 text-slate-500' : ''}
                                             />
                                         </td>
                                         <td className="px-6 py-3 text-right">

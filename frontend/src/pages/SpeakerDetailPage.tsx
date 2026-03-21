@@ -177,7 +177,7 @@ export function SpeakerDetailPage() {
     };
 
     const canPreviewProfile = (profile: SpeakerVoiceProfile) =>
-        !!profile.source_video_youtube_id && profile.sample_start_time != null;
+        !!profile.source_video_id && profile.sample_start_time != null;
 
     const handleBulkReassignProfileSegments = async (profile: SpeakerVoiceProfile) => {
         if (!speaker) return;
@@ -205,6 +205,33 @@ export function SpeakerDetailPage() {
             } catch (e) {
                 console.warn('Failed to start profile preview', e);
             }
+        }
+    };
+
+    const handleNativeProfilePreviewLoaded = (event: React.SyntheticEvent<HTMLMediaElement>) => {
+        const media = event.currentTarget;
+        const controller = {
+            seekTo: (seconds: number) => {
+                media.currentTime = Math.max(0, seconds || 0);
+            },
+            playVideo: async () => {
+                try {
+                    await media.play();
+                } catch {
+                    // Ignore autoplay restrictions for preview clips.
+                }
+            },
+            pauseVideo: () => media.pause(),
+            stopVideo: () => {
+                media.pause();
+                media.currentTime = 0;
+            },
+            getCurrentTime: () => media.currentTime || 0,
+        };
+        setPreviewPlayer(controller);
+        if (previewProfile?.sample_start_time != null) {
+            controller.seekTo(previewProfile.sample_start_time);
+            void controller.playVideo();
         }
     };
 
@@ -258,6 +285,12 @@ export function SpeakerDetailPage() {
             </div>
         );
     }
+
+    const previewMediaSourceType = String(previewProfile?.source_video_media_source_type || 'youtube').toLowerCase();
+    const previewUsesYoutube = previewMediaSourceType === 'youtube';
+    const previewUsesLocalMedia = previewMediaSourceType === 'upload' || previewMediaSourceType === 'tiktok';
+    const previewIsAudioOnly = previewUsesLocalMedia && String(previewProfile?.source_video_media_kind || '').toLowerCase() === 'audio';
+    const previewMediaUrl = previewProfile?.source_video_id ? toApiUrl(`/videos/${previewProfile.source_video_id}/media`) : '';
 
     return (
         <div className="space-y-6 pb-20">
@@ -416,25 +449,46 @@ export function SpeakerDetailPage() {
                                 </div>
                                 <div className="rounded-lg overflow-hidden border border-slate-200 bg-black">
                                     <div className="aspect-video">
-                                        <YouTube
-                                            key={`profile-preview-${previewProfile.id}`}
-                                            videoId={previewProfile.source_video_youtube_id}
-                                            className="w-full h-full"
-                                            iframeClassName="w-full h-full"
-                                            opts={{
-                                                width: '100%',
-                                                height: '100%',
-                                                playerVars: {
-                                                    autoplay: 1,
-                                                    controls: 1,
-                                                    enablejsapi: 1,
-                                                    rel: 0,
-                                                    modestbranding: 1,
-                                                    start: Math.max(0, Math.floor(previewProfile.sample_start_time || 0)),
-                                                },
-                                            }}
-                                            onReady={handleProfilePreviewReady}
-                                        />
+                                        {previewUsesYoutube ? (
+                                            <YouTube
+                                                key={`profile-preview-${previewProfile.id}`}
+                                                videoId={previewProfile.source_video_youtube_id}
+                                                className="w-full h-full"
+                                                iframeClassName="w-full h-full"
+                                                opts={{
+                                                    width: '100%',
+                                                    height: '100%',
+                                                    playerVars: {
+                                                        autoplay: 1,
+                                                        controls: 1,
+                                                        enablejsapi: 1,
+                                                        rel: 0,
+                                                        modestbranding: 1,
+                                                        start: Math.max(0, Math.floor(previewProfile.sample_start_time || 0)),
+                                                    },
+                                                }}
+                                                onReady={handleProfilePreviewReady}
+                                            />
+                                        ) : previewIsAudioOnly ? (
+                                            <div className="flex h-full items-center justify-center p-6">
+                                                <audio
+                                                    key={`profile-preview-audio-${previewProfile.id}`}
+                                                    controls
+                                                    className="w-full"
+                                                    src={previewMediaUrl}
+                                                    onLoadedMetadata={handleNativeProfilePreviewLoaded}
+                                                />
+                                            </div>
+                                        ) : (
+                                            <video
+                                                key={`profile-preview-local-${previewProfile.id}`}
+                                                controls
+                                                playsInline
+                                                className="h-full w-full bg-black object-contain"
+                                                src={previewMediaUrl}
+                                                onLoadedMetadata={handleNativeProfilePreviewLoaded}
+                                            />
+                                        )}
                                     </div>
                                 </div>
                                 {previewProfile.sample_text && (

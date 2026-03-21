@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import YouTube from 'react-youtube';
 import api from '../../lib/api';
+import { toApiUrl } from '../../lib/api';
 import type { Speaker, Video } from '../../types';
 import { SpeakerModal } from '../../components/SpeakerModal';
 import { Search, Clock, User, FileText, PlayCircle, Tv } from 'lucide-react';
@@ -48,6 +49,7 @@ export function ChannelSearch() {
     const [searchStateHydrated, setSearchStateHydrated] = useState(false);
     const resultsListRef = useRef<HTMLDivElement>(null);
     const savedScrollTopRef = useRef<number | null>(null);
+    const nativePreviewRef = useRef<HTMLMediaElement | null>(null);
 
     const getPersistKey = () => (id ? `chatalogue:channel-search:${id}` : null);
 
@@ -175,6 +177,21 @@ export function ChannelSearch() {
         }
     };
 
+    const buildNativePreviewPlayer = (media: HTMLMediaElement) => ({
+        seekTo: (seconds: number) => {
+            media.currentTime = Math.max(0, seconds || 0);
+        },
+        playVideo: async () => {
+            try {
+                await media.play();
+            } catch {
+                // Ignore autoplay restrictions in preview pane.
+            }
+        },
+        pauseVideo: () => media.pause(),
+        getCurrentTime: () => media.currentTime || 0,
+    });
+
     const runSearch = async (nextOffset: number = 0) => {
         if (!query.trim()) return;
         setSearching(true);
@@ -258,6 +275,8 @@ export function ChannelSearch() {
             start_time: result.start_time,
             end_time: result.end_time,
             text: result.text,
+            media_source_type: resultVideo?.media_source_type,
+            media_kind: resultVideo?.media_kind,
         });
 
         try {
@@ -286,6 +305,12 @@ export function ChannelSearch() {
 
     const videoMap = new Map(videos.map((video) => [video.id, video]));
     const previewVideo = selectedResult ? videoMap.get(selectedResult.video_id) : null;
+    const previewMediaSourceType = String(previewVideo?.media_source_type || 'youtube').toLowerCase();
+    const previewUsesYoutube = previewMediaSourceType === 'youtube';
+    const previewUsesLocalMedia = previewMediaSourceType === 'upload' || previewMediaSourceType === 'tiktok';
+    const previewIsAudioOnly = previewUsesLocalMedia && String(previewVideo?.media_kind || '').toLowerCase() === 'audio';
+    const previewMediaUrl = previewVideo ? toApiUrl(`/videos/${previewVideo.id}/media`) : '';
+    const previewMediaPending = previewUsesLocalMedia && ['pending', 'queued'].includes(String(previewVideo?.status || '').toLowerCase());
     const totalPages = Math.max(1, Math.ceil(totalResults / Math.max(resultLimit, 1)));
     const currentPage = Math.floor(resultOffset / Math.max(resultLimit, 1)) + 1;
     const pageStart = totalResults === 0 ? 0 : resultOffset + 1;
@@ -508,20 +533,53 @@ export function ChannelSearch() {
                 ) : (
                     <div className="space-y-4">
                         <div className="rounded-lg overflow-hidden bg-black">
-                            <YouTube
-                                key={previewVideo.id}
-                                videoId={previewVideo.youtube_id}
-                                onReady={(event: any) => setPreviewPlayer(event.target)}
-                                opts={{
-                                    width: '100%',
-                                    height: '340',
-                                    playerVars: {
-                                        rel: 0,
-                                        modestbranding: 1,
-                                    },
-                                }}
-                                className="w-full"
-                            />
+                            {previewMediaPending ? (
+                                <div className="flex h-[340px] items-center justify-center px-6 text-center text-sm text-slate-300">
+                                    Local media is not ready yet for this episode.
+                                </div>
+                            ) : previewUsesYoutube ? (
+                                <YouTube
+                                    key={previewVideo.id}
+                                    videoId={previewVideo.youtube_id}
+                                    onReady={(event: any) => setPreviewPlayer(event.target)}
+                                    opts={{
+                                        width: '100%',
+                                        height: '340',
+                                        playerVars: {
+                                            rel: 0,
+                                            modestbranding: 1,
+                                        },
+                                    }}
+                                    className="w-full"
+                                />
+                            ) : previewIsAudioOnly ? (
+                                <div className="flex h-[340px] items-center justify-center px-6">
+                                    <audio
+                                        key={previewVideo.id}
+                                        ref={nativePreviewRef}
+                                        controls
+                                        className="w-full"
+                                        src={previewMediaUrl}
+                                        onLoadedMetadata={(event) => {
+                                            const controller = buildNativePreviewPlayer(event.currentTarget);
+                                            setPreviewPlayer(controller);
+                                        }}
+                                    />
+                                </div>
+                            ) : (
+                                <video
+                                    key={previewVideo.id}
+                                    ref={nativePreviewRef}
+                                    controls
+                                    playsInline
+                                    className="h-[340px] w-full bg-black object-contain"
+                                    src={previewMediaUrl}
+                                    onLoadedMetadata={(event) => {
+                                        const controller = buildNativePreviewPlayer(event.currentTarget);
+                                        setPreviewPlayer(controller);
+                                    }}
+                                />
+                            )}
                         </div>
 
                         <div className="space-y-2">

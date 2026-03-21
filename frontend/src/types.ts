@@ -2,10 +2,16 @@ export interface Channel {
     id: number;
     url: string;
     name: string;
+    source_type?: 'youtube' | 'manual' | 'tiktok' | string;
     icon_url?: string;
     header_image_url?: string;
     last_updated: string;
     status: string;
+    actively_monitored?: boolean;
+    sync_status_detail?: string;
+    sync_progress?: number;
+    sync_total_items?: number;
+    sync_completed_items?: number;
 }
 
 export interface Video {
@@ -13,12 +19,18 @@ export interface Video {
     channel_id: number;
     youtube_id: string;
     title: string;
+    media_source_type?: 'youtube' | 'upload' | 'tiktok' | string;
+    source_url?: string;
+    media_kind?: 'audio' | 'video' | string;
+    manual_media_path?: string;
     published_at?: string; // May be null if not available
     description?: string;
     thumbnail_url?: string;
     duration?: number; // seconds
     processed: boolean;
     muted: boolean;
+    access_restricted?: boolean;
+    access_restriction_reason?: string;
     status: string;
     humor_context_summary?: string;
     humor_context_model?: string;
@@ -28,6 +40,9 @@ export interface Video {
     youtube_ai_description_text?: string;
     youtube_ai_model?: string;
     youtube_ai_generated_at?: string;
+    transcript_source?: string;
+    transcript_language?: string;
+    transcript_is_placeholder?: boolean;
 }
 
 export interface VideoChapterSuggestion {
@@ -58,6 +73,18 @@ export interface Speaker {
     created_at: string;
 }
 
+export interface SpeakerSample {
+    id?: number;
+    video_id: number;
+    start_time: number;
+    end_time?: number;
+    text: string;
+    channel_id?: number;
+    youtube_id?: string;
+    media_source_type?: 'youtube' | 'upload' | 'tiktok' | string;
+    media_kind?: 'audio' | 'video' | string;
+}
+
 export interface SpeakerCounts {
     total: number;
     identified: number;
@@ -70,6 +97,8 @@ export interface SpeakerEpisodeAppearance {
     video_id: number;
     youtube_id: string;
     title: string;
+    media_source_type?: 'youtube' | 'upload' | 'tiktok' | string;
+    media_kind?: 'audio' | 'video' | string;
     published_at?: string;
     thumbnail_url?: string;
     segment_count: number;
@@ -84,6 +113,8 @@ export interface SpeakerVoiceProfile {
     source_video_id?: number;
     source_video_title?: string;
     source_video_youtube_id?: string;
+    source_video_media_source_type?: 'youtube' | 'upload' | 'tiktok' | string;
+    source_video_media_kind?: 'audio' | 'video' | string;
     source_video_published_at?: string;
     sample_start_time?: number;
     sample_end_time?: number;

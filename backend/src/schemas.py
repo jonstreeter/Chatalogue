@@ -16,12 +16,20 @@ class ChannelOverviewRead(BaseModel):
     id: int
     url: str
     name: str
+    source_type: str = "youtube"
     icon_url: Optional[str] = None
     header_image_url: Optional[str] = None
     last_updated: Optional[datetime] = None
     status: str
+    actively_monitored: bool = False
+    sync_status_detail: Optional[str] = None
+    sync_progress: int = 0
+    sync_total_items: int = 0
+    sync_completed_items: int = 0
     video_count: int = 0
     processed_count: int = 0
+    pending_video_count: int = 0
+    active_job_count: int = 0
     speaker_count: int = 0
     total_duration_seconds: int = 0
 
@@ -40,13 +48,22 @@ class VideoListItemRead(BaseModel):
     youtube_id: str
     channel_id: Optional[int] = None
     title: str
+    media_source_type: str = "youtube"
+    source_url: Optional[str] = None
+    media_kind: Optional[str] = None
+    manual_media_path: Optional[str] = None
     published_at: Optional[datetime] = None
     description: Optional[str] = None
     thumbnail_url: Optional[str] = None
     duration: Optional[int] = None
     processed: bool = False
     muted: bool = False
+    access_restricted: bool = False
+    access_restriction_reason: Optional[str] = None
     status: str
+    transcript_source: Optional[str] = None
+    transcript_language: Optional[str] = None
+    transcript_is_placeholder: bool = False
 
 
 # ── Transcript / Search ─────────────────────────────────────────────────────
@@ -194,6 +211,8 @@ class SpeakerEpisodeAppearanceRead(SQLModel):
     video_id: int
     youtube_id: str
     title: str
+    media_source_type: str = "youtube"
+    media_kind: Optional[str] = None
     published_at: Optional[datetime] = None
     thumbnail_url: Optional[str] = None
     segment_count: int
@@ -208,6 +227,8 @@ class SpeakerVoiceProfileRead(SQLModel):
     source_video_id: Optional[int] = None
     source_video_title: Optional[str] = None
     source_video_youtube_id: Optional[str] = None
+    source_video_media_source_type: Optional[str] = None
+    source_video_media_kind: Optional[str] = None
     source_video_published_at: Optional[datetime] = None
     sample_start_time: Optional[float] = None
     sample_end_time: Optional[float] = None
@@ -228,6 +249,8 @@ class SpeakerSample(SQLModel):
     text: str
     channel_id: int
     youtube_id: str
+    media_source_type: str = "youtube"
+    media_kind: Optional[str] = None
 
 
 class ExtractThumbnailRequest(SQLModel):
@@ -334,3 +357,43 @@ class OllamaPullRequest(BaseModel):
 
 class TranscriptionEngineTestRequest(BaseModel):
     engine: Optional[str] = None
+
+
+class ExternalShareStartRequest(BaseModel):
+    enable_tunnel: bool = True
+    frontend_port: int = 5173
+    backend_port: int = 8011
+    duration_minutes: int = 60
+    password: str = ""
+    ip_allowlist: str = ""
+
+
+class ExternalShareAuditEntry(BaseModel):
+    at: str
+    action: str
+    allowed: bool
+    reason: Optional[str] = None
+    client_ip: Optional[str] = None
+    path: Optional[str] = None
+
+
+class ExternalShareStatus(BaseModel):
+    active: bool = False
+    mode: str = "off"
+    enable_tunnel: bool = False
+    tunnel_provider: Optional[str] = None
+    started_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    frontend_local_url: Optional[str] = None
+    api_local_url: Optional[str] = None
+    frontend_lan_url: Optional[str] = None
+    api_lan_url: Optional[str] = None
+    frontend_public_url: Optional[str] = None
+    api_public_url: Optional[str] = None
+    share_url: Optional[str] = None
+    token_required: bool = True
+    password_required: bool = False
+    ip_allowlist: List[str] = []
+    cloudflared_available: bool = False
+    audit_log_path: Optional[str] = None
+    audit_entries: List[ExternalShareAuditEntry] = []

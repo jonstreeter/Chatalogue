@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
-import { toApiUrl } from '../lib/api';
+import { API_BASE_URL, toApiUrl } from '../lib/api';
 import type { Job } from '../types';
-import { Pause, Play, Trash2, Clock, CheckCircle2, DownloadCloud, FileText, Users, Video as VideoIcon, RefreshCw, ArrowUp, Smile, Bot, Scissors, Cpu } from 'lucide-react';
+import { Pause, Play, Trash2, Clock, CheckCircle2, DownloadCloud, FileText, Users, Video as VideoIcon, RefreshCw, ArrowUp, Smile, Bot, Scissors, Cpu, AlertCircle, Copy, Check } from 'lucide-react';
 import axios from 'axios';
 import { usePollingFetch } from '../hooks/usePollingFetch';
 
@@ -81,10 +81,13 @@ type ProcessStageSummary = {
 export function JobQueue() {
     const [jobs, setJobs] = useState<Job[]>([]);
     const [historyRows, setHistoryRows] = useState<Job[]>([]);
+    const [expandedHistoryErrorIds, setExpandedHistoryErrorIds] = useState<Set<number>>(new Set());
+    const [copiedHistoryErrorId, setCopiedHistoryErrorId] = useState<number | null>(null);
     const [funnyHistoryRows, setFunnyHistoryRows] = useState<Job[]>([]);
     const [queueSummary, setQueueSummary] = useState<QueueSummary | null>(null);
     const [loading, setLoading] = useState(true);
     const [workerStatus, setWorkerStatus] = useState<'online' | 'offline' | 'stalled'>('offline');
+    const [jobsFetchError, setJobsFetchError] = useState<string | null>(null);
     const [lowerTab, setLowerTab] = useState<'transcribe' | 'diarize' | 'history'>('transcribe');
     const [pipelineFocus, setPipelineFocus] = useState<PipelineFocus | null>(null);
     const [sortBy, setSortBy] = useState<'created_at' | 'duration' | 'name'>('created_at');
@@ -99,8 +102,17 @@ export function JobQueue() {
             params: { limit: JOBS_FETCH_LIMIT, sort_by: sortBy, sort_dir: sortDir }, 
             signal 
         }),
-        onSuccess: (data) => setJobs(Array.isArray(data) ? data : []),
-        onError: (e) => console.error('Failed to fetch jobs:', e),
+        onSuccess: (data) => {
+            setJobs(Array.isArray(data) ? data : []);
+            setJobsFetchError(null);
+        },
+        onError: (e) => {
+            console.error('Failed to fetch jobs:', e);
+            const detail = axios.isAxiosError(e)
+                ? String((e.response?.data as any)?.detail || e.message || 'Unable to load queue data.')
+                : 'Unable to load queue data.';
+            setJobsFetchError(detail);
+        },
         onFinally: () => { if (mountedRef.current) setLoading(false); },
     });
 
@@ -164,25 +176,32 @@ export function JobQueue() {
 
     useEffect(() => {
         mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+        };
+    }, []);
+
+    useEffect(() => {
         fetchJobs(true);
         fetchHistoryJobs(true);
         fetchQueueSummary(true);
         fetchPipelineFocus(true);
         checkWorkerStatus(true);
+
         const jobInterval = setInterval(() => fetchJobs(), JOBS_POLL_MS);
         const historyInterval = setInterval(() => fetchHistoryJobs(), HISTORY_POLL_MS);
         const summaryInterval = setInterval(() => fetchQueueSummary(), SUMMARY_POLL_MS);
         const pipelineFocusInterval = setInterval(() => fetchPipelineFocus(), SUMMARY_POLL_MS);
         const workerInterval = setInterval(() => checkWorkerStatus(), WORKER_POLL_MS);
+
         return () => {
-            mountedRef.current = false;
             clearInterval(jobInterval);
             clearInterval(historyInterval);
             clearInterval(summaryInterval);
             clearInterval(pipelineFocusInterval);
             clearInterval(workerInterval);
         };
-    }, []);
+    }, [fetchJobs, fetchHistoryJobs, fetchQueueSummary, fetchPipelineFocus, checkWorkerStatus]);
 
     // Effect to refetch jobs immediately when sort changes
     useEffect(() => {
@@ -438,9 +457,36 @@ const getStatusLabel = (status: string): string => {
         other: [...activeByQueue.other],
     };
     const additionalActiveCount = queueOrder.reduce((sum, q) => sum + activeByQueueExcludingCurrent[q].length, 0);
-    const queuedJobs = jobs.filter(j => j.status === 'queued').sort(byAscCreated);
-    const pausedJobs = jobs.filter(j => j.status === 'paused').sort(byAscCreated);
+    // Keep queued/paused jobs in backend order so the "Sort Queued" control
+    // actually changes what the user sees in the pending queue.
+    const queuedJobs = jobs.filter(j => j.status === 'queued');
+    const pausedJobs = jobs.filter(j => j.status === 'paused');
     const historyJobs = historyRows;
+
+    const toggleHistoryError = (jobId: number) => {
+        setExpandedHistoryErrorIds(prev => {
+            const next = new Set(prev);
+            if (next.has(jobId)) {
+                next.delete(jobId);
+            } else {
+                next.add(jobId);
+            }
+            return next;
+        });
+    };
+
+    const handleCopyHistoryError = async (jobId: number, errorText: string) => {
+        try {
+            await navigator.clipboard.writeText(errorText);
+            setCopiedHistoryErrorId(jobId);
+            window.setTimeout(() => {
+                setCopiedHistoryErrorId(current => (current === jobId ? null : current));
+            }, 1800);
+        } catch (e) {
+            console.error('Failed to copy job error:', e);
+            alert('Failed to copy error to clipboard');
+        }
+    };
     const transcriptionQueuedJobs = queuedJobs.filter(j => (j.job_type || '').toLowerCase() === 'process');
     const transcriptionPausedJobs = pausedJobs.filter(j => (j.job_type || '').toLowerCase() === 'process');
     const transcriptionRunningJobs = activeJobs.filter(j => (j.job_type || '').toLowerCase() === 'process').sort(byDescStarted);
@@ -451,6 +497,7 @@ const getStatusLabel = (status: string): string => {
     const diarizePendingCount = diarizeQueuedJobs.length + diarizePausedJobs.length + diarizeRunningJobs.length;
     const pipelineExecutionMode = pipelineFocus?.execution_mode === 'staged' ? 'staged' : 'sequential';
     const isStagedExecution = pipelineExecutionMode === 'staged';
+    const showBackendUnavailable = !loading && !!jobsFetchError && jobs.length === 0;
 
     useEffect(() => {
         if (!isStagedExecution && lowerTab === 'diarize') {
@@ -613,13 +660,18 @@ const getStatusLabel = (status: string): string => {
         };
         const transcribePhaseStartedAt = parseIsoTimestamp(jobPayload.stage_transcribe_phase_started_at);
         const modelLoadCompletedAt = parseIsoTimestamp(jobPayload.stage_model_load_completed_at);
-        const requestedEngine = String(jobPayload.transcription_engine_requested || '').toLowerCase();
-        const parakeetRequested = requestedEngine === 'parakeet' || transcriptionEngineUsed === 'parakeet';
+        const modelLoadDetailActive =
+            detail.includes('loading whisper model') ||
+            detail.includes('loading parakeet model') ||
+            detail.includes('restoring parakeet checkpoint') ||
+            detail.includes('moving parakeet model to gpu') ||
+            detail.includes('initializing parakeet decoder') ||
+            detail.includes('initializing parakeet model on cpu') ||
+            detail.includes('reloading model');
         const inferredModelLoadActive =
-            parakeetRequested &&
             job.status === 'transcribing' &&
             stageStartedAt.transcribe == null &&
-            (detail.includes('loading parakeet') || transcribePhaseStartedAt != null);
+            (modelLoadDetailActive || transcribePhaseStartedAt != null);
         const showModelLoadStage =
             stageStartedAt.model_load != null ||
             modelLoadCompletedAt != null ||
@@ -746,41 +798,56 @@ const getStatusLabel = (status: string): string => {
             const state = getStageState(stage);
             const waitingForTranscriptionStart = stage === 'transcribe' && state === 'active' && stageStartedAt.transcribe == null;
             const percent = state === 'completed' ? 100 : state === 'active' ? (waitingForTranscriptionStart ? 0 : job.progress) : 0;
-            const isIndeterminate = state === 'active' && !waitingForTranscriptionStart && ((stage === 'diarize' || stage === 'funny') || percent <= 0);
+            const isIndeterminate = state === 'active' && !waitingForTranscriptionStart && ((stage === 'funny') || percent <= 0);
             const elapsed = getStageElapsedSeconds(stage, state);
             const elapsedText = formatStageTimer(elapsed);
+            const isPreTranscribeStage = stage === 'model_load' || waitingForTranscriptionStart;
+            const activeIconClass = isPreTranscribeStage ? 'text-slate-400' : 'text-blue-500';
+            const activeTimerClass = isPreTranscribeStage ? 'text-slate-500' : 'text-blue-600';
+            const activeStateTextClass = isPreTranscribeStage ? 'text-slate-500' : 'text-blue-600 animate-pulse';
+            const activeFillClass = isPreTranscribeStage ? 'bg-slate-300' : 'bg-blue-500';
+            const activeTrackClass = isPreTranscribeStage ? 'bg-slate-300/25' : 'bg-blue-500/20';
+            const activeShimmerClass = isPreTranscribeStage ? 'bg-slate-300 animate-pulse' : 'bg-blue-500 animate-[shimmer_1.5s_infinite]';
+            const activeLabel = (() => {
+                if (stage === 'model_load') {
+                    if ((job.status_detail || '').trim()) return job.status_detail || 'Preparing model...';
+                    return 'Preparing model...';
+                }
+                if (waitingForTranscriptionStart) return 'Waiting for model...';
+                return 'Processing...';
+            })();
 
             return (
                 <div className="space-y-1.5">
                     <div className="flex justify-between items-center text-xs text-slate-500 uppercase tracking-wide font-semibold">
                         <div className="flex items-center gap-1.5">
-                            <Icon size={12} className={state === 'active' ? 'text-blue-500' : ''} />
+                            <Icon size={12} className={state === 'active' ? activeIconClass : ''} />
                             <span>{label}</span>
                         </div>
                         <div className="flex items-center gap-2">
                             {elapsedText && (
-                                <span className={`tabular-nums normal-case tracking-normal ${state === 'active' ? 'text-blue-600' : 'text-slate-400'}`}>
+                                <span className={`tabular-nums normal-case tracking-normal ${state === 'active' ? activeTimerClass : 'text-slate-400'}`}>
                                     {state === 'active' ? elapsedText : `took ${elapsedText}`}
                                 </span>
                             )}
                             {state === 'completed' && <CheckCircle2 size={14} className="text-green-500" />}
                             {state === 'active' && (
-                                <span className="text-blue-600 animate-pulse">
-                                    {stage === 'model_load' ? 'Loading model...' : (waitingForTranscriptionStart ? 'Waiting for model...' : 'Processing...')}
+                                <span className={activeStateTextClass}>
+                                    {activeLabel}
                                 </span>
                             )}
                         </div>
                     </div>
                     <div className="h-2 bg-slate-100 rounded-full overflow-hidden relative">
                         {state === 'active' && isIndeterminate ? (
-                            <div className="absolute inset-0 bg-blue-500/20">
-                                <div className="h-full w-1/3 bg-blue-500 animate-[shimmer_1.5s_infinite] relative overflow-hidden">
+                            <div className={`absolute inset-0 ${activeTrackClass}`}>
+                                <div className={`h-full w-1/3 relative overflow-hidden ${activeShimmerClass}`}>
                                     <div className="absolute inset-0 bg-white/30 skew-x-12" />
                                 </div>
                             </div>
                         ) : (
                             <div
-                                className={`h-full transition-all duration-500 ${state === 'completed' ? 'bg-green-500' : 'bg-blue-500'}`}
+                                className={`h-full transition-all duration-500 ${state === 'completed' ? 'bg-green-500' : activeFillClass}`}
                                 style={{ width: `${Math.max(percent, 0)}%` }}
                             />
                         )}
@@ -843,8 +910,16 @@ const getStatusLabel = (status: string): string => {
                     </div>
 
                     {job.status_detail && (
-                        <div className="flex items-center gap-2 text-xs sm:text-sm text-blue-600 bg-blue-50 px-3 py-2 rounded-lg border border-blue-100">
-                            <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                        <div className={`flex items-center gap-2 text-xs sm:text-sm px-3 py-2 rounded-lg border ${
+                            modelLoadDetailActive && stageStartedAt.transcribe == null
+                                ? 'text-slate-600 bg-slate-50 border-slate-200'
+                                : 'text-blue-600 bg-blue-50 border-blue-100'
+                        }`}>
+                            <div className={`w-4 h-4 border-2 border-t-transparent rounded-full animate-spin ${
+                                modelLoadDetailActive && stageStartedAt.transcribe == null
+                                    ? 'border-slate-400'
+                                    : 'border-blue-400'
+                            }`} />
                             <span className="font-medium">{job.status_detail}</span>
                         </div>
                     )}
@@ -1022,6 +1097,21 @@ const getStatusLabel = (status: string): string => {
                 </div>
             ) : (
                 <>
+                    {showBackendUnavailable && (
+                        <section className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-900">
+                            <div className="font-semibold">Queue data is unavailable</div>
+                            <p className="mt-1 text-red-800/90">
+                                The jobs API could not be reached, so the queue cannot show current or pending work.
+                            </p>
+                            <p className="mt-2 text-xs text-red-700/80">
+                                Expected API: <span className="font-mono">{API_BASE_URL}</span>
+                            </p>
+                            <p className="mt-1 text-xs text-red-700/80 break-words">
+                                {jobsFetchError}
+                            </p>
+                        </section>
+                    )}
+
                     <section className="grid grid-cols-2 lg:grid-cols-5 gap-2">
                         {queueOrder.map((q) => {
                             const Icon = queueIcon[q];
@@ -1243,6 +1333,30 @@ const getStatusLabel = (status: string): string => {
                             )}
                         </div>
 
+                    <div className="flex justify-end mb-2">
+                        {(lowerTab === 'transcribe' || (isStagedExecution && lowerTab === 'diarize')) && (
+                            <div className="flex items-center gap-2 text-xs">
+                                <span className="text-slate-500 font-medium">Sort Queued:</span>
+                                <select 
+                                    value={`${sortBy}-${sortDir}`}
+                                    onChange={(e) => {
+                                        const [newSort, newDir] = e.target.value.split('-');
+                                        setSortBy(newSort as any);
+                                        setSortDir(newDir as any);
+                                    }}
+                                    className="bg-white border border-slate-200 text-slate-700 rounded-md px-2 py-1 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100"
+                                >
+                                    <option value="created_at-desc">Order Added (Newest First)</option>
+                                    <option value="created_at-asc">Order Added (Oldest First)</option>
+                                    <option value="duration-asc">Video Length (Shortest First)</option>
+                                    <option value="duration-desc">Video Length (Longest First)</option>
+                                    <option value="name-asc">Name (A-Z)</option>
+                                    <option value="name-desc">Name (Z-A)</option>
+                                </select>
+                            </div>
+                        )}
+                    </div>
+
                         {lowerTab === 'transcribe' ? (
                             renderQueueSection(isStagedExecution ? 'Transcription Queue' : 'Pipeline Queue', FileText, transcriptionRunningJobs, transcriptionQueuedJobs, transcriptionPausedJobs)
                         ) : isStagedExecution && lowerTab === 'diarize' ? (
@@ -1335,8 +1449,31 @@ const getStatusLabel = (status: string): string => {
                                                                 </div>
                                                             )}
                                                             {job.status === 'failed' && job.error && (
-                                                                <div className="mt-2 text-xs text-red-600 bg-red-50 p-2 rounded border border-red-100 break-words max-w-xs">
-                                                                    {job.error}
+                                                                <div className="mt-2 max-w-xs">
+                                                                    <div className="flex flex-wrap items-center gap-2">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => toggleHistoryError(job.id)}
+                                                                            className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100"
+                                                                        >
+                                                                            <AlertCircle size={12} />
+                                                                            {expandedHistoryErrorIds.has(job.id) ? 'Hide Error' : 'Error Details'}
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => void handleCopyHistoryError(job.id, job.error || '')}
+                                                                            className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-50"
+                                                                            title="Copy full error to clipboard"
+                                                                        >
+                                                                            {copiedHistoryErrorId === job.id ? <Check size={12} /> : <Copy size={12} />}
+                                                                            {copiedHistoryErrorId === job.id ? 'Copied' : 'Copy Error'}
+                                                                        </button>
+                                                                    </div>
+                                                                    {expandedHistoryErrorIds.has(job.id) && (
+                                                                        <div className="mt-2 max-h-36 overflow-auto rounded-lg border border-red-100 bg-red-50 p-2 text-xs text-red-700 break-words whitespace-pre-wrap">
+                                                                            {job.error}
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                             )}
                                                         </td>

@@ -198,10 +198,16 @@ class Channel(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     url: str = Field(index=True, unique=True)
     name: str
+    source_type: str = Field(default="youtube")
     icon_url: Optional[str] = None
     header_image_url: Optional[str] = None
     last_updated: Optional[datetime] = None
     status: str = Field(default="active")
+    actively_monitored: bool = Field(default=False)
+    sync_status_detail: Optional[str] = None
+    sync_progress: int = Field(default=0)
+    sync_total_items: int = Field(default=0)
+    sync_completed_items: int = Field(default=0)
     
     videos: List["Video"] = Relationship(back_populates="channel")
     speakers: List["Speaker"] = Relationship(back_populates="channel")
@@ -252,12 +258,18 @@ class Video(SQLModel, table=True):
     youtube_id: str = Field(index=True, unique=True)
     channel_id: Optional[int] = Field(default=None, foreign_key="channel.id")
     title: str
+    media_source_type: str = Field(default="youtube")
+    source_url: Optional[str] = None
+    media_kind: Optional[str] = None
+    manual_media_path: Optional[str] = None
     published_at: Optional[datetime] = None  # May be null if not available from flat extraction
     description: Optional[str] = None  # Video description for search
     thumbnail_url: Optional[str] = None
     duration: Optional[int] = None
     processed: bool = Field(default=False)
     muted: bool = Field(default=False)  # If true, skip transcription
+    access_restricted: bool = Field(default=False)
+    access_restriction_reason: Optional[str] = None
     status: str = Field(default="pending") # pending, downloaded, transcribed, completed, failed
     humor_context_summary: Optional[str] = None
     humor_context_model: Optional[str] = None
@@ -267,6 +279,9 @@ class Video(SQLModel, table=True):
     youtube_ai_description_text: Optional[str] = None
     youtube_ai_model: Optional[str] = None
     youtube_ai_generated_at: Optional[datetime] = None
+    transcript_source: Optional[str] = None
+    transcript_language: Optional[str] = None
+    transcript_is_placeholder: bool = Field(default=False)
 
     channel: Optional[Channel] = Relationship(back_populates="videos")
     segments: List["TranscriptSegment"] = Relationship(back_populates="video")
@@ -459,14 +474,29 @@ def _column_migrations() -> list[tuple[str, str, str, str]]:
         ("clip", "caption_speaker_labels", "BOOLEAN", "BOOLEAN"),
         ("channel", "icon_url", "TEXT", "TEXT"),
         ("channel", "header_image_url", "TEXT", "TEXT"),
+        ("channel", "source_type", "TEXT", "TEXT"),
+        ("channel", "actively_monitored", "BOOLEAN", "BOOLEAN"),
+        ("channel", "sync_status_detail", "TEXT", "TEXT"),
+        ("channel", "sync_progress", "INTEGER", "INTEGER"),
+        ("channel", "sync_total_items", "INTEGER", "INTEGER"),
+        ("channel", "sync_completed_items", "INTEGER", "INTEGER"),
+        ("video", "media_source_type", "TEXT", "TEXT"),
+        ("video", "source_url", "TEXT", "TEXT"),
+        ("video", "media_kind", "TEXT", "TEXT"),
+        ("video", "manual_media_path", "TEXT", "TEXT"),
         ("video", "humor_context_summary", "TEXT", "TEXT"),
         ("video", "humor_context_model", "TEXT", "TEXT"),
         ("video", "humor_context_generated_at", "TEXT", "TIMESTAMP"),
+        ("video", "access_restricted", "BOOLEAN", "BOOLEAN"),
+        ("video", "access_restriction_reason", "TEXT", "TEXT"),
         ("video", "youtube_ai_summary", "TEXT", "TEXT"),
         ("video", "youtube_ai_chapters_json", "TEXT", "TEXT"),
         ("video", "youtube_ai_description_text", "TEXT", "TEXT"),
         ("video", "youtube_ai_model", "TEXT", "TEXT"),
         ("video", "youtube_ai_generated_at", "TEXT", "TIMESTAMP"),
+        ("video", "transcript_source", "TEXT", "TEXT"),
+        ("video", "transcript_language", "TEXT", "TEXT"),
+        ("video", "transcript_is_placeholder", "BOOLEAN", "BOOLEAN"),
         ("funnymoment", "humor_summary", "TEXT", "TEXT"),
         ("funnymoment", "humor_confidence", "TEXT", "TEXT"),
         ("funnymoment", "humor_model", "TEXT", "TEXT"),
@@ -546,6 +576,20 @@ def _backfill_clip_defaults(conn: Any) -> None:
     conn.execute(text("UPDATE clip SET fade_out_sec=0 WHERE fade_out_sec IS NULL"))
     conn.execute(text("UPDATE clip SET burn_captions=FALSE WHERE burn_captions IS NULL"))
     conn.execute(text("UPDATE clip SET caption_speaker_labels=TRUE WHERE caption_speaker_labels IS NULL"))
+
+
+def _backfill_channel_defaults(conn: Any) -> None:
+    conn.execute(text("UPDATE channel SET source_type='youtube' WHERE source_type IS NULL OR TRIM(source_type) = ''"))
+    conn.execute(text("UPDATE channel SET actively_monitored=FALSE WHERE actively_monitored IS NULL"))
+    conn.execute(text("UPDATE channel SET sync_progress=0 WHERE sync_progress IS NULL"))
+    conn.execute(text("UPDATE channel SET sync_total_items=0 WHERE sync_total_items IS NULL"))
+    conn.execute(text("UPDATE channel SET sync_completed_items=0 WHERE sync_completed_items IS NULL"))
+
+
+def _backfill_video_defaults(conn: Any) -> None:
+    conn.execute(text("UPDATE video SET media_source_type='youtube' WHERE media_source_type IS NULL OR TRIM(media_source_type) = ''"))
+    conn.execute(text("UPDATE video SET transcript_is_placeholder=FALSE WHERE transcript_is_placeholder IS NULL"))
+    conn.execute(text("UPDATE video SET access_restricted=FALSE WHERE access_restricted IS NULL"))
 
 
 def _reset_postgres_sequences(conn: Any) -> None:
@@ -689,3 +733,5 @@ def create_db_and_tables():
         _seed_speaker_embeddings(conn)
         _ensure_indexes(conn)
         _backfill_clip_defaults(conn)
+        _backfill_channel_defaults(conn)
+        _backfill_video_defaults(conn)

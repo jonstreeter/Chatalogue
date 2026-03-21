@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, File, UploadFile
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, File, UploadFile, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from typing import List, Optional
@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from sqlmodel import Session, select
 from sqlalchemy import func, text
 from pathlib import Path
+from collections import deque
 import shutil
 import base64
 import threading
@@ -21,6 +22,8 @@ import secrets
 import re
 import logging
 import subprocess
+import ipaddress
+import socket
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -37,6 +40,7 @@ from .schemas import (
     MoveSpeakerProfileRequest, SpeakerSample, ExtractThumbnailRequest, MergeRequest,
     JobRead, PipelineFocusRead, PipelineFocusUpdate,
     Settings, OllamaPullRequest, TranscriptionEngineTestRequest,
+    ExternalShareStartRequest, ExternalShareStatus, ExternalShareAuditEntry,
 )
 from filelock import FileLock, Timeout as FileLockTimeout
 
@@ -84,11 +88,45 @@ IMAGES_DIR = Path(__file__).parent.parent / "data" / "images"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 THUMBNAILS_DIR = Path(__file__).parent.parent / "data" / "thumbnails"
 THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
+MANUAL_MEDIA_DIR = Path(__file__).parent.parent / "data" / "manual_media"
+MANUAL_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 ENV_PATH = Path(__file__).parent.parent / ".env"
+SHARE_RUNTIME_DIR = BACKEND_RUNTIME_DIR / "external_share"
+SHARE_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+SHARE_AUDIT_LOG_PATH = SHARE_RUNTIME_DIR / "audit.log"
+SHARE_EVENT_LOG_PATH = SHARE_RUNTIME_DIR / "events.log"
+SHARE_TOKEN_HEADER = "x-chatalogue-share-token"
+SHARE_PASSWORD_HEADER = "x-chatalogue-share-password"
+SHARE_COOKIE_TOKEN = "chatalogue_share_token"
+SHARE_COOKIE_PASSWORD = "chatalogue_share_password"
+
+external_share_lock = threading.RLock()
+external_share_audit_entries: deque[dict] = deque(maxlen=300)
+external_share_state: dict[str, object] = {
+    "active": False,
+    "mode": "off",
+    "enable_tunnel": False,
+    "tunnel_provider": None,
+    "started_at": None,
+    "expires_at": None,
+    "token": None,
+    "password": None,
+    "ip_allowlist": [],
+    "frontend_local_url": None,
+    "api_local_url": None,
+    "frontend_lan_url": None,
+    "api_lan_url": None,
+    "frontend_public_url": None,
+    "api_public_url": None,
+    "share_url": None,
+    "processes": {},
+    "cloudflared_available": False,
+}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global ingestion_service, worker_threads, prefetch_thread, backend_instance_lock
+    monitor_stop_event: threading.Event | None = None
 
     backend_instance_lock = FileLock(str(BACKEND_INSTANCE_LOCK_PATH))
     try:
@@ -139,6 +177,14 @@ async def lifespan(app: FastAPI):
             ingestion_service.cleanup_orphaned_active_jobs()
         except Exception as e:
             print(f"Startup orphan-job cleanup failed: {e}")
+        try:
+            ingestion_service.cleanup_orphaned_active_videos()
+        except Exception as e:
+            print(f"Startup orphan-video cleanup failed: {e}")
+        try:
+            ingestion_service.cleanup_orphaned_channel_syncs()
+        except Exception as e:
+            print(f"Startup orphan-channel-sync cleanup failed: {e}")
 
         # Start queue workers by queue type to allow safe parallelism:
         # - process: download/transcribe stage
@@ -166,8 +212,23 @@ async def lifespan(app: FastAPI):
         prefetch_thread.start()
         print("Audio prefetch worker thread started.")
 
+        monitor_stop_event = threading.Event()
+        monitor_thread = threading.Thread(
+            target=ingestion_service.monitor_channels_loop,
+            args=(monitor_stop_event,),
+            daemon=True,
+            name="channel-monitor-worker",
+        )
+        monitor_thread.start()
+        print("Active channel monitor thread started.")
+
         yield
     finally:
+        try:
+            if monitor_stop_event is not None:
+                monitor_stop_event.set()
+        except Exception:
+            pass
         _release_backend_lock()
 
 app = FastAPI(lifespan=lifespan)
@@ -180,14 +241,488 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def external_share_guard(request: Request, call_next):
+    _ensure_external_share_not_expired()
+
+    path = request.url.path or "/"
+    if path.startswith("/share/public-status") or path.startswith("/share/launch/"):
+        return await call_next(request)
+
+    with external_share_lock:
+        active = bool(external_share_state.get("active"))
+        expected_token = str(external_share_state.get("token") or "")
+        expected_password = str(external_share_state.get("password") or "")
+        allowlist = list(external_share_state.get("ip_allowlist") or [])
+
+    if not active:
+        return await call_next(request)
+
+    client_ip = _resolve_client_ip(request)
+    if _is_loopback_host(client_ip) or request.method.upper() == "OPTIONS":
+        return await call_next(request)
+
+    if not _client_ip_allowed(client_ip, allowlist):
+        _append_share_audit(action="request_denied", allowed=False, reason="ip_not_allowed", client_ip=client_ip, path=path)
+        return _external_share_error_response(request, 403, "This IP is not permitted for the current external share session.", "share_ip_not_allowed")
+
+    provided_token, provided_password = _get_external_share_credentials(request)
+    if not expected_token or provided_token != expected_token:
+        _append_share_audit(action="request_denied", allowed=False, reason="invalid_token", client_ip=client_ip, path=path)
+        return _external_share_error_response(request, 401, "A valid share token is required.", "share_token_required")
+
+    if expected_password and provided_password != expected_password:
+        _append_share_audit(action="request_denied", allowed=False, reason="invalid_password", client_ip=client_ip, path=path)
+        return _external_share_error_response(request, 401, "A valid share password is required.", "share_password_required")
+
+    response = await call_next(request)
+    if provided_token and request.cookies.get(SHARE_COOKIE_TOKEN) != provided_token:
+        response.set_cookie(SHARE_COOKIE_TOKEN, provided_token, httponly=True, samesite="lax")
+    if expected_password and provided_password and request.cookies.get(SHARE_COOKIE_PASSWORD) != provided_password:
+        response.set_cookie(SHARE_COOKIE_PASSWORD, provided_password, httponly=True, samesite="lax")
+    _append_share_audit(action="request_allowed", allowed=True, reason="ok", client_ip=client_ip, path=path)
+    return response
+
 # Mount static files
 app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 app.mount("/thumbnails", StaticFiles(directory=THUMBNAILS_DIR), name="thumbnails")
+app.mount("/manual-media", StaticFiles(directory=MANUAL_MEDIA_DIR), name="manual-media")
 
 
 def get_session():
     with Session(engine) as session:
         yield session
+
+
+def _utc_now() -> datetime:
+    return datetime.utcnow()
+
+
+def _append_share_event(message: str) -> None:
+    timestamp = datetime.now().isoformat()
+    try:
+        with SHARE_EVENT_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(f"{timestamp} {message}\n")
+    except Exception:
+        pass
+
+
+def _append_share_audit(*, action: str, allowed: bool, reason: str | None = None, client_ip: str | None = None, path: str | None = None) -> None:
+    entry = {
+        "at": datetime.now().isoformat(),
+        "action": action,
+        "allowed": bool(allowed),
+        "reason": reason,
+        "client_ip": client_ip,
+        "path": path,
+    }
+    with external_share_lock:
+        external_share_audit_entries.appendleft(entry)
+    try:
+        with SHARE_AUDIT_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _snapshot_external_share_state(include_secrets: bool = False) -> dict:
+    with external_share_lock:
+        processes = external_share_state.get("processes") or {}
+        data = {
+            "active": bool(external_share_state.get("active")),
+            "mode": str(external_share_state.get("mode") or "off"),
+            "enable_tunnel": bool(external_share_state.get("enable_tunnel")),
+            "tunnel_provider": external_share_state.get("tunnel_provider"),
+            "started_at": external_share_state.get("started_at"),
+            "expires_at": external_share_state.get("expires_at"),
+            "frontend_local_url": external_share_state.get("frontend_local_url"),
+            "api_local_url": external_share_state.get("api_local_url"),
+            "frontend_lan_url": external_share_state.get("frontend_lan_url"),
+            "api_lan_url": external_share_state.get("api_lan_url"),
+            "frontend_public_url": external_share_state.get("frontend_public_url"),
+            "api_public_url": external_share_state.get("api_public_url"),
+            "share_url": external_share_state.get("share_url"),
+            "token_required": True,
+            "password_required": bool(external_share_state.get("password")),
+            "ip_allowlist": list(external_share_state.get("ip_allowlist") or []),
+            "cloudflared_available": bool(external_share_state.get("cloudflared_available")),
+            "audit_log_path": str(SHARE_AUDIT_LOG_PATH),
+            "audit_entries": [ExternalShareAuditEntry(**entry) for entry in list(external_share_audit_entries)],
+            "process_labels": sorted(processes.keys()),
+        }
+        if include_secrets:
+            data["token"] = external_share_state.get("token")
+    return data
+
+
+def _build_share_destination_url(frontend_url: str | None, api_url: str | None, token: str | None) -> str | None:
+    frontend_value = str(frontend_url or "").strip()
+    api_value = str(api_url or "").strip()
+    token_value = str(token or "").strip()
+    if not frontend_value or not api_value or not token_value:
+        return None
+    params = {
+        "api_base": api_value,
+        "share_token": token_value,
+    }
+    return f"{frontend_value}?{urllib.parse.urlencode(params)}"
+
+
+def _build_share_launch_url(api_url: str | None, token: str | None) -> str | None:
+    api_value = str(api_url or "").strip().rstrip("/")
+    token_value = str(token or "").strip()
+    if not api_value or not token_value:
+        return None
+    return f"{api_value}/share/launch/{urllib.parse.quote(token_value, safe='')}"
+
+
+def _render_share_launch_page(*, destination_url: str | None, title: str, message: str, status_code: int) -> HTMLResponse:
+    safe_title = html.escape(title)
+    safe_message = html.escape(message)
+    safe_destination = html.escape(destination_url or "")
+    auto_redirect = ""
+    link_html = ""
+    if destination_url:
+        auto_redirect = f'<meta http-equiv="refresh" content="0;url={safe_destination}">'
+        link_html = f'<p><a href="{safe_destination}">Continue to shared Chatalogue</a></p>'
+    content = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe_title}</title>
+  {auto_redirect}
+  <style>
+    body {{ font-family: Arial, sans-serif; background: #f8fafc; color: #0f172a; margin: 0; }}
+    main {{ max-width: 560px; margin: 8vh auto; background: white; border: 1px solid #e2e8f0; border-radius: 16px; padding: 24px; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08); }}
+    h1 {{ font-size: 20px; margin: 0 0 10px; }}
+    p {{ line-height: 1.5; margin: 0 0 12px; }}
+    a {{ color: #2563eb; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{safe_title}</h1>
+    <p>{safe_message}</p>
+    {link_html}
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(content=content, status_code=status_code)
+
+
+def _get_cloudflared_binary() -> str | None:
+    candidates = [
+        os.getenv("CLOUDFLARED_BIN") or "",
+        str(Path(__file__).parent.parent.parent / "bin" / "cloudflared.exe"),
+        str(Path(__file__).parent.parent.parent / "bin" / "cloudflared"),
+        shutil.which("cloudflared") or "",
+    ]
+    for candidate in candidates:
+        path = (candidate or "").strip()
+        if path and Path(path).exists():
+            return path
+    return None
+
+
+def _refresh_cloudflared_availability() -> bool:
+    available = bool(_get_cloudflared_binary())
+    with external_share_lock:
+        external_share_state["cloudflared_available"] = available
+    return available
+
+
+def _cloudflared_install_target() -> dict[str, str | bool]:
+    platform_name = "windows" if os.name == "nt" else ("macos" if sys.platform == "darwin" else sys.platform)
+    winget_path = shutil.which("winget") or ""
+    brew_path = shutil.which("brew") or ""
+    if platform_name == "windows":
+        return {
+            "platform": platform_name,
+            "package_manager": "winget" if winget_path else "",
+            "package_manager_available": bool(winget_path),
+            "download_url": "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+        }
+    if platform_name == "macos":
+        return {
+            "platform": platform_name,
+            "package_manager": "brew" if brew_path else "",
+            "package_manager_available": bool(brew_path),
+            "download_url": "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+        }
+    return {
+        "platform": platform_name,
+        "package_manager": "",
+        "package_manager_available": False,
+        "download_url": "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+    }
+
+
+def _install_cloudflared_via_package_manager() -> dict[str, object]:
+    target = _cloudflared_install_target()
+    platform_name = str(target.get("platform") or "")
+    package_manager = str(target.get("package_manager") or "")
+    if platform_name == "windows" and package_manager == "winget":
+        cmd = [
+            "winget",
+            "install",
+            "--id",
+            "Cloudflare.cloudflared",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ]
+    elif platform_name == "macos" and package_manager == "brew":
+        cmd = ["brew", "install", "cloudflared"]
+    else:
+        raise RuntimeError("Automatic install is only supported on Windows via winget or macOS via Homebrew.")
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=1800,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    installed = _refresh_cloudflared_availability()
+    return {
+        "platform": platform_name,
+        "package_manager": package_manager,
+        "command": cmd,
+        "returncode": int(result.returncode),
+        "stdout": stdout[-4000:],
+        "stderr": stderr[-4000:],
+        "installed": bool(installed),
+    }
+
+
+def _resolve_lan_host() -> str | None:
+    override = (os.getenv("CHATALOGUE_SHARE_LAN_HOST") or "").strip()
+    if override:
+        return override
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        host = sock.getsockname()[0]
+        sock.close()
+        if host and not _is_loopback_host(host):
+            return host
+    except Exception:
+        pass
+    try:
+        host = socket.gethostbyname(socket.gethostname())
+        if host and not _is_loopback_host(host):
+            return host
+    except Exception:
+        pass
+    return None
+
+
+def _extract_public_url_from_line(line: str) -> str | None:
+    match = re.search(r"https://[a-z0-9.-]+\.trycloudflare\.com", line, re.IGNORECASE)
+    if match:
+        return match.group(0)
+    return None
+
+
+def _drain_share_process_output(proc: subprocess.Popen, label: str) -> None:
+    try:
+        assert proc.stdout is not None
+        for raw_line in proc.stdout:
+            line = str(raw_line or "").rstrip()
+            if line:
+                _append_share_event(f"[{label}] {line}")
+    except Exception:
+        pass
+
+
+def _start_cloudflared_quick_tunnel(local_url: str, label: str) -> tuple[subprocess.Popen, str]:
+    binary = _get_cloudflared_binary()
+    if not binary:
+        raise RuntimeError("cloudflared was not found. Install it or add CLOUDFLARED_BIN to enable public share tunnels.")
+
+    proc = subprocess.Popen(
+        [binary, "tunnel", "--url", local_url, "--no-autoupdate"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+    public_url = None
+    deadline = time.time() + 25
+    buffered: list[str] = []
+    try:
+        assert proc.stdout is not None
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.1)
+                continue
+            buffered.append(line.rstrip())
+            detected = _extract_public_url_from_line(line)
+            if detected:
+                public_url = detected
+                break
+    except Exception:
+        pass
+
+    if not public_url:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        raise RuntimeError(f"cloudflared failed to return a public URL for {label}. Output: {' | '.join(buffered[-6:])}")
+
+    thread = threading.Thread(target=_drain_share_process_output, args=(proc, label), daemon=True, name=f"share-{label}-log")
+    thread.start()
+    return proc, public_url
+
+
+def _terminate_process(proc: subprocess.Popen | None) -> None:
+    if proc is None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _stop_external_share_locked(reason: str = "stopped") -> None:
+    processes = dict(external_share_state.get("processes") or {})
+    external_share_state.update({
+        "active": False,
+        "mode": "off",
+        "enable_tunnel": False,
+        "tunnel_provider": None,
+        "started_at": None,
+        "expires_at": None,
+        "token": None,
+        "password": None,
+        "ip_allowlist": [],
+        "frontend_local_url": None,
+        "api_local_url": None,
+        "frontend_lan_url": None,
+        "api_lan_url": None,
+        "frontend_public_url": None,
+        "api_public_url": None,
+        "share_url": None,
+        "processes": {},
+    })
+    for proc in processes.values():
+        _terminate_process(proc)
+    _append_share_event(f"External share stopped ({reason}).")
+
+
+def _ensure_external_share_not_expired() -> None:
+    with external_share_lock:
+        if not external_share_state.get("active"):
+            return
+        expires_at = external_share_state.get("expires_at")
+        if not expires_at:
+            return
+        try:
+            expiry = datetime.fromisoformat(str(expires_at))
+        except Exception:
+            return
+        if expiry <= _utc_now():
+            _stop_external_share_locked(reason="expired")
+
+
+def _parse_allowlist(value: str) -> list[str]:
+    items: list[str] = []
+    for raw in re.split(r"[\s,]+", str(value or "").strip()):
+        entry = raw.strip()
+        if not entry:
+            continue
+        try:
+            if "/" in entry:
+                ipaddress.ip_network(entry, strict=False)
+            else:
+                ipaddress.ip_address(entry)
+        except ValueError:
+            continue
+        items.append(entry)
+    return items
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    value = str(host or "").strip()
+    if value in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def _resolve_client_ip(request: Request) -> str:
+    for header in ("cf-connecting-ip", "x-forwarded-for", "x-real-ip"):
+        raw = (request.headers.get(header) or "").strip()
+        if not raw:
+            continue
+        if header == "x-forwarded-for":
+            raw = raw.split(",")[0].strip()
+        if raw:
+            return raw
+    return getattr(request.client, "host", "") or ""
+
+
+def _client_ip_allowed(client_ip: str, allowlist: list[str]) -> bool:
+    if not allowlist:
+        return True
+    try:
+        ip_obj = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    for entry in allowlist:
+        try:
+            if "/" in entry:
+                if ip_obj in ipaddress.ip_network(entry, strict=False):
+                    return True
+            elif ip_obj == ipaddress.ip_address(entry):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _external_share_error_response(request: Request, status_code: int, detail: str, code: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"detail": detail, "code": code},
+    )
+
+
+def _get_external_share_credentials(request: Request) -> tuple[str, str]:
+    token = (
+        request.headers.get(SHARE_TOKEN_HEADER)
+        or request.cookies.get(SHARE_COOKIE_TOKEN)
+        or request.query_params.get("share_token")
+        or ""
+    )
+    password = (
+        request.headers.get(SHARE_PASSWORD_HEADER)
+        or request.cookies.get(SHARE_COOKIE_PASSWORD)
+        or request.query_params.get("share_password")
+        or ""
+    )
+    return str(token).strip(), str(password).strip()
 
 
 @app.get("/system/cuda-health")
@@ -219,6 +754,213 @@ def reset_cuda_restart_state():
     except Exception:
         pass
     return {"status": "cleared"}
+
+
+def _require_local_operator(request: Request) -> None:
+    client_ip = _resolve_client_ip(request)
+    if not _is_loopback_host(client_ip):
+        raise HTTPException(status_code=403, detail="This operation is only available from the local machine.")
+
+
+@app.get("/share/public-status")
+def get_public_share_status(token: Optional[str] = None):
+    _ensure_external_share_not_expired()
+    snapshot = _snapshot_external_share_state(include_secrets=True)
+    expected_token = str(snapshot.get("token") or "")
+    if not snapshot.get("active") or not token or str(token).strip() != expected_token:
+        return {"active": False, "password_required": False}
+    return {
+        "active": True,
+        "password_required": bool(snapshot.get("password_required")),
+        "expires_at": snapshot.get("expires_at"),
+        "share_url": snapshot.get("share_url"),
+    }
+
+
+@app.get("/share/launch/{token}")
+def launch_external_share(token: str, request: Request):
+    _ensure_external_share_not_expired()
+    snapshot = _snapshot_external_share_state(include_secrets=True)
+    expected_token = str(snapshot.get("token") or "").strip()
+    client_ip = _resolve_client_ip(request)
+
+    if not snapshot.get("active") or not expected_token or str(token).strip() != expected_token:
+        _append_share_audit(action="share_launch_denied", allowed=False, reason="invalid_or_inactive", client_ip=client_ip, path=request.url.path)
+        return _render_share_launch_page(
+            destination_url=None,
+            title="Share Link Unavailable",
+            message="This share link is invalid or the share session has already ended.",
+            status_code=404,
+        )
+
+    api_url = snapshot.get("api_public_url") or snapshot.get("api_lan_url") or snapshot.get("api_local_url")
+    frontend_url = snapshot.get("frontend_public_url") or snapshot.get("frontend_lan_url") or snapshot.get("frontend_local_url")
+    destination_url = _build_share_destination_url(frontend_url, api_url, expected_token)
+    if not destination_url:
+        _append_share_audit(action="share_launch_denied", allowed=False, reason="missing_destination", client_ip=client_ip, path=request.url.path)
+        return _render_share_launch_page(
+            destination_url=None,
+            title="Share Link Unavailable",
+            message="This share session does not currently have a valid destination URL.",
+            status_code=500,
+        )
+
+    _append_share_audit(action="share_launch_allowed", allowed=True, reason="ok", client_ip=client_ip, path=request.url.path)
+    return _render_share_launch_page(
+        destination_url=destination_url,
+        title="Opening Shared Chatalogue",
+        message="Redirecting you to the shared Chatalogue session.",
+        status_code=200,
+    )
+
+
+@app.get("/share/status", response_model=ExternalShareStatus)
+def get_external_share_status(request: Request):
+    _ensure_external_share_not_expired()
+    _require_local_operator(request)
+    _refresh_cloudflared_availability()
+    snapshot = _snapshot_external_share_state()
+    return ExternalShareStatus(**snapshot)
+
+
+@app.get("/share/audit", response_model=List[ExternalShareAuditEntry])
+def get_external_share_audit(request: Request):
+    _ensure_external_share_not_expired()
+    _require_local_operator(request)
+    return [ExternalShareAuditEntry(**entry) for entry in list(external_share_audit_entries)]
+
+
+@app.post("/share/start", response_model=ExternalShareStatus)
+def start_external_share(req: ExternalShareStartRequest, request: Request):
+    _require_local_operator(request)
+    _ensure_external_share_not_expired()
+
+    duration_minutes = max(5, min(int(req.duration_minutes or 60), 24 * 60))
+    frontend_port = max(1, min(int(req.frontend_port or 5173), 65535))
+    backend_port = max(1, min(int(req.backend_port or 8011), 65535))
+    enable_tunnel = bool(req.enable_tunnel)
+    allowlist = _parse_allowlist(req.ip_allowlist)
+    password = str(req.password or "").strip()
+    token = secrets.token_urlsafe(24)
+    frontend_local_url = f"http://127.0.0.1:{frontend_port}"
+    api_local_url = f"http://127.0.0.1:{backend_port}"
+    lan_host = _resolve_lan_host()
+    frontend_lan_url = f"http://{lan_host}:{frontend_port}" if lan_host else None
+    api_lan_url = f"http://{lan_host}:{backend_port}" if lan_host else None
+    if not enable_tunnel and (not frontend_lan_url or not api_lan_url):
+        raise RuntimeError("Could not determine a LAN IP for this machine. Set CHATALOGUE_SHARE_LAN_HOST to the desired local network address and try again.")
+
+    with external_share_lock:
+        if external_share_state.get("active"):
+            _stop_external_share_locked(reason="restarted")
+
+    frontend_public_url = None
+    api_public_url = None
+    processes: dict[str, subprocess.Popen] = {}
+    tunnel_provider = None
+    if enable_tunnel:
+        try:
+            frontend_proc, frontend_public_url = _start_cloudflared_quick_tunnel(frontend_local_url, "frontend")
+            processes["frontend"] = frontend_proc
+            api_proc, api_public_url = _start_cloudflared_quick_tunnel(api_local_url, "api")
+            processes["api"] = api_proc
+            tunnel_provider = "cloudflared"
+        except Exception:
+            for proc in processes.values():
+                _terminate_process(proc)
+            raise
+
+    mode = "public_tunnel" if enable_tunnel else "lan"
+    share_url = _build_share_launch_url(
+        api_public_url or api_lan_url or api_local_url,
+        token,
+    )
+
+    started_at = _utc_now()
+    expires_at = started_at + timedelta(minutes=duration_minutes)
+    with external_share_lock:
+        external_share_state.update({
+            "active": True,
+            "mode": mode,
+            "enable_tunnel": enable_tunnel,
+            "tunnel_provider": tunnel_provider,
+            "started_at": started_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "token": token,
+            "password": password or None,
+            "ip_allowlist": allowlist,
+            "frontend_local_url": frontend_local_url,
+            "api_local_url": api_local_url,
+            "frontend_lan_url": frontend_lan_url,
+            "api_lan_url": api_lan_url,
+            "frontend_public_url": frontend_public_url,
+            "api_public_url": api_public_url,
+            "share_url": share_url,
+            "processes": processes,
+        })
+    _append_share_event(f"External share started. mode={mode} tunnel={enable_tunnel} expires_at={expires_at.isoformat()}")
+    _append_share_audit(action="share_started", allowed=True, reason="ok", client_ip=_resolve_client_ip(request), path="/share/start")
+    return ExternalShareStatus(**_snapshot_external_share_state())
+
+
+@app.post("/share/stop", response_model=ExternalShareStatus)
+def stop_external_share(request: Request):
+    _require_local_operator(request)
+    with external_share_lock:
+        _stop_external_share_locked(reason="manual_stop")
+    _append_share_audit(action="share_stopped", allowed=True, reason="manual_stop", client_ip=_resolve_client_ip(request), path="/share/stop")
+    return ExternalShareStatus(**_snapshot_external_share_state())
+
+
+@app.get("/system/cloudflared/install-info")
+def get_cloudflared_install_info(request: Request):
+    _require_local_operator(request)
+    target = _cloudflared_install_target()
+    return {
+        **target,
+        "installed": bool(_refresh_cloudflared_availability()),
+    }
+
+
+@app.post("/system/cloudflared/install")
+def install_cloudflared(request: Request):
+    _require_local_operator(request)
+    if _refresh_cloudflared_availability():
+        info = _cloudflared_install_target()
+        return {
+            "status": "already_installed",
+            **info,
+            "installed": True,
+        }
+
+    target = _cloudflared_install_target()
+    if not bool(target.get("package_manager_available")):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Automatic install is unavailable on {target.get('platform')} because "
+                f"{target.get('package_manager') or 'a supported package manager'} was not found. "
+                f"Install cloudflared manually from {target.get('download_url')}."
+            ),
+        )
+
+    try:
+        result = _install_cloudflared_via_package_manager()
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Timed out while installing cloudflared.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"cloudflared install failed: {e}")
+
+    if not result.get("installed"):
+        detail = str(result.get("stderr") or result.get("stdout") or "unknown installer failure")
+        raise HTTPException(status_code=500, detail=f"cloudflared install did not complete successfully: {detail[:700]}")
+
+    _append_share_event(f"cloudflared installed via {result.get('package_manager')}")
+    return {
+        "status": "installed",
+        **result,
+        "download_url": target.get("download_url"),
+    }
 
 
 YOUTUBE_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube"
@@ -1237,12 +1979,60 @@ def _youtube_channel_ownership_check_for_app_channel(channel: Channel) -> dict:
 # --- Channels ---
 
 @app.post("/channels", response_model=Channel)
-def create_channel(url: str, background_tasks: BackgroundTasks):
+def create_channel(url: str, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
     try:
         channel = ingestion_service.add_channel(url)
+        managed_channel = session.get(Channel, channel.id)
+        if managed_channel:
+            managed_channel.status = "refreshing"
+            managed_channel.sync_status_detail = "Starting channel scan..."
+            managed_channel.sync_progress = 1
+            managed_channel.sync_total_items = 0
+            managed_channel.sync_completed_items = 0
+            session.add(managed_channel)
+            session.commit()
+            session.refresh(managed_channel)
+            channel = managed_channel
         # Auto-refresh on add
         background_tasks.add_task(ingestion_service.refresh_channel, channel.id)
         return channel
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/channels/manual", response_model=Channel)
+def create_manual_channel(name: str, session: Session = Depends(get_session)):
+    try:
+        channel = ingestion_service.create_manual_channel(name)
+        managed_channel = session.get(Channel, channel.id)
+        return managed_channel or channel
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/channels/tiktok", response_model=Channel)
+def create_tiktok_channel(
+    name: Optional[str] = None,
+    url: Optional[str] = None,
+    background_tasks: BackgroundTasks = None,
+    session: Session = Depends(get_session),
+):
+    try:
+        channel = ingestion_service.create_tiktok_channel(name, url)
+        managed_channel = session.get(Channel, channel.id)
+        channel_obj = managed_channel or channel
+        if "tiktok.com" in str(channel_obj.url or "").lower():
+            channel_obj.status = "refreshing"
+            channel_obj.sync_status_detail = "Starting TikTok profile scan..."
+            channel_obj.sync_progress = 1
+            channel_obj.sync_total_items = 0
+            channel_obj.sync_completed_items = 0
+            session.add(channel_obj)
+            session.commit()
+            session.refresh(channel_obj)
+            if background_tasks is not None:
+                background_tasks.add_task(ingestion_service.refresh_channel, channel_obj.id)
+        return channel_obj
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1252,13 +2042,14 @@ def read_channels(session: Session = Depends(get_session)):
 
 @app.get("/channels/overview", response_model=List[ChannelOverviewRead])
 def read_channels_overview(session: Session = Depends(get_session)):
-    from sqlalchemy import case
+    from sqlalchemy import and_, case
 
     video_stats = (
         select(
             Video.channel_id.label("channel_id"),
             func.count(Video.id).label("video_count"),
             func.sum(case((Video.processed.is_(True), 1), else_=0)).label("processed_count"),
+            func.sum(case((and_(Video.processed.is_(False), Video.muted.is_(False), Video.access_restricted.is_(False)), 1), else_=0)).label("pending_video_count"),
             func.sum(func.coalesce(Video.duration, 0)).label("total_duration_seconds"),
         )
         .group_by(Video.channel_id)
@@ -1272,17 +2063,34 @@ def read_channels_overview(session: Session = Depends(get_session)):
         .group_by(Speaker.channel_id)
         .subquery()
     )
+    active_job_stats = (
+        select(
+            Video.channel_id.label("channel_id"),
+            func.count(Job.id).label("active_job_count"),
+        )
+        .select_from(Job)
+        .join(Video, Video.id == Job.video_id)
+        .where(
+            Job.job_type.in_(["process", "diarize"]),
+            Job.status.in_(PIPELINE_ACTIVE_STATUSES),
+        )
+        .group_by(Video.channel_id)
+        .subquery()
+    )
 
     rows = session.exec(
         select(
             Channel,
             func.coalesce(video_stats.c.video_count, 0).label("video_count"),
             func.coalesce(video_stats.c.processed_count, 0).label("processed_count"),
+            func.coalesce(video_stats.c.pending_video_count, 0).label("pending_video_count"),
             func.coalesce(video_stats.c.total_duration_seconds, 0).label("total_duration_seconds"),
             func.coalesce(speaker_stats.c.speaker_count, 0).label("speaker_count"),
+            func.coalesce(active_job_stats.c.active_job_count, 0).label("active_job_count"),
         )
         .outerjoin(video_stats, video_stats.c.channel_id == Channel.id)
         .outerjoin(speaker_stats, speaker_stats.c.channel_id == Channel.id)
+        .outerjoin(active_job_stats, active_job_stats.c.channel_id == Channel.id)
         .order_by(Channel.id.asc())
     ).all()
 
@@ -1291,16 +2099,24 @@ def read_channels_overview(session: Session = Depends(get_session)):
             id=channel.id,
             url=channel.url,
             name=channel.name,
+            source_type=channel.source_type,
             icon_url=channel.icon_url,
             header_image_url=channel.header_image_url,
             last_updated=channel.last_updated,
             status=channel.status,
+            actively_monitored=bool(getattr(channel, "actively_monitored", False)),
+            sync_status_detail=channel.sync_status_detail,
+            sync_progress=int(channel.sync_progress or 0),
+            sync_total_items=int(channel.sync_total_items or 0),
+            sync_completed_items=int(channel.sync_completed_items or 0),
             video_count=int(video_count or 0),
             processed_count=int(processed_count or 0),
+            pending_video_count=int(pending_video_count or 0),
+            active_job_count=int(active_job_count or 0),
             total_duration_seconds=int(total_duration_seconds or 0),
             speaker_count=int(speaker_count or 0),
         )
-        for channel, video_count, processed_count, total_duration_seconds, speaker_count in rows
+        for channel, video_count, processed_count, pending_video_count, total_duration_seconds, speaker_count, active_job_count in rows
     ]
 
 @app.get("/channels/{channel_id}", response_model=Channel)
@@ -1311,9 +2127,59 @@ def read_channel(channel_id: int, session: Session = Depends(get_session)):
     return channel
 
 @app.post("/channels/{channel_id}/refresh")
-def refresh_channel(channel_id: int, background_tasks: BackgroundTasks):
+def refresh_channel(channel_id: int, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+    channel = session.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    channel_source = (channel.source_type or "youtube").strip().lower()
+    if channel_source == "manual":
+        raise HTTPException(status_code=409, detail="Manual channels do not support remote refresh.")
+    if channel_source == "tiktok" and "tiktok.com" not in str(channel.url or "").lower():
+        raise HTTPException(status_code=409, detail="This TikTok channel needs a real creator/profile URL before it can refresh.")
+    channel.status = "refreshing"
+    channel.sync_status_detail = "Starting channel scan..."
+    channel.sync_progress = 1
+    channel.sync_total_items = 0
+    channel.sync_completed_items = 0
+    session.add(channel)
+    session.commit()
     background_tasks.add_task(ingestion_service.refresh_channel, channel_id)
     return {"status": "refresh_started"}
+
+@app.patch("/channels/{channel_id}/actively-monitored", response_model=Channel)
+def set_channel_actively_monitored(
+    channel_id: int,
+    enabled: bool,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    channel = session.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    channel_source = (channel.source_type or "youtube").strip().lower()
+    if channel_source == "manual":
+        if enabled:
+            raise HTTPException(status_code=409, detail="Manual channels do not support active monitoring.")
+        channel.actively_monitored = False
+        session.add(channel)
+        session.commit()
+        session.refresh(channel)
+        return channel
+    if channel_source == "tiktok" and enabled and "tiktok.com" not in str(channel.url or "").lower():
+        raise HTTPException(status_code=409, detail="This TikTok channel needs a real creator/profile URL before monitoring can be enabled.")
+    channel.actively_monitored = enabled
+    if not enabled and channel.status == "refreshing":
+        channel.status = "active"
+        channel.sync_status_detail = "Monitoring disabled."
+        channel.sync_progress = 0
+        channel.sync_total_items = 0
+        channel.sync_completed_items = 0
+    session.add(channel)
+    session.commit()
+    session.refresh(channel)
+    if enabled:
+        background_tasks.add_task(ingestion_service.sync_monitored_channel, channel_id)
+    return channel
 
 @app.get("/channels/{channel_id}/youtube-publish-ownership-check")
 def check_channel_youtube_publish_ownership(channel_id: int, session: Session = Depends(get_session)):
@@ -1333,66 +2199,173 @@ def check_channel_youtube_publish_ownership(channel_id: int, session: Session = 
 
 @app.post("/channels/{channel_id}/add-video")
 def add_video_to_channel(channel_id: int, url: str, session: Session = Depends(get_session)):
-    """Manually add a video to a channel by YouTube URL.
-    Useful when a new upload hasn't been picked up by the channel refresh yet."""
+    """Manually add a source video to a channel."""
     import re
-    from datetime import datetime
     
     channel = session.get(Channel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    
-    # Extract video ID from URL
-    match = re.search(r'(?:v=|youtu\.be/|/v/)([a-zA-Z0-9_-]{11})', url)
-    if not match:
-        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
-    
-    yt_id = match.group(1)
-    
-    # Check if already exists
-    existing = session.exec(select(Video).where(Video.youtube_id == yt_id)).first()
-    if existing:
-        return existing
-    
-    # Fetch metadata
+    channel_source = (channel.source_type or "youtube").strip().lower()
+    if channel_source == "manual":
+        raise HTTPException(status_code=409, detail="Use media upload for manual channels.")
+
+    normalized_url = " ".join((url or "").strip().split())
+    if not normalized_url:
+        raise HTTPException(status_code=400, detail="A source URL is required.")
+
+    if channel_source == "youtube":
+        match = re.search(r'(?:v=|youtu\.be/|/v/)([a-zA-Z0-9_-]{11})', normalized_url)
+        if not match:
+            raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+
+        source_id = match.group(1)
+        lookup_url = f"https://www.youtube.com/watch?v={source_id}"
+        existing = session.exec(select(Video).where(Video.youtube_id == source_id)).first()
+        if existing:
+            return existing
+    elif channel_source == "tiktok":
+        if "tiktok.com" not in normalized_url.lower():
+            raise HTTPException(status_code=400, detail="Invalid TikTok URL")
+        normalized_url = _normalize_tiktok_video_url(normalized_url)
+        lookup_url = normalized_url
+        existing = session.exec(select(Video).where(Video.source_url == normalized_url)).first()
+        if existing:
+            return existing
+    else:
+        raise HTTPException(status_code=409, detail="This channel type does not support remote add-video ingest yet.")
+
     try:
-        import yt_dlp
-        ydl_opts = {'quiet': True, 'no_warnings': True}
-        ydl_opts = _apply_ytdlp_auth_opts(ydl_opts)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={yt_id}", download=False)
+        info = _fetch_remote_video_info(lookup_url)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to fetch video info: {e}")
-    
-    pub_date = None
-    upload_date_str = info.get('upload_date')
-    if upload_date_str:
-        try:
-            pub_date = datetime.strptime(upload_date_str, "%Y%m%d")
-        except ValueError:
-            pass
-    if not pub_date and info.get('release_timestamp'):
-        pub_date = datetime.fromtimestamp(info['release_timestamp'])
-    
-    thumbnails = info.get('thumbnails', [])
-    thumbnail_url = None
-    if thumbnails:
-        for t in reversed(thumbnails):
-            if t.get('url'):
-                thumbnail_url = t['url']
-                break
-    
+
+    external_url = str(info.get("webpage_url") or normalized_url).strip() or normalized_url
+    if channel_source == "tiktok":
+        external_url = _normalize_tiktok_video_url(external_url)
+    if channel_source == "tiktok":
+        existing = session.exec(select(Video).where(Video.source_url == external_url)).first()
+        if existing:
+            return existing
+
+    if channel_source == "youtube":
+        external_id = str(info.get("id") or source_id).strip() or source_id
+        unique_video_id = external_id
+        media_source_type = "youtube"
+        media_kind = None
+    else:
+        external_id = str(info.get("id") or "").strip()
+        unique_video_id = _make_unique_external_video_id("tiktok", external_id, session)
+        media_source_type = "tiktok"
+        media_kind = "video"
+
     video = Video(
-        youtube_id=yt_id,
+        youtube_id=unique_video_id,
         channel_id=channel.id,
-        title=info.get('title', 'Unknown Title'),
-        description=info.get('description'),
-        published_at=pub_date,
-        duration=info.get('duration'),
-        thumbnail_url=thumbnail_url,
-        status="pending"
+        title=str(info.get("title") or "Unknown Title"),
+        media_source_type=media_source_type,
+        source_url=external_url,
+        media_kind=media_kind,
+        description=info.get("description"),
+        published_at=_extract_publish_datetime(info),
+        duration=info.get("duration"),
+        thumbnail_url=_extract_best_thumbnail_url(info),
+        status="pending",
     )
     session.add(video)
+    session.flush()
+    if channel_source == "youtube":
+        try:
+            ingestion_service.populate_placeholder_transcript(session, video, info=info)
+        except Exception as e:
+            logging.warning("Placeholder transcript fetch failed for %s: %s", unique_video_id, e)
+    elif channel_source == "tiktok":
+        try:
+            ingestion_service.populate_placeholder_transcript(session, video, info=info)
+        except Exception as e:
+            logging.warning("TikTok placeholder transcript fetch failed for %s: %s", unique_video_id, e)
+    session.commit()
+    session.refresh(video)
+    return video
+
+
+def _classify_manual_media_kind(filename: str, content_type: str | None) -> Optional[str]:
+    suffix = Path(filename or "").suffix.lower()
+    if (content_type or "").startswith("audio/"):
+        return "audio"
+    if (content_type or "").startswith("video/"):
+        return "video"
+    if suffix in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma"}:
+        return "audio"
+    if suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}:
+        return "video"
+    return None
+
+
+@app.post("/channels/{channel_id}/upload-media", response_model=Video)
+async def upload_media_to_channel(
+    channel_id: int,
+    file: UploadFile = File(...),
+    title: Optional[str] = Form(default=None),
+    session: Session = Depends(get_session),
+):
+    channel = session.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if (channel.source_type or "youtube") != "manual":
+        raise HTTPException(status_code=409, detail="Media uploads are only supported for manual channels.")
+
+    original_name = (file.filename or "").strip()
+    if not original_name:
+        raise HTTPException(status_code=400, detail="Uploaded file is missing a filename.")
+
+    media_kind = _classify_manual_media_kind(original_name, file.content_type)
+    if media_kind is None:
+        raise HTTPException(status_code=400, detail="Unsupported media type. Upload an audio or video file.")
+
+    suffix = Path(original_name).suffix.lower()
+    safe_base = ingestion_service.sanitize_filename(Path(original_name).stem)
+    safe_name = f"{safe_base or 'episode'}{suffix}"
+    storage_rel_dir = Path(f"channel_{channel.id}")
+    storage_dir = MANUAL_MEDIA_DIR / storage_rel_dir
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    unique_prefix = secrets.token_hex(6)
+    stored_path = storage_dir / f"{unique_prefix}_{safe_name}"
+
+    try:
+        with stored_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    finally:
+        await file.close()
+
+    try:
+        duration_raw = ingestion_service._probe_media_duration_seconds(stored_path)
+    except Exception:
+        duration_raw = None
+    duration = None
+    if duration_raw and duration_raw > 0:
+        duration = max(1, int(round(float(duration_raw))))
+
+    resolved_title = " ".join((title or Path(original_name).stem).strip().split()) or Path(original_name).stem or "Uploaded Episode"
+
+    youtube_id = f"upload_{secrets.token_hex(8)}"
+    while session.exec(select(Video).where(Video.youtube_id == youtube_id)).first():
+        youtube_id = f"upload_{secrets.token_hex(8)}"
+
+    video = Video(
+        youtube_id=youtube_id,
+        channel_id=channel.id,
+        title=resolved_title,
+        media_source_type="upload",
+        media_kind=media_kind,
+        manual_media_path=(storage_rel_dir / stored_path.name).as_posix(),
+        published_at=datetime.now(),
+        duration=duration,
+        status="pending",
+        processed=False,
+    )
+    session.add(video)
+    channel.last_updated = datetime.now()
+    session.add(channel)
     session.commit()
     session.refresh(video)
     return video
@@ -1876,13 +2849,22 @@ def read_videos_list(channel_id: Optional[int] = None, session: Session = Depend
         Video.youtube_id,
         Video.channel_id,
         Video.title,
+        Video.media_source_type,
+        Video.source_url,
+        Video.media_kind,
+        Video.manual_media_path,
         Video.published_at,
         Video.description,
         Video.thumbnail_url,
         Video.duration,
         Video.processed,
         Video.muted,
+        Video.access_restricted,
+        Video.access_restriction_reason,
         Video.status,
+        Video.transcript_source,
+        Video.transcript_language,
+        Video.transcript_is_placeholder,
     )
     if channel_id:
         query = query.where(Video.channel_id == channel_id)
@@ -1899,13 +2881,22 @@ def read_videos_list(channel_id: Optional[int] = None, session: Session = Depend
             youtube_id=row[1],
             channel_id=row[2],
             title=row[3],
-            published_at=row[4],
-            description=row[5],
-            thumbnail_url=row[6],
-            duration=row[7],
-            processed=bool(row[8]),
-            muted=bool(row[9]),
-            status=row[10],
+            media_source_type=row[4],
+            source_url=row[5],
+            media_kind=row[6],
+            manual_media_path=row[7],
+            published_at=row[8],
+            description=row[9],
+            thumbnail_url=row[10],
+            duration=row[11],
+            processed=bool(row[12]),
+            muted=bool(row[13]),
+            access_restricted=bool(row[14]),
+            access_restriction_reason=row[15],
+            status=row[16],
+            transcript_source=row[17],
+            transcript_language=row[18],
+            transcript_is_placeholder=bool(row[19]),
         )
         for row in rows
     ]
@@ -1915,6 +2906,81 @@ def read_video(video_id: int, session: Session = Depends(get_session)):
     video = session.get(Video, video_id)
     if not video: raise HTTPException(status_code=404, detail="Video not found")
     return video
+
+
+@app.get("/videos/{video_id}/media")
+def stream_video_media(video_id: int, session: Session = Depends(get_session)):
+    import mimetypes
+
+    video = session.get(Video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if (video.media_source_type or "youtube") == "youtube":
+        raise HTTPException(status_code=409, detail="This episode is streamed from YouTube, not from local media.")
+
+    media_path = ingestion_service.get_audio_path(video)
+    if not media_path.exists():
+        raise HTTPException(status_code=404, detail="Local media is not available yet. Start processing or wait for download to complete.")
+
+    media_type = mimetypes.guess_type(str(media_path))[0] or "application/octet-stream"
+    return FileResponse(path=media_path, media_type=media_type, filename=media_path.name)
+
+
+def _extract_publish_datetime(info: dict) -> Optional[datetime]:
+    upload_date_str = info.get("upload_date")
+    if upload_date_str:
+        try:
+            return datetime.strptime(str(upload_date_str), "%Y%m%d")
+        except ValueError:
+            pass
+
+    timestamp_value = info.get("release_timestamp") or info.get("timestamp")
+    if timestamp_value:
+        try:
+            return datetime.fromtimestamp(float(timestamp_value))
+        except Exception:
+            return None
+    return None
+
+
+def _extract_best_thumbnail_url(info: dict) -> Optional[str]:
+    thumbnails = info.get("thumbnails") or []
+    for thumb in reversed(thumbnails):
+        url = str(thumb.get("url") or "").strip()
+        if url:
+            return url
+    return None
+
+
+def _make_unique_external_video_id(prefix: str, raw_id: str, session: Session) -> str:
+    base = f"{prefix}_{raw_id}" if raw_id else f"{prefix}_{secrets.token_hex(8)}"
+    candidate = base
+    while session.exec(select(Video).where(Video.youtube_id == candidate)).first():
+        candidate = f"{base}_{secrets.token_hex(3)}"
+    return candidate
+
+
+def _normalize_tiktok_video_url(url: str) -> str:
+    text = " ".join((url or "").strip().split())
+    match = re.search(r"tiktok\.com/@([^/?#]+)/video/(\d+)", text, re.IGNORECASE)
+    if match:
+        return f"https://www.tiktok.com/@{match.group(1)}/video/{match.group(2)}"
+    vm_match = re.search(r"(https?://vm\.tiktok\.com/[A-Za-z0-9]+/?|https?://vt\.tiktok\.com/[A-Za-z0-9]+/?)", text, re.IGNORECASE)
+    if vm_match:
+        return vm_match.group(1)
+    return text
+
+
+def _fetch_remote_video_info(url: str) -> dict:
+    import yt_dlp
+
+    ydl_opts = {"quiet": True, "no_warnings": True}
+    ydl_opts = _apply_ytdlp_auth_opts(ydl_opts)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not isinstance(info, dict):
+        raise RuntimeError("Failed to extract remote video metadata.")
+    return info
 
 def _archive_video_description_if_needed(
     session: Session,
@@ -1981,6 +3047,14 @@ def _enqueue_unique_job(
 
 @app.post("/videos/{video_id}/process")
 def process_video(video_id: int, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+    video = session.get(Video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.access_restricted:
+        raise HTTPException(
+            status_code=409,
+            detail=video.access_restriction_reason or "This video is not accessible with the current YouTube session.",
+        )
     job = session.exec(
         select(Job).where(
             Job.video_id == video_id,
@@ -2000,33 +3074,12 @@ def process_video(video_id: int, background_tasks: BackgroundTasks, session: Ses
 @app.post("/channels/{channel_id}/process-all")
 def process_all_videos(channel_id: int, session: Session = Depends(get_session)):
     """Queue all unmuted, unprocessed videos in a channel for processing"""
-    videos = session.exec(
-        select(Video).where(
-            Video.channel_id == channel_id,
-            Video.muted == False,
-            Video.processed == False
-        )
-    ).all()
-
-    jobs_created = []
-    for video in videos:
-        # Check if there's already an active job for this video
-        existing = session.exec(
-            select(Job).where(
-                Job.video_id == video.id,
-                Job.status.in_(PIPELINE_ACTIVE_STATUSES)
-            )
-        ).first()
-
-        if not existing:
-            job = Job(video_id=video.id, job_type="process", status="queued")
-            session.add(job)
-            jobs_created.append(video.id)
-
+    channel = session.get(Channel, channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    queued = ingestion_service._queue_channel_unprocessed_videos(session, channel_id)
     session.commit()
-
-    # Worker will pick these up automatically
-    return {"queued": len(jobs_created), "video_ids": jobs_created}
+    return {"queued": int(queued)}
 
 @app.post("/jobs/pause-all")
 def pause_all_jobs(session: Session = Depends(get_session)):
@@ -3420,40 +4473,20 @@ def _is_unknown_speaker_name(name: Optional[str]) -> bool:
     return False
 
 
-def _get_speaker_scope_rows(
+def _speaker_scope_key(channel_id: Optional[int], video_id: Optional[int]) -> str:
+    return f"channel:{channel_id or 'all'}|video:{video_id or 'all'}"
+
+
+def _build_speaker_scope_list_query(
     *,
-    session: Session,
     channel_id: Optional[int],
     video_id: Optional[int],
-) -> list[dict]:
-    """
-    Build/cached aggregate speaker rows for a scope (channel or video).
-    This avoids re-running the expensive transcript aggregation per page
-    and per counts request.
-    """
+):
     from sqlalchemy import func
 
-    scope_key = f"channel:{channel_id or 'all'}|video:{video_id or 'all'}"
-    cached_rows = _get_speaker_scope_cache(scope_key)
-    if cached_rows is not None:
-        return cached_rows
-
     seg_duration = (TranscriptSegment.end_time - TranscriptSegment.start_time)
-    agg_query = select(
-        TranscriptSegment.speaker_id.label("speaker_id"),
-        func.sum(seg_duration).label("total_time"),
-    ).where(TranscriptSegment.speaker_id.is_not(None))
-
-    if video_id:
-        agg_query = agg_query.where(TranscriptSegment.video_id == video_id)
-    if channel_id:
-        # Performance critical on large channels: filter transcript rows
-        # via channel video ids so DB can use video_id-oriented indexes.
-        channel_video_ids = select(Video.id).where(Video.channel_id == channel_id)
-        agg_query = agg_query.where(TranscriptSegment.video_id.in_(channel_video_ids))
-
-    agg_subq = agg_query.group_by(TranscriptSegment.speaker_id).subquery()
-    rows = session.exec(
+    total_time = func.sum(seg_duration).label("total_time")
+    query = (
         select(
             Speaker.id,
             Speaker.channel_id,
@@ -3461,15 +4494,51 @@ def _get_speaker_scope_rows(
             Speaker.thumbnail_path,
             Speaker.is_extra,
             Speaker.created_at,
-            agg_subq.c.total_time,
+            total_time,
         )
-        .join(agg_subq, agg_subq.c.speaker_id == Speaker.id)
-        .where(agg_subq.c.total_time > 5.0)
-        .order_by(agg_subq.c.total_time.desc())
-    ).all()
+        .join(TranscriptSegment, TranscriptSegment.speaker_id == Speaker.id)
+        .where(TranscriptSegment.speaker_id.is_not(None))
+    )
 
+    if channel_id:
+        query = query.where(Speaker.channel_id == channel_id)
+    if video_id:
+        query = query.where(TranscriptSegment.video_id == video_id)
+
+    query = query.group_by(
+        Speaker.id,
+        Speaker.channel_id,
+        Speaker.name,
+        Speaker.thumbnail_path,
+        Speaker.is_extra,
+        Speaker.created_at,
+    ).having(total_time > 5.0)
+
+    return query, total_time
+
+
+def _query_speaker_page_rows(
+    *,
+    session: Session,
+    channel_id: Optional[int],
+    video_id: Optional[int],
+    offset: int,
+    limit: Optional[int],
+) -> list[dict]:
+    scope_key = _speaker_scope_key(channel_id, video_id)
+    cache_key = f"{scope_key}|offset:{offset}|limit:{limit if limit is not None else 'all'}"
+    cached_rows = _get_speaker_list_cache(cache_key)
+    if cached_rows is not None:
+        return cached_rows
+
+    query, total_time = _build_speaker_scope_list_query(channel_id=channel_id, video_id=video_id)
+    query = query.order_by(total_time.desc()).offset(offset)
+    if limit is not None:
+        query = query.limit(limit)
+
+    rows = session.exec(query).all()
     out: list[dict] = []
-    for speaker_id, speaker_channel_id, name, thumbnail_path, is_extra, created_at, total_time in rows:
+    for speaker_id, speaker_channel_id, name, thumbnail_path, is_extra, created_at, total_time_value in rows:
         out.append(
             {
                 "id": int(speaker_id),
@@ -3478,11 +4547,50 @@ def _get_speaker_scope_rows(
                 "thumbnail_path": thumbnail_path,
                 "is_extra": bool(is_extra),
                 "created_at": created_at,
-                "total_speaking_time": round(float(total_time or 0.0), 1),
+                "total_speaking_time": round(float(total_time_value or 0.0), 1),
             }
         )
 
-    _set_speaker_scope_cache(scope_key, out)
+    _set_speaker_list_cache(cache_key, out)
+    return out
+
+
+def _query_speaker_count_rows(
+    *,
+    session: Session,
+    channel_id: Optional[int],
+    video_id: Optional[int],
+) -> list[tuple[str, bool, float]]:
+    scope_key = _speaker_scope_key(channel_id, video_id)
+    cached_rows = _get_speaker_scope_cache(scope_key)
+    if cached_rows is not None:
+        return [
+            (
+                str(row.get("name") or ""),
+                bool(row.get("is_extra")),
+                float(row.get("total_speaking_time") or 0.0),
+            )
+            for row in cached_rows
+        ]
+
+    query, total_time = _build_speaker_scope_list_query(channel_id=channel_id, video_id=video_id)
+    query = query.with_only_columns(Speaker.name, Speaker.is_extra, total_time).order_by(None)
+    rows = session.exec(query).all()
+    out = [
+        (str(name or ""), bool(is_extra), float(total_time_value or 0.0))
+        for name, is_extra, total_time_value in rows
+    ]
+    _set_speaker_scope_cache(
+        scope_key,
+        [
+            {
+                "name": name,
+                "is_extra": is_extra,
+                "total_speaking_time": total_time_value,
+            }
+            for name, is_extra, total_time_value in out
+        ],
+    )
     return out
 
 
@@ -3507,15 +4615,13 @@ def read_speakers(
 
     safe_offset = max(0, int(offset or 0))
     safe_limit = None if limit is None else max(1, min(int(limit), 500))
-    scope_rows = _get_speaker_scope_rows(session=session, channel_id=channel_id, video_id=video_id)
-
-    if safe_offset >= len(scope_rows):
-        return []
-
-    if safe_limit is None:
-        page_rows = scope_rows[safe_offset:]
-    else:
-        page_rows = scope_rows[safe_offset:safe_offset + safe_limit]
+    page_rows = _query_speaker_page_rows(
+        session=session,
+        channel_id=channel_id,
+        video_id=video_id,
+        offset=safe_offset,
+        limit=safe_limit,
+    )
 
     emb_counts = {}
     if page_rows:
@@ -3554,24 +4660,23 @@ def read_speaker_counts(
 ):
     EXTRAS_THRESHOLD = 60.0
 
-    cache_key = f"channel:{channel_id or 'all'}|video:{video_id or 'all'}"
+    cache_key = _speaker_scope_key(channel_id, video_id)
     cached = _get_speaker_counts_cache(cache_key)
     if cached is not None:
         return SpeakerCountsRead(**cached)
-    rows = _get_speaker_scope_rows(session=session, channel_id=channel_id, video_id=video_id)
+    rows = _query_speaker_count_rows(session=session, channel_id=channel_id, video_id=video_id)
     total = len(rows)
     unknown = 0
     identified = 0
     main = 0
     extras = 0
 
-    for row in rows:
-        total_time = float(row.get("total_speaking_time") or 0.0)
-        if _is_unknown_speaker_name(row.get("name")):
+    for name, is_extra, total_time in rows:
+        if _is_unknown_speaker_name(name):
             unknown += 1
             continue
         identified += 1
-        if bool(row.get("is_extra")) or total_time < EXTRAS_THRESHOLD:
+        if bool(is_extra) or float(total_time or 0.0) < EXTRAS_THRESHOLD:
             extras += 1
         else:
             main += 1
@@ -3630,6 +4735,8 @@ def read_speaker_appearances(speaker_id: int, session: Session = Depends(get_ses
             Video.id,
             Video.youtube_id,
             Video.title,
+            Video.media_source_type,
+            Video.media_kind,
             Video.published_at,
             Video.thumbnail_url,
             func.count(TranscriptSegment.id).label("segment_count"),
@@ -3654,12 +4761,14 @@ def read_speaker_appearances(speaker_id: int, session: Session = Depends(get_ses
                 video_id=row[0],
                 youtube_id=row[1],
                 title=row[2],
-                published_at=row[3],
-                thumbnail_url=row[4],
-                segment_count=int(row[5] or 0),
-                total_speaking_time=round(float(row[6] or 0), 1),
-                first_start_time=float(row[7] or 0),
-                last_end_time=float(row[8] or 0),
+                media_source_type=row[3] or "youtube",
+                media_kind=row[4],
+                published_at=row[5],
+                thumbnail_url=row[6],
+                segment_count=int(row[7] or 0),
+                total_speaking_time=round(float(row[8] or 0), 1),
+                first_start_time=float(row[9] or 0),
+                last_end_time=float(row[10] or 0),
             )
         )
     return appearances
@@ -3686,6 +4795,8 @@ def read_speaker_profiles(speaker_id: int, session: Session = Depends(get_sessio
                 source_video_id=emb.source_video_id,
                 source_video_title=source_video.title if source_video else None,
                 source_video_youtube_id=source_video.youtube_id if source_video else None,
+                source_video_media_source_type=source_video.media_source_type if source_video else None,
+                source_video_media_kind=source_video.media_kind if source_video else None,
                 source_video_published_at=source_video.published_at if source_video else None,
                 sample_start_time=emb.sample_start_time,
                 sample_end_time=emb.sample_end_time,
@@ -3817,7 +4928,13 @@ def get_speaker_samples(speaker_id: int, count: int = 3, strategy: str = "random
     from sqlalchemy.sql import func
     
     # Base query joining Video to get metadata
-    query = select(TranscriptSegment, Video.channel_id, Video.youtube_id)\
+    query = select(
+        TranscriptSegment,
+        Video.channel_id,
+        Video.youtube_id,
+        Video.media_source_type,
+        Video.media_kind,
+    )\
         .join(Video)\
         .where(
             TranscriptSegment.speaker_id == speaker_id,
@@ -3835,11 +4952,13 @@ def get_speaker_samples(speaker_id: int, count: int = 3, strategy: str = "random
     
     # Convert to response model
     samples = []
-    for segment, channel_id, youtube_id in results:
+    for segment, channel_id, youtube_id, media_source_type, media_kind in results:
         # Create a dictionary of the segment data and add the extra fields
         data = segment.model_dump()
         data["channel_id"] = channel_id
         data["youtube_id"] = youtube_id
+        data["media_source_type"] = media_source_type or "youtube"
+        data["media_kind"] = media_kind
         samples.append(SpeakerSample(**data))
         
     return samples
@@ -4136,7 +5255,9 @@ def purge_video(video_id: int, session: Session = Depends(get_session)):
             video.status = "pending"
     except:
         video.status = "pending"
-        
+    video.transcript_source = None
+    video.transcript_language = None
+    video.transcript_is_placeholder = False
     video.processed = False
     session.add(video)
     session.commit()
@@ -4501,6 +5622,9 @@ def redo_transcription(video_id: int, session: Session = Depends(get_session)):
             video.status = "pending"
     except Exception:
         video.status = "pending"
+    video.transcript_source = None
+    video.transcript_language = None
+    video.transcript_is_placeholder = False
     video.processed = False
     session.add(video)
 

@@ -8,6 +8,11 @@ import pickle
 import gc
 import sys
 import re
+import html
+import math
+import urllib.request
+import urllib.error
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Literal
 from sqlmodel import Session, select, func
@@ -66,6 +71,7 @@ def _truncate_error(error: str | None, max_len: int = 4000) -> str:
 # Configuration
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 AUDIO_DIR = DATA_DIR / "audio"
+MANUAL_MEDIA_DIR = DATA_DIR / "manual_media"
 TEMP_DIR = DATA_DIR / "temp"
 EXPORT_DIR = DATA_DIR / "exports"
 HEARTBEAT_FILE = DATA_DIR / "worker_heartbeat"
@@ -80,6 +86,7 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 
 def ensure_dirs():
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    MANUAL_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     create_db_and_tables()
@@ -770,6 +777,36 @@ class IngestionService:
         if not lowered:
             return None
 
+        if "tiktok" in lowered:
+            if "your ip address is blocked" in lowered or "blocked from accessing this post" in lowered:
+                return {
+                    "code": "tiktok_ip_blocked",
+                    "message": (
+                        "TikTok blocked this request from the current IP address. "
+                        "Try again later or use a different network/session."
+                    ),
+                    "video_status": "pending",
+                    "access_restricted": False,
+                }
+            if "login required" in lowered or "authentication" in lowered or "sign in" in lowered:
+                return {
+                    "code": "tiktok_auth_required",
+                    "message": (
+                        "TikTok requires an authenticated session before this media can be accessed."
+                    ),
+                    "video_status": "pending",
+                    "access_restricted": False,
+                }
+            if "rate limit" in lowered or "too many requests" in lowered:
+                return {
+                    "code": "tiktok_rate_limited",
+                    "message": (
+                        "TikTok temporarily rate-limited metadata access. Try again later."
+                    ),
+                    "video_status": "pending",
+                    "access_restricted": False,
+                }
+
         if (
             "members-only content" in lowered
             or "join this channel to get access to members-only content" in lowered
@@ -780,7 +817,8 @@ class IngestionService:
                     "This video is members-only. Chatalogue could not download it with the "
                     "current YouTube session."
                 ),
-                "video_status": "pending",
+                "video_status": "access_restricted",
+                "access_restricted": True,
             }
 
         if (
@@ -794,7 +832,8 @@ class IngestionService:
                     "This video is private or access-restricted. Chatalogue could not "
                     "download it with the current YouTube session."
                 ),
-                "video_status": "pending",
+                "video_status": "access_restricted",
+                "access_restricted": True,
             }
 
         if self._is_ytdlp_auth_required_error(exc):
@@ -804,10 +843,351 @@ class IngestionService:
                     "This video requires a signed-in YouTube session or browser cookies "
                     "before it can be downloaded."
                 ),
-                "video_status": "pending",
+                "video_status": "access_restricted",
+                "access_restricted": True,
             }
 
         return None
+
+    def _placeholder_captions_enabled(self) -> bool:
+        raw = (os.getenv("YOUTUBE_PLACEHOLDER_CAPTIONS_ENABLED") or "true").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    def _preferred_placeholder_caption_languages(self) -> list[str]:
+        raw = (os.getenv("YOUTUBE_PLACEHOLDER_CAPTION_LANGS") or "en,en-us,en-gb").strip()
+        langs = []
+        for item in raw.split(","):
+            lang = item.strip()
+            if lang and lang.lower() not in {x.lower() for x in langs}:
+                langs.append(lang)
+        return langs or ["en", "en-US", "en-GB"]
+
+    @staticmethod
+    def _normalize_caption_language(lang: str | None) -> str:
+        return str(lang or "").strip().lower().replace("_", "-")
+
+    @staticmethod
+    def _caption_format_priority(ext: str | None) -> int:
+        order = {
+            "json3": 0,
+            "srv3": 1,
+            "vtt": 2,
+            "ttml": 3,
+            "srv2": 4,
+            "srv1": 5,
+            "json": 6,
+            "xml": 7,
+        }
+        return order.get(str(ext or "").strip().lower(), 99)
+
+    def _fetch_youtube_video_info(self, youtube_id: str, *, purpose: str = "placeholder_captions") -> dict | None:
+        if not youtube_id:
+            return None
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+        }
+        ydl_opts = self._apply_ytdlp_auth_opts(ydl_opts, purpose=purpose)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(f"https://www.youtube.com/watch?v={youtube_id}", download=False)
+
+    def _choose_caption_track(self, info: dict | None) -> dict | None:
+        if not isinstance(info, dict):
+            return None
+
+        preferred_langs = self._preferred_placeholder_caption_languages()
+        preferred_exact = {
+            self._normalize_caption_language(lang): idx
+            for idx, lang in enumerate(preferred_langs)
+        }
+        preferred_base = {
+            self._normalize_caption_language(lang).split("-", 1)[0]: idx
+            for idx, lang in enumerate(preferred_langs)
+        }
+
+        source_prefix = "youtube"
+        webpage_url = str(info.get("webpage_url") or info.get("original_url") or "").lower()
+        extractor = str(info.get("extractor_key") or info.get("extractor") or "").lower()
+        if "tiktok" in extractor or "tiktok.com" in webpage_url:
+            source_prefix = "tiktok"
+
+        for source_key, source_name in (
+            ("subtitles", f"{source_prefix}_subtitles"),
+            ("automatic_captions", f"{source_prefix}_auto_captions"),
+        ):
+            track_map = info.get(source_key)
+            if not isinstance(track_map, dict) or not track_map:
+                continue
+
+            def lang_rank(lang: str) -> tuple[int, int, str]:
+                normalized = self._normalize_caption_language(lang)
+                if normalized in preferred_exact:
+                    return (0, preferred_exact[normalized], normalized)
+                base = normalized.split("-", 1)[0]
+                if base in preferred_base:
+                    return (1, preferred_base[base], normalized)
+                return (2, 999, normalized)
+
+            for language in sorted(track_map.keys(), key=lang_rank):
+                candidates = track_map.get(language) or []
+                if not isinstance(candidates, list):
+                    continue
+                best = None
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    url = str(candidate.get("url") or "").strip()
+                    if not url:
+                        continue
+                    ext = str(candidate.get("ext") or "").strip().lower()
+                    if ext == "live_chat":
+                        continue
+                    rank = self._caption_format_priority(ext)
+                    if best is None or rank < best["rank"]:
+                        best = {
+                            "rank": rank,
+                            "url": url,
+                            "ext": ext or "vtt",
+                            "language": language,
+                            "source": source_name,
+                        }
+                if best is not None:
+                    best.pop("rank", None)
+                    return best
+        return None
+
+    def _choose_youtube_caption_track(self, info: dict | None) -> dict | None:
+        return self._choose_caption_track(info)
+
+    @staticmethod
+    def _parse_caption_clock(text: str) -> float | None:
+        raw = str(text or "").strip().replace(",", ".")
+        if not raw:
+            return None
+        if ":" not in raw:
+            try:
+                return float(raw)
+            except Exception:
+                return None
+        parts = raw.split(":")
+        try:
+            seconds = float(parts[-1])
+            minutes = int(parts[-2]) if len(parts) >= 2 else 0
+            hours = int(parts[-3]) if len(parts) >= 3 else 0
+            return (hours * 3600) + (minutes * 60) + seconds
+        except Exception:
+            return None
+
+    def _parse_caption_time_value(self, value, *, unit_hint: str = "seconds") -> float | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        parsed_clock = self._parse_caption_clock(text)
+        if parsed_clock is not None and ":" in text:
+            return parsed_clock
+        try:
+            numeric = float(text)
+        except Exception:
+            return None
+        return numeric / 1000.0 if unit_hint == "milliseconds" else numeric
+
+    @staticmethod
+    def _clean_placeholder_caption_text(text: str | None) -> str:
+        cleaned = html.unescape(str(text or ""))
+        cleaned = re.sub(r"<\d{2}:\d{2}:\d{2}\.\d{3}>", " ", cleaned)
+        cleaned = re.sub(r"</?[^>]+>", " ", cleaned)
+        cleaned = cleaned.replace("\xa0", " ")
+        lines = [re.sub(r"\s+", " ", line).strip() for line in cleaned.splitlines()]
+        lines = [line for line in lines if line]
+        return re.sub(r"\s+", " ", " ".join(lines)).strip()
+
+    def _parse_json3_placeholder_captions(self, payload_text: str) -> list[dict]:
+        try:
+            payload = json.loads(payload_text)
+        except Exception:
+            return []
+        entries = []
+        for event in payload.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            start = self._parse_caption_time_value(event.get("tStartMs"), unit_hint="milliseconds")
+            dur = self._parse_caption_time_value(event.get("dDurationMs"), unit_hint="milliseconds") or 0.0
+            if start is None:
+                continue
+            seg_text = "".join(str(seg.get("utf8") or "") for seg in (event.get("segs") or []) if isinstance(seg, dict))
+            text = self._clean_placeholder_caption_text(seg_text)
+            if not text:
+                continue
+            entries.append({
+                "start": float(start),
+                "end": max(float(start) + max(float(dur), 0.01), float(start) + 0.01),
+                "text": text,
+            })
+        return entries
+
+    def _parse_xml_placeholder_captions(self, payload_text: str) -> list[dict]:
+        try:
+            root = ET.fromstring(payload_text)
+        except Exception:
+            return []
+
+        entries = []
+        for elem in root.iter():
+            tag = str(elem.tag or "").split("}", 1)[-1].lower()
+            if tag not in {"text", "p"}:
+                continue
+            if tag == "text":
+                start = self._parse_caption_time_value(elem.attrib.get("start"), unit_hint="seconds")
+                dur = self._parse_caption_time_value(elem.attrib.get("dur"), unit_hint="seconds") or 0.0
+                end = None if start is None else float(start) + max(float(dur), 0.01)
+            else:
+                start = self._parse_caption_time_value(elem.attrib.get("t"), unit_hint="milliseconds")
+                if start is None:
+                    start = self._parse_caption_time_value(elem.attrib.get("begin"), unit_hint="seconds")
+                dur = self._parse_caption_time_value(elem.attrib.get("d"), unit_hint="milliseconds")
+                if dur is None:
+                    dur = self._parse_caption_time_value(elem.attrib.get("dur"), unit_hint="seconds")
+                end = self._parse_caption_time_value(elem.attrib.get("end"), unit_hint="seconds")
+                if start is not None and end is None:
+                    end = float(start) + max(float(dur or 0.0), 0.01)
+            if start is None:
+                continue
+            text = self._clean_placeholder_caption_text("".join(elem.itertext()))
+            if not text:
+                continue
+            entries.append({
+                "start": float(start),
+                "end": max(float(end or start), float(start) + 0.01),
+                "text": text,
+            })
+        return entries
+
+    def _parse_vtt_placeholder_captions(self, payload_text: str) -> list[dict]:
+        lines = payload_text.splitlines()
+        entries = []
+        idx = 0
+        while idx < len(lines):
+            line = lines[idx].strip("\ufeff").strip()
+            idx += 1
+            if not line:
+                continue
+            if line.startswith("WEBVTT"):
+                continue
+            if line.startswith("NOTE") or line in {"STYLE", "REGION"}:
+                while idx < len(lines) and lines[idx].strip():
+                    idx += 1
+                continue
+            if "-->" not in line:
+                if idx >= len(lines):
+                    continue
+                timing_line = lines[idx].strip()
+                if "-->" not in timing_line:
+                    continue
+                line = timing_line
+                idx += 1
+            parts = line.split("-->", 1)
+            start = self._parse_caption_clock(parts[0].strip())
+            end_token = parts[1].strip().split(" ", 1)[0]
+            end = self._parse_caption_clock(end_token)
+            if start is None or end is None:
+                while idx < len(lines) and lines[idx].strip():
+                    idx += 1
+                continue
+            text_lines = []
+            while idx < len(lines) and lines[idx].strip():
+                text_lines.append(lines[idx].rstrip())
+                idx += 1
+            text = self._clean_placeholder_caption_text("\n".join(text_lines))
+            if not text:
+                continue
+            entries.append({
+                "start": float(start),
+                "end": max(float(end), float(start) + 0.01),
+                "text": text,
+            })
+        return entries
+
+    def _consolidate_placeholder_caption_entries(self, entries: list[dict]) -> list[dict]:
+        normalized = []
+        for entry in sorted(entries or [], key=lambda item: (float(item.get("start") or 0.0), float(item.get("end") or 0.0))):
+            text = self._clean_placeholder_caption_text(entry.get("text"))
+            if not text:
+                continue
+            start = float(entry.get("start") or 0.0)
+            end = max(float(entry.get("end") or start), start + 0.01)
+            if normalized and text == normalized[-1]["text"] and start <= normalized[-1]["end"] + 0.5:
+                normalized[-1]["end"] = max(normalized[-1]["end"], end)
+                continue
+            normalized.append({"start": start, "end": end, "text": text})
+        return normalized
+
+    def _download_placeholder_caption_entries(self, track: dict) -> list[dict]:
+        url = str((track or {}).get("url") or "").strip()
+        ext = str((track or {}).get("ext") or "vtt").strip().lower()
+        if not url:
+            return []
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            payload = resp.read()
+        payload_text = payload.decode("utf-8-sig", errors="replace")
+        if ext == "json3":
+            entries = self._parse_json3_placeholder_captions(payload_text)
+        elif ext in {"srv1", "srv2", "srv3", "ttml", "xml"}:
+            entries = self._parse_xml_placeholder_captions(payload_text)
+        else:
+            entries = self._parse_vtt_placeholder_captions(payload_text)
+        return self._consolidate_placeholder_caption_entries(entries)
+
+    def populate_placeholder_transcript(self, session: Session, video: Video, *, info: dict | None = None) -> int:
+        if not self._placeholder_captions_enabled():
+            return 0
+        if not video or not video.id or not video.youtube_id:
+            return 0
+
+        existing_count = session.exec(
+            select(func.count(TranscriptSegment.id)).where(TranscriptSegment.video_id == video.id)
+        ).one()
+        if int(existing_count or 0) > 0:
+            return 0
+
+        info = info or self._fetch_youtube_video_info(video.youtube_id)
+        track = self._choose_caption_track(info)
+        if not track:
+            return 0
+
+        entries = self._download_placeholder_caption_entries(track)
+        if not entries:
+            return 0
+
+        for entry in entries:
+            session.add(
+                TranscriptSegment(
+                    video_id=video.id,
+                    start_time=float(entry["start"]),
+                    end_time=float(entry["end"]),
+                    text=str(entry["text"]),
+                    words=None,
+                )
+            )
+
+        video.transcript_source = str(track.get("source") or "youtube_captions")
+        video.transcript_language = str(track.get("language") or "").strip() or None
+        video.transcript_is_placeholder = True
+        session.add(video)
+        log(
+            f"Stored placeholder transcript for {video.youtube_id} "
+            f"({video.transcript_source}, {video.transcript_language or 'unknown'}): {len(entries)} segments"
+        )
+        return len(entries)
 
     def _set_prefetch_backoff(self, video_id: int, seconds: float):
         until = time.time() + max(1.0, float(seconds))
@@ -950,6 +1330,33 @@ class IngestionService:
             fields["pipeline_started_at"] = now_iso
         self._upsert_job_payload_fields(job_id, fields)
 
+    def _strip_transient_job_payload_fields(self, payload: dict | None) -> dict:
+        source = payload if isinstance(payload, dict) else {}
+        cleaned: dict = {}
+        transient_prefixes = ("stage_", "parakeet_", "whisper_")
+        transient_exact = {
+            "pipeline_started_at",
+            "transcription_engine_requested",
+            "transcription_engine_used",
+            "transcription_engine_fallback_reason",
+            "transcription_engine_fallback_detail",
+            "transcription_reused_existing",
+            "parakeet_no_fallback_failure",
+            "result_kind",
+            "result_notice_code",
+            "result_notice_message",
+            "result_notice_source",
+            "result_notice_retryable",
+            "result_notice_detail",
+        }
+        for key, value in source.items():
+            if key in transient_exact:
+                continue
+            if any(key.startswith(prefix) for prefix in transient_prefixes):
+                continue
+            cleaned[key] = value
+        return cleaned
+
     def _set_funny_task_progress(
         self,
         video_id: int,
@@ -1007,10 +1414,14 @@ class IngestionService:
             ).first()
             if not job:
                 return None
+            payload = self._strip_transient_job_payload_fields(self._load_job_payload(job.payload_json))
             job.status = "running"
             job.started_at = datetime.now()
+            job.completed_at = None
             job.error = None
             job.progress = 0
+            job.status_detail = None
+            job.payload_json = json.dumps(payload, sort_keys=True) if payload else None
             session.add(job)
             session.commit()
             session.refresh(job)
@@ -1045,6 +1456,69 @@ class IngestionService:
             session.add(job)
             session.commit()
 
+    def _infer_recoverable_video_status(self, session: Session, video: Video) -> str:
+        """Infer the safest stable video status from persisted artifacts."""
+        if bool(video.processed):
+            return "completed"
+
+        has_segments = session.exec(
+            select(TranscriptSegment.id)
+            .where(TranscriptSegment.video_id == video.id)
+            .limit(1)
+        ).first() is not None
+        if has_segments:
+            return "transcribed"
+
+        try:
+            audio_path = self.get_audio_path(video)
+        except Exception:
+            audio_path = None
+
+        raw_transcript_path = None
+        if audio_path is not None:
+            try:
+                safe_title = self.sanitize_filename(video.title)
+                raw_transcript_path = audio_path.parent / f"{safe_title}_transcript_raw.json"
+            except Exception:
+                raw_transcript_path = None
+
+        if raw_transcript_path is not None and raw_transcript_path.exists():
+            return "transcribed"
+        if audio_path is not None and audio_path.exists():
+            return "downloaded"
+        return "pending"
+
+    def _recover_inactive_video_status(self, video_id: int) -> str | None:
+        """Restore a video from an active-looking state when no active job exists."""
+        active_job_statuses = ["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                return None
+
+            has_active_job = session.exec(
+                select(Job.id)
+                .where(
+                    Job.video_id == video_id,
+                    Job.status.in_(active_job_statuses),
+                )
+                .limit(1)
+            ).first() is not None
+            if has_active_job:
+                return str(video.status or "")
+
+            prev_status = str(video.status or "")
+            recovered_status = self._infer_recoverable_video_status(session, video)
+            if recovered_status != prev_status:
+                video.status = recovered_status
+                session.add(video)
+                session.commit()
+                log(
+                    f"Recovered orphaned video status for video {video_id}: "
+                    f"{prev_status or 'unknown'} -> {recovered_status}"
+                )
+            return recovered_status
+
     def _mark_job_notice(
         self,
         job_id: int | None,
@@ -1055,6 +1529,7 @@ class IngestionService:
         technical_detail: str | None = None,
         video_status: str = "pending",
     ):
+        restricted_codes = {"youtube_members_only", "youtube_private_video", "youtube_auth_required"}
         with Session(engine) as session:
             if job_id:
                 job = session.get(Job, job_id)
@@ -1066,7 +1541,7 @@ class IngestionService:
                             "result_notice_code": str(code or "notice"),
                             "result_notice_message": str(message or "Notice"),
                             "result_notice_source": "download",
-                            "result_notice_retryable": True,
+                            "result_notice_retryable": bool(code not in restricted_codes),
                         }
                     )
                     if technical_detail:
@@ -1082,6 +1557,9 @@ class IngestionService:
                 video = session.get(Video, video_id)
                 if video:
                     video.status = str(video_status or "pending")
+                    if code in restricted_codes:
+                        video.access_restricted = True
+                        video.access_restriction_reason = str(message or "Access restricted")
                     session.add(video)
 
             session.commit()
@@ -2265,11 +2743,21 @@ class IngestionService:
         """Cap process CUDA memory to avoid spilling into shared memory on WDDM."""
         if self.device != "cuda":
             return
-        raw = (os.getenv("PARAKEET_MAX_GPU_MEMORY_FRACTION", "0.85") or "0.85").strip()
-        try:
-            fraction = float(raw)
-        except Exception:
-            fraction = 0.85
+        raw = (os.getenv("PARAKEET_MAX_GPU_MEMORY_FRACTION") or "").strip()
+        if raw:
+            try:
+                fraction = float(raw)
+            except Exception:
+                fraction = 0.85
+        else:
+            total = int(self._gpu_total_vram_bytes or self._cuda_memory_snapshot().get("total") or 0)
+            total_gb = float(total) / (1024 ** 3) if total > 0 else 0.0
+            if total_gb >= 28.0:
+                fraction = 0.92
+            elif total_gb >= 20.0:
+                fraction = 0.88
+            else:
+                fraction = 0.85
         fraction = max(0.50, min(fraction, 0.98))
         if self._cuda_memory_fraction_applied is not None and abs(self._cuda_memory_fraction_applied - fraction) < 1e-6:
             return
@@ -2743,6 +3231,153 @@ class IngestionService:
             except Exception:
                 pass
 
+    def _format_progress_clock(self, seconds: float | int | None) -> str:
+        try:
+            total = max(0, int(float(seconds or 0)))
+        except Exception:
+            total = 0
+        hours = total // 3600
+        minutes = (total % 3600) // 60
+        secs = total % 60
+        if hours > 0:
+            return f"{hours}:{minutes:02}:{secs:02}"
+        return f"{minutes}:{secs:02}"
+
+    def _update_transcription_stage_progress(
+        self,
+        job_id: int | None,
+        *,
+        engine: str,
+        completed_seconds: float | None = None,
+        total_seconds: float | None = None,
+        segments_completed: int | None = None,
+        chunk_index: int | None = None,
+        chunk_total: int | None = None,
+        extra_label: str | None = None,
+    ) -> None:
+        if not job_id:
+            return
+
+        engine_label = "Parakeet" if str(engine or "").strip().lower() == "parakeet" else "Whisper"
+        detail_parts: list[str] = []
+        payload_fields: dict[str, object] = {
+            "stage_transcribe_engine": engine_label.lower(),
+        }
+
+        completed_pct = None
+        if total_seconds is not None:
+            try:
+                total_val = max(0.0, float(total_seconds))
+            except Exception:
+                total_val = 0.0
+            if total_val > 0:
+                payload_fields["stage_transcribe_progress_total_seconds"] = round(total_val, 3)
+                if completed_seconds is not None:
+                    try:
+                        completed_val = max(0.0, min(float(completed_seconds), total_val))
+                    except Exception:
+                        completed_val = 0.0
+                    payload_fields["stage_transcribe_progress_seconds"] = round(completed_val, 3)
+                    detail_parts.append(f"{self._format_progress_clock(completed_val)}/{self._format_progress_clock(total_val)}")
+                    completed_pct = int(round((completed_val / total_val) * 100))
+        elif completed_seconds is not None:
+            try:
+                completed_val = max(0.0, float(completed_seconds))
+                payload_fields["stage_transcribe_progress_seconds"] = round(completed_val, 3)
+            except Exception:
+                pass
+
+        if chunk_index is not None:
+            payload_fields["stage_transcribe_chunk_index"] = int(chunk_index)
+            if chunk_total is not None and int(chunk_total) > 0:
+                payload_fields["stage_transcribe_chunk_total"] = int(chunk_total)
+                detail_parts.append(f"chunk {int(chunk_index)}/{int(chunk_total)}")
+            else:
+                detail_parts.append(f"chunk {int(chunk_index)}")
+
+        if segments_completed is not None and int(segments_completed) >= 0:
+            payload_fields["stage_transcribe_segments_completed"] = int(segments_completed)
+            detail_parts.append(f"{int(segments_completed)} segments")
+
+        if extra_label:
+            detail_parts.append(str(extra_label).strip())
+
+        detail = f"Transcribing with {engine_label}"
+        if detail_parts:
+            detail += f" ({', '.join(part for part in detail_parts if part)})"
+        detail += "..."
+
+        self._upsert_job_payload_fields(job_id, payload_fields)
+        self._update_job_status_detail(job_id, detail)
+        if completed_pct is not None:
+            self._update_job_progress(job_id, max(0, min(100, int(completed_pct))))
+
+    def _build_pyannote_progress_hook(self, job_id: int | None):
+        if not job_id:
+            return None
+
+        stage_ranges = {
+            "segmentation": (0, 24),
+            "speaker_counting": (24, 28),
+            "embeddings": (28, 42),
+            "discrete_diarization": (42, 45),
+        }
+        stage_labels = {
+            "segmentation": "running segmentation",
+            "speaker_counting": "counting active speakers",
+            "embeddings": "extracting speaker embeddings",
+            "discrete_diarization": "building diarization timeline",
+        }
+        state = {
+            "last_progress": -1,
+            "last_detail": None,
+            "last_update_at": 0.0,
+        }
+
+        def hook(
+            step_name,
+            step_artifact,
+            file=None,
+            total: int | None = None,
+            completed: int | None = None,
+        ):
+            name = str(step_name or "").strip().lower()
+            if name not in stage_ranges:
+                return
+
+            start_pct, end_pct = stage_ranges[name]
+            span = max(0, end_pct - start_pct)
+            if total and total > 0 and completed is not None:
+                fraction = max(0.0, min(float(completed) / float(total), 1.0))
+            else:
+                fraction = 1.0
+            progress = int(round(start_pct + (span * fraction)))
+            progress = max(0, min(45, progress))
+
+            label = stage_labels.get(name, name.replace("_", " "))
+            if total and total > 1 and completed is not None:
+                detail = f"Diarizing speakers: {label} ({int(completed)}/{int(total)})..."
+            else:
+                detail = f"Diarizing speakers: {label}..."
+
+            now = time.time()
+            should_refresh = (
+                detail != state["last_detail"]
+                or progress >= int(state["last_progress"]) + 1
+                or (now - float(state["last_update_at"])) >= 1.0
+                or (total and completed is not None and completed >= total)
+            )
+            if not should_refresh:
+                return
+
+            self._update_job_status_detail(job_id, detail)
+            self._update_job_progress(job_id, progress)
+            state["last_detail"] = detail
+            state["last_progress"] = progress
+            state["last_update_at"] = now
+
+        return hook
+
     def _run_diarization_with_adaptive_batch(self, audio_input, job_id: int = None):
         current_batch = self._get_pyannote_batch_size()
         min_batch = max(1, int((os.getenv("PYANNOTE_MIN_BATCH_SIZE") or "8").strip() or "8"))
@@ -2757,7 +3392,8 @@ class IngestionService:
 
         while True:
             try:
-                return self.diarization_pipeline(audio_input)
+                hook = self._build_pyannote_progress_hook(job_id)
+                return self.diarization_pipeline(audio_input, hook=hook)
             except RuntimeError as e:
                 if self._is_cuda_oom(e) and self.device == "cuda" and current_batch > min_batch:
                     next_batch = max(min_batch, current_batch // 2)
@@ -2982,6 +3618,7 @@ class IngestionService:
             if not force_float32 or self._whisper_compute_type == "float32":
                 return
 
+        self._record_job_stage_start(job_id, "model_load")
         log(f"Loading Whisper model ({model_size})...")
         self._update_job_status_detail(job_id, f"Loading Whisper model ({model_size})...")
         memory_profile = self._start_component_memory_profile()
@@ -3002,6 +3639,7 @@ class IngestionService:
                         "whisper_compute_type": requested_compute_type,
                         "whisper_runtime_device": self.device,
                         "whisper_fallback_to_cpu": False,
+                        "stage_model_load_completed_at": datetime.now().isoformat(),
                     },
                 )
                 self._finish_component_memory_profile("whisper", memory_profile, loaded=True)
@@ -3030,6 +3668,7 @@ class IngestionService:
                         "whisper_compute_type": ct,
                         "whisper_runtime_device": self.device,
                         "whisper_fallback_to_cpu": False,
+                        "stage_model_load_completed_at": datetime.now().isoformat(),
                     },
                 )
                 self._finish_component_memory_profile("whisper", memory_profile, loaded=True)
@@ -3057,6 +3696,7 @@ class IngestionService:
                             "whisper_compute_type": ct,
                             "whisper_runtime_device": "cpu",
                             "whisper_fallback_to_cpu": True,
+                            "stage_model_load_completed_at": datetime.now().isoformat(),
                         },
                     )
                     self._finish_component_memory_profile("whisper", memory_profile, loaded=True)
@@ -3105,18 +3745,77 @@ class IngestionService:
         from nemo.collections.asr.models import ASRModel
 
         parakeet_model = (os.getenv("PARAKEET_MODEL") or "nvidia/parakeet-tdt-0.6b-v2").strip()
-        self._record_job_stage_start(job_id, "model_load")
+        payload = {}
+        if job_id:
+            try:
+                with Session(engine) as session:
+                    job = session.get(Job, job_id)
+                    if job and job.payload_json:
+                        payload = self._load_job_payload(job.payload_json)
+            except Exception:
+                payload = {}
+
+        transcribe_started_at = payload.get("stage_transcribe_started_at")
+        reload_during_transcribe = bool(transcribe_started_at)
+        if not reload_during_transcribe:
+            self._record_job_stage_start(job_id, "model_load")
         load_started = time.time()
-        self._update_job_status_detail(job_id, f"Loading Parakeet model ({parakeet_model})...")
+        chunk_index = payload.get("stage_transcribe_chunk_index")
+        chunk_total = payload.get("stage_transcribe_chunk_total")
+        segments_completed = payload.get("stage_transcribe_segments_completed")
+        progress_completed_seconds = payload.get("stage_transcribe_progress_seconds")
+        progress_total_seconds = payload.get("stage_transcribe_progress_total_seconds")
+        if reload_during_transcribe:
+            reload_parts = []
+            try:
+                if progress_total_seconds is not None:
+                    reload_parts.append(
+                        f"{self._format_progress_clock(progress_completed_seconds)}/"
+                        f"{self._format_progress_clock(progress_total_seconds)}"
+                    )
+            except Exception:
+                pass
+            try:
+                if chunk_index is not None and chunk_total is not None and int(chunk_total) > 0:
+                    reload_parts.append(f"chunk {int(chunk_index)}/{int(chunk_total)}")
+                elif chunk_index is not None:
+                    reload_parts.append(f"chunk {int(chunk_index)}")
+            except Exception:
+                pass
+            reload_detail = "Reloading Parakeet during transcription"
+            if reload_parts:
+                reload_detail += f" ({', '.join(reload_parts)})"
+            reload_detail += "..."
+            self._update_job_status_detail(job_id, reload_detail)
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "parakeet_model_reload_during_transcribe": True,
+                    "parakeet_model_reload_count": int(payload.get("parakeet_model_reload_count") or 0) + 1,
+                },
+            )
+        else:
+            self._update_job_status_detail(job_id, f"Restoring Parakeet checkpoint from disk ({parakeet_model})...")
         log(f"Loading Parakeet model ({parakeet_model})...")
         memory_profile = self._start_component_memory_profile()
         self._apply_cuda_memory_fraction_limit()
-        self.parakeet_model = ASRModel.from_pretrained(model_name=parakeet_model)
+        # Restore onto CPU first. Letting NeMo deserialize directly to CUDA can
+        # spike VRAM during checkpoint restore and fail before the model is even usable.
+        self.parakeet_model = ASRModel.from_pretrained(
+            model_name=parakeet_model,
+            map_location=torch.device("cpu"),
+        )
 
+        if self.device == "cuda":
+            self._update_job_status_detail(job_id, "Moving Parakeet model to GPU...")
+        else:
+            self._update_job_status_detail(job_id, "Initializing Parakeet model on CPU...")
         if self.device == "cuda":
             self.parakeet_model = self.parakeet_model.to(torch.device("cuda"))
         else:
             self.parakeet_model = self.parakeet_model.to(torch.device("cpu"))
+
+        self._update_job_status_detail(job_id, "Initializing Parakeet decoder...")
         self.parakeet_model.eval()
         load_seconds = max(0.0, time.time() - load_started)
         self._upsert_job_payload_fields(
@@ -3128,6 +3827,17 @@ class IngestionService:
             },
         )
         self._finish_component_memory_profile("parakeet", memory_profile, loaded=True)
+        if reload_during_transcribe:
+            self._update_transcription_stage_progress(
+                job_id,
+                engine="parakeet",
+                completed_seconds=progress_completed_seconds,
+                total_seconds=progress_total_seconds,
+                segments_completed=segments_completed,
+                chunk_index=chunk_index,
+                chunk_total=chunk_total,
+                extra_label="resuming",
+            )
         log("Parakeet model loaded.")
 
     def _set_parakeet_decoding_profile(self, profile: str = "optimized", job_id: int = None):
@@ -3626,8 +4336,15 @@ class IngestionService:
         return True, f"predictive_long_audio_chunking_{free_gb:.1f}gb"
 
     def _transcribe_with_parakeet_in_chunks(self, audio_path: Path, start_time_offset: float = 0.0, job_id: int = None):
-        total_duration = float(self._probe_audio_duration_seconds(audio_path) or 0.0)
+        normalized_audio_path, cleanup_normalized = self._convert_audio_for_parakeet(audio_path)
+        total_duration = float(self._probe_audio_duration_seconds(normalized_audio_path) or 0.0)
         if total_duration <= 0:
+            if cleanup_normalized:
+                try:
+                    if normalized_audio_path.exists():
+                        normalized_audio_path.unlink()
+                except Exception:
+                    pass
             raise RuntimeError("Could not determine audio duration for Parakeet chunk fallback.")
 
         chunk_seconds, min_chunk_seconds, overlap_seconds = self._resolve_parakeet_oom_chunk_settings(total_duration)
@@ -3644,6 +4361,7 @@ class IngestionService:
                 "parakeet_chunk_min_seconds": int(min_chunk_seconds),
                 "parakeet_chunk_overlap_seconds": float(overlap_seconds),
                 "parakeet_chunk_recycle_every": int(recycle_every),
+                "parakeet_chunk_source_normalized": cleanup_normalized,
             },
         )
 
@@ -3654,6 +4372,7 @@ class IngestionService:
 
         while chunk_start < total_duration - 0.01:
             chunk_index += 1
+            est_total_chunks = max(1, int(math.ceil(total_duration / max(chunk_seconds, 1.0))))
 
             if recycle_every > 0 and chunk_index > 1 and ((chunk_index - 1) % recycle_every == 0):
                 disable_recycle, disable_reason, free_gb, floor_gb = self._should_disable_parakeet_chunk_recycle(job_id=job_id)
@@ -3691,12 +4410,17 @@ class IngestionService:
             while True:
                 chunk_duration_with_overlap = min(remaining, attempt_chunk_seconds + overlap_seconds)
                 if job_id:
-                    self._update_job_status_detail(
+                    self._update_transcription_stage_progress(
                         job_id,
-                        f"Transcribing with Parakeet (chunk {chunk_index}, {int(chunk_start)}s/{int(total_duration)}s, window {int(attempt_chunk_seconds)}s)..."
+                        engine="parakeet",
+                        completed_seconds=start_time_offset + chunk_start,
+                        total_seconds=start_time_offset + total_duration,
+                        chunk_index=chunk_index,
+                        chunk_total=est_total_chunks,
+                        extra_label=f"window {int(attempt_chunk_seconds)}s",
                     )
 
-                chunk_path = self._slice_audio(audio_path, chunk_start, chunk_duration_with_overlap)
+                chunk_path = self._slice_audio(normalized_audio_path, chunk_start, chunk_duration_with_overlap)
                 try:
                     chunk_segments, _ = self._transcribe_with_parakeet(
                         chunk_path,
@@ -3704,6 +4428,10 @@ class IngestionService:
                         job_id=job_id,
                         allow_oom_chunk_retry=False,
                         forced_batch_size=1,
+                        progress_completed_seconds=start_time_offset + chunk_start,
+                        progress_total_seconds=start_time_offset + total_duration,
+                        progress_chunk_index=chunk_index,
+                        progress_chunk_total=est_total_chunks,
                     )
                     if segments and chunk_segments:
                         prev_end = float(getattr(segments[-1], "end", 0.0))
@@ -3712,6 +4440,16 @@ class IngestionService:
                             if float(getattr(s, "end", 0.0)) > (prev_end + 0.01)
                         ]
                     segments.extend(chunk_segments)
+                    if job_id:
+                        self._update_transcription_stage_progress(
+                            job_id,
+                            engine="parakeet",
+                            completed_seconds=start_time_offset + chunk_start + attempt_chunk_seconds,
+                            total_seconds=start_time_offset + total_duration,
+                            segments_completed=len(segments),
+                            chunk_index=chunk_index,
+                            chunk_total=est_total_chunks,
+                        )
                     chunk_seconds = min(chunk_seconds, attempt_chunk_seconds)
                     # Keep GPU memory pressure stable over long chunk loops.
                     self._clear_cuda_cache()
@@ -3750,6 +4488,13 @@ class IngestionService:
 
             chunk_start += attempt_chunk_seconds
 
+        if cleanup_normalized:
+            try:
+                if normalized_audio_path.exists():
+                    normalized_audio_path.unlink()
+            except Exception:
+                pass
+
         return segments, (start_time_offset + total_duration)
 
     def _transcribe_with_parakeet(
@@ -3759,6 +4504,10 @@ class IngestionService:
         job_id: int = None,
         allow_oom_chunk_retry: bool = True,
         forced_batch_size: int = None,
+        progress_completed_seconds: float | None = None,
+        progress_total_seconds: float | None = None,
+        progress_chunk_index: int | None = None,
+        progress_chunk_total: int | None = None,
     ):
         self._load_parakeet_model(job_id)
         parakeet_input, cleanup_input = self._convert_audio_for_parakeet(audio_path)
@@ -3816,17 +4565,50 @@ class IngestionService:
                         "parakeet_cuda_total_gb": round(float(mem_snap.get("total") or 0) / (1024 ** 3), 2),
                     },
                 )
-                if job_id:
-                    if parakeet_batch_size != parakeet_batch_size_requested:
-                        self._update_job_status_detail(
-                            job_id,
-                            f"Transcribing with Parakeet (batch {parakeet_batch_size}, auto from {parakeet_batch_size_requested})..."
-                        )
-                    else:
-                        self._update_job_status_detail(
-                            job_id,
-                            f"Transcribing with Parakeet (batch {parakeet_batch_size})..."
-                        )
+            elif job_id:
+                self._update_transcription_stage_progress(
+                    job_id,
+                    engine="parakeet",
+                    completed_seconds=(
+                        progress_completed_seconds
+                        if progress_completed_seconds is not None
+                        else start_time_offset
+                    ),
+                    total_seconds=(
+                        progress_total_seconds
+                        if progress_total_seconds is not None
+                        else ((start_time_offset + input_duration) if input_duration > 0 else None)
+                    ),
+                    chunk_index=progress_chunk_index,
+                    chunk_total=progress_chunk_total,
+                    extra_label=(
+                        f"batch {parakeet_batch_size}, auto from {parakeet_batch_size_requested}"
+                        if parakeet_batch_size != parakeet_batch_size_requested
+                        else f"batch {parakeet_batch_size}"
+                    ),
+                )
+            if self.device == "cuda" and job_id:
+                self._update_transcription_stage_progress(
+                    job_id,
+                    engine="parakeet",
+                    completed_seconds=(
+                        progress_completed_seconds
+                        if progress_completed_seconds is not None
+                        else start_time_offset
+                    ),
+                    total_seconds=(
+                        progress_total_seconds
+                        if progress_total_seconds is not None
+                        else ((start_time_offset + input_duration) if input_duration > 0 else None)
+                    ),
+                    chunk_index=progress_chunk_index,
+                    chunk_total=progress_chunk_total,
+                    extra_label=(
+                        f"batch {parakeet_batch_size}, auto from {parakeet_batch_size_requested}"
+                        if parakeet_batch_size != parakeet_batch_size_requested
+                        else f"batch {parakeet_batch_size}"
+                    ),
+                )
             call_variants = [
                 {"timestamps": True, "return_hypotheses": True},
                 {"timestamps": True},
@@ -4154,7 +4936,7 @@ class IngestionService:
             "parakeet_dynamic_batch_cap": (
                 int(self._parakeet_dynamic_batch_cap) if self._parakeet_dynamic_batch_cap is not None else None
             ),
-            "parakeet_max_gpu_memory_fraction": max(0.50, min(float(os.getenv("PARAKEET_MAX_GPU_MEMORY_FRACTION", "0.85")), 0.98)),
+            "parakeet_max_gpu_memory_fraction": None,
             "parakeet_unload_after_transcribe": os.getenv("PARAKEET_UNLOAD_AFTER_TRANSCRIBE", "auto"),
             "parakeet_release_other_models_before_transcribe": os.getenv("PARAKEET_RELEASE_OTHER_MODELS_BEFORE_TRANSCRIBE", "false").strip().lower() == "true",
             "parakeet_keep_loaded_min_free_gb": None,
@@ -4166,6 +4948,18 @@ class IngestionService:
         if total_vram_for_thresholds <= 0 and self.device == "cuda":
             snap = self._cuda_memory_snapshot()
             total_vram_for_thresholds = float(snap.get("total") or 0) / (1024 ** 3)
+        raw_fraction = (os.getenv("PARAKEET_MAX_GPU_MEMORY_FRACTION") or "").strip()
+        try:
+            if raw_fraction:
+                response["parakeet_max_gpu_memory_fraction"] = max(0.50, min(float(raw_fraction), 0.98))
+            elif total_vram_for_thresholds >= 28.0:
+                response["parakeet_max_gpu_memory_fraction"] = 0.92
+            elif total_vram_for_thresholds >= 20.0:
+                response["parakeet_max_gpu_memory_fraction"] = 0.88
+            else:
+                response["parakeet_max_gpu_memory_fraction"] = 0.85
+        except Exception:
+            response["parakeet_max_gpu_memory_fraction"] = 0.85
         keep_gb, keep_ratio = self._resolve_parakeet_keep_loaded_thresholds(total_vram_for_thresholds)
         response["parakeet_keep_loaded_min_free_gb"] = round(float(keep_gb), 2)
         response["parakeet_keep_loaded_min_free_ratio"] = round(float(keep_ratio), 3)
@@ -4323,13 +5117,488 @@ class IngestionService:
             session.refresh(channel)
             return channel
 
+    def create_manual_channel(self, name: str) -> Channel:
+        clean_name = " ".join((name or "").strip().split())
+        if not clean_name:
+            raise ValueError("Channel name is required")
+
+        safe_slug = self.sanitize_filename(clean_name).replace(" ", "_").lower()
+        manual_url = f"manual://channel/{safe_slug}"
+
+        with Session(engine) as session:
+            existing = session.exec(select(Channel).where(Channel.url == manual_url)).first()
+            if existing:
+                return existing
+
+            channel = Channel(
+                url=manual_url,
+                name=clean_name,
+                source_type="manual",
+                last_updated=datetime.now(),
+                status="active",
+            )
+            session.add(channel)
+            session.commit()
+            session.refresh(channel)
+            return channel
+
+    def create_tiktok_channel(self, name: str | None = None, url: str | None = None) -> Channel:
+        clean_name = " ".join((name or "").strip().split())
+        normalized_url = " ".join((url or "").strip().split())
+        if normalized_url and "tiktok.com" not in normalized_url.lower():
+            raise ValueError("TikTok channel URL must point to tiktok.com")
+
+        derived_handle = ""
+        if normalized_url:
+            match = re.search(r"tiktok\.com/@([^/?#]+)", normalized_url, re.IGNORECASE)
+            if match:
+                derived_handle = html.unescape(match.group(1)).strip()
+
+        if not clean_name and derived_handle:
+            clean_name = derived_handle if derived_handle.startswith("@") else f"@{derived_handle}"
+        if not clean_name:
+            raise ValueError("TikTok creator name or profile URL is required")
+
+        safe_slug = self.sanitize_filename(clean_name).replace(" ", "_").lower()
+        channel_url = normalized_url or f"tiktok://channel/{safe_slug}"
+
+        with Session(engine) as session:
+            existing = session.exec(select(Channel).where(Channel.url == channel_url)).first()
+            if existing:
+                return existing
+
+            channel = Channel(
+                url=channel_url,
+                name=clean_name,
+                source_type="tiktok",
+                last_updated=datetime.now(),
+                status="active",
+            )
+            session.add(channel)
+            session.commit()
+            session.refresh(channel)
+            return channel
+
+    def get_manual_media_absolute_path(self, relative_path: str | None) -> Path | None:
+        rel = str(relative_path or "").strip().replace("\\", "/").lstrip("/")
+        if not rel:
+            return None
+        candidate = (MANUAL_MEDIA_DIR / rel).resolve()
+        manual_root = MANUAL_MEDIA_DIR.resolve()
+        try:
+            candidate.relative_to(manual_root)
+        except ValueError:
+            return None
+        return candidate
+
+    def _update_channel_sync_progress(
+        self,
+        channel_id: int,
+        *,
+        status: str | None = None,
+        detail: str | None = None,
+        progress: int | None = None,
+        completed_items: int | None = None,
+        total_items: int | None = None,
+    ) -> None:
+        with Session(engine) as session:
+            channel = session.get(Channel, channel_id)
+            if not channel:
+                return
+            if status is not None:
+                channel.status = status
+            if detail is not None:
+                channel.sync_status_detail = detail
+            if progress is not None:
+                channel.sync_progress = max(0, min(100, int(progress)))
+            if completed_items is not None:
+                channel.sync_completed_items = max(0, int(completed_items))
+            if total_items is not None:
+                channel.sync_total_items = max(0, int(total_items))
+            session.add(channel)
+            session.commit()
+
+    def _make_tiktok_video_key(self, raw_id: str | None) -> str:
+        text = str(raw_id or "").strip()
+        return f"tiktok_{text}" if text else f"tiktok_{int(time.time())}"
+
+    def _resolve_tiktok_entry_url(self, channel_url: str, info: dict | None) -> str | None:
+        if not isinstance(info, dict):
+            return None
+        for key in ("webpage_url", "url", "original_url"):
+            value = str(info.get(key) or "").strip()
+            if value.startswith(("http://", "https://")):
+                video_match = re.search(r"tiktok\.com/@([^/?#]+)/video/(\d+)", value, re.IGNORECASE)
+                if video_match:
+                    return f"https://www.tiktok.com/@{video_match.group(1)}/video/{video_match.group(2)}"
+                return value
+        entry_id = str(info.get("id") or "").strip()
+        base = str(channel_url or "").strip().rstrip("/")
+        if entry_id and "tiktok.com/@" in base:
+            return f"{base}/video/{entry_id}"
+        return None
+
+    def _fetch_remote_video_info(self, url: str, *, purpose: str = "remote_video_info") -> dict | None:
+        normalized_url = str(url or "").strip()
+        if not normalized_url:
+            return None
+        ydl_opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "ignoreerrors": True,
+        }
+        ydl_opts = self._apply_ytdlp_auth_opts(ydl_opts, purpose=purpose)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(normalized_url, download=False)
+        return info if isinstance(info, dict) else None
+
+    def _classify_tiktok_refresh_error(self, exc: Exception) -> str:
+        lowered = str(exc or "").strip().lower()
+        if "your ip address is blocked" in lowered or "blocked from accessing this post" in lowered:
+            return "TikTok blocked metadata access from the current IP address."
+        if "too many requests" in lowered or "rate limit" in lowered:
+            return "TikTok rate-limited the channel refresh. Try again later."
+        if "login required" in lowered or "authentication" in lowered or "sign in" in lowered:
+            return "TikTok requires an authenticated session for this channel."
+        return f"TikTok refresh failed: {str(exc or 'unknown error')[:220]}"
+
+    def _best_thumbnail_url(self, info: dict | None) -> str | None:
+        if not isinstance(info, dict):
+            return None
+        thumbnails = info.get("thumbnails") or []
+        for thumb in reversed(thumbnails):
+            if isinstance(thumb, dict):
+                url = str(thumb.get("url") or "").strip()
+                if url:
+                    return url
+        for key in ("thumbnail", "thumbnail_url"):
+            value = str(info.get(key) or "").strip()
+            if value.startswith(("http://", "https://")):
+                return value
+        return None
+
+    def _derive_tiktok_channel_artwork(self, info: dict | None, current_icon: str | None = None, current_header: str | None = None) -> tuple[str | None, str | None]:
+        icon_url, header_url = self._extract_channel_artwork(info)
+        best_thumb = self._best_thumbnail_url(info)
+
+        resolved_icon = icon_url or current_icon
+        resolved_header = header_url or current_header
+
+        # TikTok profile-feed extraction often omits creator avatar/banner metadata.
+        # Use the best available post thumbnail as a header fallback so channel cards
+        # are not blank even when profile-level artwork is unavailable.
+        if not resolved_header and best_thumb:
+            resolved_header = best_thumb
+
+        return resolved_icon, resolved_header
+
+    def _decode_tiktok_embedded_string(self, value: str | None) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        text = text.replace("\\u002F", "/").replace("\\/", "/")
+        text = text.replace("\\u0026", "&").replace("\\u003D", "=").replace("\\u0025", "%")
+        text = text.replace("\\u002D", "-").replace("\\u002B", "+").replace("\\u003F", "?").replace("\\u003A", ":")
+        return html.unescape(text)
+
+    def _fetch_tiktok_profile_metadata(self, profile_url: str | None) -> dict[str, str]:
+        url = str(profile_url or "").strip()
+        if not url or "tiktok.com" not in url.lower():
+            return {}
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+
+        patterns = {
+            "icon_url": [
+                r'avatarLarger\\?":\\?"([^"]+)',
+                r'avatarMedium\\?":\\?"([^"]+)',
+                r'avatarThumb\\?":\\?"([^"]+)',
+            ],
+            "display_name": [
+                r'nickname\\?":\\?"([^"]+)',
+            ],
+            "username": [
+                r'uniqueId\\?":\\?"([^"]+)',
+            ],
+        }
+
+        out: dict[str, str] = {}
+        for key, candidates in patterns.items():
+            for pattern in candidates:
+                match = re.search(pattern, raw)
+                if not match:
+                    continue
+                decoded = self._decode_tiktok_embedded_string(match.group(1))
+                if decoded:
+                    out[key] = decoded
+                    break
+        return out
+
+    def _refresh_tiktok_channel(self, session: Session, channel: Channel) -> int:
+        profile_url = str(channel.url or "").strip()
+        if "tiktok.com" not in profile_url.lower():
+            channel.status = "active"
+            channel.sync_status_detail = "TikTok refresh requires a real creator/profile URL."
+            channel.sync_progress = 0
+            channel.sync_total_items = 0
+            channel.sync_completed_items = 0
+            session.add(channel)
+            session.commit()
+            return 0
+
+        try:
+            profile_meta = self._fetch_tiktok_profile_metadata(profile_url)
+        except Exception as e:
+            profile_meta = {}
+            log_verbose(f"TikTok profile metadata fallback skipped for {channel.name}: {e}")
+
+        profile_display_name = str(profile_meta.get("display_name") or "").strip()
+        profile_username = str(profile_meta.get("username") or "").strip()
+        profile_icon_url = str(profile_meta.get("icon_url") or "").strip()
+        if profile_display_name and channel.name != profile_display_name:
+            channel.name = profile_display_name
+            session.add(channel)
+        elif profile_username and (
+            not channel.name
+            or channel.name.startswith("@")
+            or len(channel.name.strip()) < 3
+        ):
+            normalized_username = profile_username if profile_username.startswith("@") else f"@{profile_username}"
+            if channel.name != normalized_username:
+                channel.name = normalized_username
+                session.add(channel)
+        if profile_icon_url and getattr(channel, "icon_url", None) != profile_icon_url:
+            channel.icon_url = profile_icon_url
+            session.add(channel)
+        if session.in_transaction():
+            session.commit()
+
+        ydl_opts = {
+            "extract_flat": "in_playlist",
+            "quiet": True,
+            "no_warnings": True,
+            "ignoreerrors": True,
+        }
+        new_video_count = 0
+
+        self._update_channel_sync_progress(
+            channel.id,
+            status="refreshing",
+            detail="Scanning TikTok profile feed...",
+            progress=5,
+            completed_items=0,
+            total_items=1,
+        )
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                result = ydl.extract_info(profile_url, download=False)
+        except Exception as e:
+            channel.status = "active"
+            channel.sync_status_detail = self._classify_tiktok_refresh_error(e)
+            channel.sync_progress = 0
+            channel.sync_total_items = 0
+            channel.sync_completed_items = 0
+            session.add(channel)
+            session.commit()
+            return 0
+
+        if not result:
+            channel.status = "active"
+            channel.sync_status_detail = "TikTok profile scan returned no results."
+            channel.sync_progress = 0
+            channel.sync_total_items = 0
+            channel.sync_completed_items = 0
+            session.add(channel)
+            session.commit()
+            return 0
+
+        if self._update_channel_metadata_from_ydl(channel, result):
+            session.add(channel)
+
+        raw_entries = result.get("entries")
+        entries = list(raw_entries) if raw_entries is not None else []
+        all_entries: list[dict] = []
+        seen_ids: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("id") or "").strip()
+            if not entry_id or entry_id in seen_ids:
+                continue
+            seen_ids.add(entry_id)
+            all_entries.append(entry)
+
+        if all_entries:
+            first_entry = all_entries[0]
+            if isinstance(first_entry, dict):
+                for candidate in [first_entry.get("channel"), first_entry.get("uploader"), first_entry.get("playlist_title")]:
+                    if isinstance(candidate, str) and candidate.strip():
+                        channel_name = candidate.strip()
+                        if channel.name != channel_name:
+                            channel.name = channel_name
+                            session.add(channel)
+                        break
+                icon_url, header_url = self._derive_tiktok_channel_artwork(
+                    first_entry,
+                    current_icon=profile_icon_url or getattr(channel, "icon_url", None),
+                    current_header=getattr(channel, "header_image_url", None),
+                )
+                changed = False
+                if icon_url and getattr(channel, "icon_url", None) != icon_url:
+                    channel.icon_url = icon_url
+                    changed = True
+                if header_url and getattr(channel, "header_image_url", None) != header_url:
+                    channel.header_image_url = header_url
+                    changed = True
+                if changed:
+                    session.add(channel)
+                    session.commit()
+
+        log(f"TikTok scan complete. {len(all_entries)} total entries discovered for {channel.name}.")
+        self._update_channel_sync_progress(
+            channel.id,
+            status="refreshing",
+            detail=f"Importing {len(all_entries)} discovered TikTok videos...",
+            progress=22,
+            completed_items=0,
+            total_items=len(all_entries),
+        )
+
+        caption_attempts = 0
+        caption_stored = 0
+        for idx, info in enumerate(all_entries, start=1):
+            entry_id = str(info.get("id") or "").strip()
+            if not entry_id:
+                continue
+
+            video_key = self._make_tiktok_video_key(entry_id)
+            source_url = self._resolve_tiktok_entry_url(profile_url, info)
+            existing_video = session.exec(select(Video).where(Video.youtube_id == video_key)).first()
+            if not existing_video and source_url:
+                existing_video = session.exec(select(Video).where(Video.source_url == source_url)).first()
+            needs_caption_hydration = False
+
+            if not existing_video:
+                video = Video(
+                    youtube_id=video_key,
+                    channel_id=channel.id,
+                    title=str(info.get("title") or f"TikTok {entry_id}"),
+                    media_source_type="tiktok",
+                    source_url=source_url,
+                    media_kind="video",
+                    description=info.get("description"),
+                    published_at=self._extract_published_at_from_info(info),
+                    duration=info.get("duration"),
+                    thumbnail_url=self._best_thumbnail_url(info),
+                    status="pending",
+                )
+                session.add(video)
+                session.flush()
+                needs_caption_hydration = True
+                new_video_count += 1
+            else:
+                video = existing_video
+                changed = False
+                title = str(info.get("title") or "").strip()
+                if title and (not existing_video.title or existing_video.title.startswith("TikTok ")):
+                    existing_video.title = title
+                    changed = True
+                if source_url and not existing_video.source_url:
+                    existing_video.source_url = source_url
+                    changed = True
+                if not existing_video.duration and info.get("duration"):
+                    existing_video.duration = info.get("duration")
+                    changed = True
+                thumb = self._best_thumbnail_url(info)
+                if thumb and not existing_video.thumbnail_url:
+                    existing_video.thumbnail_url = thumb
+                    changed = True
+                pub_date = self._extract_published_at_from_info(info)
+                if pub_date and not existing_video.published_at:
+                    existing_video.published_at = pub_date
+                    changed = True
+                if not existing_video.transcript_is_placeholder:
+                    seg_count = session.exec(
+                        select(func.count(TranscriptSegment.id)).where(TranscriptSegment.video_id == existing_video.id)
+                    ).one() or 0
+                    if int(seg_count or 0) == 0:
+                        needs_caption_hydration = True
+                if changed:
+                    session.add(existing_video)
+
+            if needs_caption_hydration and source_url:
+                try:
+                    full_info = self._fetch_remote_video_info(source_url, purpose="tiktok_placeholder_captions")
+                    if isinstance(full_info, dict):
+                        caption_attempts += 1
+                        stored = self.populate_placeholder_transcript(session, video, info=full_info)
+                        if stored > 0:
+                            caption_stored += 1
+                except Exception as e:
+                    log_verbose(f"TikTok placeholder captions unavailable for {source_url}: {e}")
+
+            if idx == 1 or idx == len(all_entries) or idx % 25 == 0:
+                self._update_channel_sync_progress(
+                    channel.id,
+                    status="refreshing",
+                    detail=f"Importing TikTok metadata {idx}/{len(all_entries)}...",
+                    progress=22 + int(idx / max(1, len(all_entries)) * 74),
+                    completed_items=idx,
+                    total_items=len(all_entries),
+                )
+
+        channel.last_updated = datetime.now()
+        channel.status = "active"
+        channel.sync_status_detail = "Channel is up to date."
+        channel.sync_progress = 100
+        channel.sync_total_items = len(all_entries)
+        channel.sync_completed_items = len(all_entries)
+        session.add(channel)
+        session.commit()
+        log(
+            f"Refresh complete. {len(all_entries)} total on TikTok, {new_video_count} new videos added, "
+            f"{caption_stored}/{caption_attempts} placeholder caption tracks stored."
+        )
+        return new_video_count
+
     def refresh_channel(self, channel_id: int):
         with Session(engine) as session:
             channel = session.get(Channel, channel_id)
             if not channel:
                 raise ValueError("Channel not found")
+            channel_source = (channel.source_type or "youtube").strip().lower()
+            if channel_source == "manual":
+                channel.status = "active"
+                channel.sync_status_detail = "Manual channels do not support remote refresh."
+                channel.sync_progress = 0
+                channel.sync_total_items = 0
+                channel.sync_completed_items = 0
+                session.add(channel)
+                session.commit()
+                return
 
+            channel.status = "refreshing"
+            channel.sync_status_detail = "Starting channel scan..."
+            channel.sync_progress = 1
+            channel.sync_total_items = 0
+            channel.sync_completed_items = 0
+            session.add(channel)
+            session.commit()
+            session.refresh(channel)
             log(f"Refreshing channel: {channel.name}")
+
+            if channel_source == "tiktok":
+                return self._refresh_tiktok_channel(session, channel)
 
             ydl_opts = {
                 'extract_flat': 'in_playlist',
@@ -4372,7 +5641,23 @@ class IngestionService:
             seen_ids = set()
             tabs_to_fetch = [f"{base_url}/videos", f"{base_url}/streams", f"{base_url}/shorts"]
 
-            for url in tabs_to_fetch:
+            self._update_channel_sync_progress(
+                channel_id,
+                status="refreshing",
+                detail="Discovering videos from channel tabs...",
+                progress=5,
+                completed_items=0,
+                total_items=len(tabs_to_fetch),
+            )
+            for tab_idx, url in enumerate(tabs_to_fetch, start=1):
+                self._update_channel_sync_progress(
+                    channel_id,
+                    status="refreshing",
+                    detail=f"Scanning YouTube tab {tab_idx}/{len(tabs_to_fetch)}...",
+                    progress=5 + int((tab_idx - 1) / max(1, len(tabs_to_fetch)) * 20),
+                    completed_items=tab_idx - 1,
+                    total_items=len(tabs_to_fetch),
+                )
                 try:
                     log(f"  Fetching tab: {url}")
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -4413,11 +5698,27 @@ class IngestionService:
                     import traceback
                     traceback.print_exc()
                     continue
+                self._update_channel_sync_progress(
+                    channel_id,
+                    status="refreshing",
+                    detail=f"Scanned YouTube tab {tab_idx}/{len(tabs_to_fetch)}.",
+                    progress=5 + int(tab_idx / max(1, len(tabs_to_fetch)) * 20),
+                    completed_items=tab_idx,
+                    total_items=len(tabs_to_fetch),
+                )
 
             log(f"Total unique entries collected: {len(all_entries)}")
+            self._update_channel_sync_progress(
+                channel_id,
+                status="refreshing",
+                detail=f"Importing {len(all_entries)} discovered videos...",
+                progress=28,
+                completed_items=0,
+                total_items=len(all_entries),
+            )
 
             # Process all collected entries
-            for info in all_entries:
+            for idx, info in enumerate(all_entries, start=1):
                 yt_id = info.get('id')
                 if not yt_id:
                     continue
@@ -4446,8 +5747,22 @@ class IngestionService:
                         status="pending"
                     )
                     session.add(video)
+                    session.flush()
+                    try:
+                        self.populate_placeholder_transcript(session, video)
+                    except Exception as e:
+                        log_verbose(f"  Placeholder transcript skipped for {yt_id}: {e}")
                     new_video_count += 1
                     log(f"  + New: {info.get('title', 'Unknown')[:60]}")
+                if idx == 1 or idx == len(all_entries) or idx % 25 == 0:
+                    self._update_channel_sync_progress(
+                        channel_id,
+                        status="refreshing",
+                        detail=f"Importing video metadata {idx}/{len(all_entries)}...",
+                        progress=28 + int(idx / max(1, len(all_entries)) * 42),
+                        completed_items=idx,
+                        total_items=len(all_entries),
+                    )
 
             if not all_entries:
                 log(f"WARNING: No video entries found for channel {channel.name}. YouTube may be blocking requests.")
@@ -4455,7 +5770,7 @@ class IngestionService:
             channel.last_updated = datetime.now()
             session.add(channel)
             session.commit()
-            log(f"Refresh complete. {len(all_entries)} total on YouTube, {new_video_count} new videos added.")
+            log(f"Channel scan complete. {len(all_entries)} total on YouTube, {new_video_count} new videos added.")
 
             # Backfill missing published_at dates (extract_flat doesn't always return them).
             # First pass targets the top of the list so new channels look correct quickly.
@@ -4465,7 +5780,13 @@ class IngestionService:
                 quick_backfill_limit = 250
             quick_backfill_limit = max(0, quick_backfill_limit)
             if quick_backfill_limit > 0:
-                self._backfill_dates(channel_id, max_items=quick_backfill_limit)
+                self._backfill_dates(
+                    channel_id,
+                    max_items=quick_backfill_limit,
+                    progress_start=72,
+                    progress_end=88,
+                    detail_prefix="Backfilling publication dates and metadata",
+                )
 
             # Then continue with a larger pass so the whole channel converges.
             backfill_limit = None
@@ -4478,13 +5799,120 @@ class IngestionService:
                 or quick_backfill_limit <= 0
                 or backfill_limit > quick_backfill_limit
             ):
-                self._backfill_dates(channel_id, max_items=backfill_limit)
+                self._backfill_dates(
+                    channel_id,
+                    max_items=backfill_limit,
+                    progress_start=88,
+                    progress_end=98,
+                    detail_prefix="Finishing metadata backfill",
+                )
 
+            channel = session.get(Channel, channel_id)
+            if channel:
+                channel.status = "active"
+                channel.last_updated = datetime.now()
+                channel.sync_status_detail = "Channel is up to date."
+                channel.sync_progress = 100
+                channel.sync_completed_items = channel.sync_total_items
+                session.add(channel)
+                session.commit()
+            log(f"Refresh complete. {len(all_entries)} total on YouTube, {new_video_count} new videos added.")
             return new_video_count
 
+    def _queue_channel_unprocessed_videos(self, session: Session, channel_id: int) -> int:
+        active_statuses = ["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]
+        videos = session.exec(
+            select(Video).where(
+                Video.channel_id == channel_id,
+                Video.muted == False,
+                Video.access_restricted == False,
+                Video.processed == False,
+            )
+        ).all()
+
+        jobs_created = 0
+        for video in videos:
+            existing = session.exec(
+                select(Job.id).where(
+                    Job.video_id == video.id,
+                    Job.job_type.in_(["process", "diarize"]),
+                    Job.status.in_(active_statuses),
+                )
+            ).first()
+            if existing:
+                continue
+            job = Job(video_id=video.id, job_type="process", status="queued")
+            session.add(job)
+            video.status = "queued"
+            session.add(video)
+            jobs_created += 1
+        return jobs_created
+
+    def queue_channel_unprocessed_videos(self, channel_id: int) -> int:
+        with Session(engine) as session:
+            jobs_created = self._queue_channel_unprocessed_videos(session, channel_id)
+            session.commit()
+            return jobs_created
+
+    def sync_monitored_channel(self, channel_id: int) -> dict[str, int | bool]:
+        with Session(engine) as session:
+            channel = session.get(Channel, channel_id)
+            if not channel or not getattr(channel, "actively_monitored", False):
+                return {"queued": 0, "refreshed": False}
+            should_refresh = (channel.status or "").lower() != "refreshing"
+
+        queued = self.queue_channel_unprocessed_videos(channel_id)
+        refreshed = False
+        if should_refresh:
+            try:
+                self.refresh_channel(channel_id)
+                refreshed = True
+            except Exception as e:
+                log(f"Active monitor refresh failed for channel {channel_id}: {e}")
+        queued += self.queue_channel_unprocessed_videos(channel_id)
+        return {"queued": queued, "refreshed": refreshed}
+
+    def monitor_channels_loop(self, stop_event: threading.Event):
+        try:
+            interval_seconds = int(os.getenv("CHANNEL_MONITOR_INTERVAL_SECONDS", "120"))
+        except Exception:
+            interval_seconds = 120
+        interval_seconds = max(30, interval_seconds)
+        log(f"Starting active channel monitor loop (interval={interval_seconds}s)...")
+
+        while not stop_event.is_set():
+            try:
+                with Session(engine) as session:
+                    channel_ids = session.exec(
+                        select(Channel.id).where(Channel.actively_monitored == True).order_by(Channel.id.asc())
+                    ).all()
+
+                for channel_id in channel_ids:
+                    if stop_event.is_set():
+                        break
+                    result = self.sync_monitored_channel(int(channel_id))
+                    if result.get("refreshed") or result.get("queued"):
+                        log(
+                            f"Active monitor synced channel {channel_id}: "
+                            f"refreshed={bool(result.get('refreshed'))}, queued={int(result.get('queued') or 0)}"
+                        )
+            except Exception as e:
+                log(f"Active channel monitor loop error: {e}")
+
+            if stop_event.wait(interval_seconds):
+                break
 
 
-    def _backfill_dates(self, channel_id: int, max_items: int | None = None):
+
+    def _backfill_dates(
+        self,
+        channel_id: int,
+        max_items: int | None = None,
+        *,
+        progress_start: int = 80,
+        progress_end: int = 95,
+        detail_prefix: str = "Backfilling publication dates and metadata",
+    ):
         """Fetch published dates for videos that have NULL published_at.
         Runs newest-first. If max_items is None, uses env CHANNEL_DATE_BACKFILL_MAX_ITEMS.
         Use max_items <= 0 to process all missing items."""
@@ -4518,6 +5946,14 @@ class IngestionService:
             if not videos:
                 return
             log(f"Backfilling dates for {len(videos)} videos (channel {channel_id}, workers={workers})...")
+            self._update_channel_sync_progress(
+                channel_id,
+                status="refreshing",
+                detail=f"{detail_prefix} (fetching 0/{len(videos)})...",
+                progress=progress_start,
+                completed_items=0,
+                total_items=len(videos),
+            )
             ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
             ydl_opts = self._apply_ytdlp_auth_opts(ydl_opts, purpose="backfill_dates")
             targets = [
@@ -4569,6 +6005,16 @@ class IngestionService:
                     else:
                         failures += 1
                         log_verbose(f"  Backfill failed for {item['youtube_id']}: {err}")
+                    if idx == 1 or idx == len(targets) or idx % 25 == 0:
+                        fetch_progress = progress_start + int((idx / max(1, len(targets))) * max(1, (progress_end - progress_start) * 0.45))
+                        self._update_channel_sync_progress(
+                            channel_id,
+                            status="refreshing",
+                            detail=f"{detail_prefix} (fetching {idx}/{len(targets)})...",
+                            progress=fetch_progress,
+                            completed_items=idx,
+                            total_items=len(targets),
+                        )
                     if idx % 200 == 0:
                         log(f"  Backfill fetch progress: {idx}/{len(targets)} videos checked...")
 
@@ -4604,9 +6050,28 @@ class IngestionService:
                     touched += 1
                 if touched and touched % commit_batch == 0:
                     session.commit()
+                if idx == 1 or idx == len(targets) or idx % 25 == 0:
+                    write_base = progress_start + int(max(1, (progress_end - progress_start) * 0.5))
+                    write_span = max(1, progress_end - write_base)
+                    self._update_channel_sync_progress(
+                        channel_id,
+                        status="refreshing",
+                        detail=f"{detail_prefix} (writing {idx}/{len(targets)})...",
+                        progress=write_base + int((idx / max(1, len(targets))) * write_span),
+                        completed_items=idx,
+                        total_items=len(targets),
+                    )
                 if idx % 500 == 0:
                     log(f"  Backfill write progress: {idx}/{len(targets)} reviewed, {filled} dates filled...")
             session.commit()
+            self._update_channel_sync_progress(
+                channel_id,
+                status="refreshing",
+                detail=f"{detail_prefix} complete.",
+                progress=progress_end,
+                completed_items=len(targets),
+                total_items=len(targets),
+            )
             log(
                 f"Backfill complete. Filled dates for {filled}/{len(videos)} videos. "
                 f"Metadata fetch failures: {failures}."
@@ -4636,6 +6101,11 @@ class IngestionService:
         """Get standard audio path for a video.
         Returns the existing audio file if found (any format), otherwise
         returns the default .m4a path for new downloads."""
+        if (video.media_source_type or "youtube") == "upload":
+            manual_path = self.get_manual_media_absolute_path(video.manual_media_path)
+            if manual_path is not None:
+                return manual_path
+
         with Session(engine) as session:
              channel = session.get(Channel, video.channel_id)
              channel_name = channel.name if channel else "Unknown Channel"
@@ -6681,6 +8151,14 @@ class IngestionService:
             raise
 
     def download_audio(self, video: Video, job_id: int = None) -> Path:
+        if (video.media_source_type or "youtube") == "upload":
+            manual_path = self.get_manual_media_absolute_path(video.manual_media_path)
+            if not manual_path or not manual_path.exists():
+                raise FileNotFoundError(f"Uploaded media file is missing for video {video.id}")
+            if job_id:
+                self._update_job_progress(job_id, 100)
+            return manual_path
+
         # Determine paths
         new_output_path = self.get_audio_path(video)
         
@@ -6781,10 +8259,12 @@ class IngestionService:
             'postprocessor_hooks': [postprocessor_hook],
         }
         ydl_opts = self._apply_ytdlp_auth_opts(ydl_opts, purpose="download_audio")
-        log_verbose(f"Downloading audio for {video.youtube_id}...")
+        source_url = str(getattr(video, "source_url", "") or "").strip()
+        download_url = source_url or f"https://www.youtube.com/watch?v={video.youtube_id}"
+        log_verbose(f"Downloading audio for {video.youtube_id} from {download_url}...")
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([f"https://www.youtube.com/watch?v={video.youtube_id}"])
+                ydl.download([download_url])
         except Exception as e:
             notice = self._classify_ytdlp_download_notice(e)
             if notice:
@@ -6953,6 +8433,69 @@ class IngestionService:
             log(f"Startup recovery: requeued {requeued} orphaned active job(s) to front of queue.")
         return requeued
 
+    def cleanup_orphaned_channel_syncs(self) -> int:
+        """Clear channel sync states left behind by an interrupted backend run.
+
+        Channel refresh/backfill work is not resumable across process restarts.
+        Any channel still marked `refreshing` when the backend starts again is
+        therefore stale UI state, not an active sync.
+        """
+        cleaned = 0
+        with Session(engine) as session:
+            channels = session.exec(select(Channel).where(Channel.status == "refreshing")).all()
+            for channel in channels:
+                channel.status = "active"
+                channel.sync_status_detail = "Previous sync was interrupted. Refresh to resume metadata backfill."
+                channel.sync_progress = 0
+                channel.sync_total_items = 0
+                channel.sync_completed_items = 0
+                session.add(channel)
+                cleaned += 1
+            session.commit()
+
+        if cleaned:
+            log(f"Startup recovery: cleared {cleaned} orphaned channel sync state(s).")
+        return cleaned
+
+    def cleanup_orphaned_active_videos(self) -> int:
+        """Restore videos left in active-looking states without any active job."""
+        active_video_statuses = ["queued", "downloading", "transcribing", "diarizing"]
+        active_job_statuses = ["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]
+        cleaned = 0
+        with Session(engine) as session:
+            videos = session.exec(
+                select(Video).where(Video.status.in_(active_video_statuses))
+            ).all()
+            for video in videos:
+                has_active_job = session.exec(
+                    select(Job.id)
+                    .where(
+                        Job.video_id == video.id,
+                        Job.status.in_(active_job_statuses),
+                    )
+                    .limit(1)
+                ).first() is not None
+                if has_active_job:
+                    continue
+
+                recovered_status = self._infer_recoverable_video_status(session, video)
+                if recovered_status == str(video.status or ""):
+                    continue
+
+                prev_status = str(video.status or "")
+                video.status = recovered_status
+                session.add(video)
+                cleaned += 1
+                log(
+                    f"Startup recovery: restored video {video.id} "
+                    f"from {prev_status or 'unknown'} to {recovered_status}."
+                )
+            session.commit()
+
+        if cleaned:
+            log(f"Startup recovery: restored {cleaned} orphaned active video state(s).")
+        return cleaned
+
     def process_queue(self):
         """Process transcription-stage pipeline jobs."""
         log("Starting process queue worker...")
@@ -7102,6 +8645,7 @@ class IngestionService:
                             job.error = f"{e}\n{tb[-3500:]}"
                             session.add(job)
                             session.commit()
+                    self._recover_inactive_video_status(video_id)
                     # If this was a destructive redo-diarization run, restore backup transcript rows.
                     try:
                         with Session(engine) as session:
@@ -7188,6 +8732,7 @@ class IngestionService:
                     self._mark_job_failure(job_id, f"{e}\n{tb[-3500:]}")
                     if parent_job_id:
                         self._finalize_process_job_from_child(parent_job_id, job_id, "failed", error=f"{e}\n{tb[-3500:]}")
+                    self._recover_inactive_video_status(video_id)
                 finally:
                     if self.device == "cuda":
                         self._clear_cuda_cache()
@@ -7280,7 +8825,7 @@ class IngestionService:
 
                     for job in queued_jobs:
                         video = session.get(Video, job.video_id)
-                        if not video or video.muted:
+                        if not video or video.muted or video.access_restricted:
                             continue
 
                         # Ensure relation is loaded before using path generation after detach.
@@ -7575,6 +9120,15 @@ class IngestionService:
                 },
             )
         try:
+            with Session(engine) as session:
+                current_video = session.get(Video, video_id)
+                if current_video and current_video.access_restricted:
+                    raise JobNoticeException(
+                        str(current_video.access_restriction_reason or "This video is not accessible with the current YouTube session."),
+                        code="youtube_access_restricted",
+                        video_status="access_restricted",
+                        technical_detail=str(current_video.access_restriction_reason or "access restricted"),
+                    )
             # Phase 1: Download
             video_detached, audio_path = self._process_download_phase(video_id, job_id)
             
@@ -7608,6 +9162,9 @@ class IngestionService:
                 v = session.get(Video, video_id)
                 if v:
                     v.status = e.video_status
+                    if e.video_status == "access_restricted" or e.notice_code in {"youtube_members_only", "youtube_private_video", "youtube_auth_required", "youtube_access_restricted"}:
+                        v.access_restricted = True
+                        v.access_restriction_reason = e.notice_message
                     session.add(v)
                     session.commit()
             if job_id:
@@ -8755,16 +10312,29 @@ class IngestionService:
                     or float(parakeet_duration or 0)
                 )
                 last_progress_update = 0
+                last_detail_update = 0.0
                 for idx, segment in enumerate(parakeet_segments, start=1):
                     segments.append(segment)
                     if job_id and est_total_duration > 0:
                         transcription_pct = min(float(getattr(segment, "end", 0.0)) / est_total_duration, 1.0)
                         job_pct = int(transcription_pct * 100)
-                        if job_pct > last_progress_update + 2:
-                            self._update_job_progress(job_id, job_pct)
+                        now = time.time()
+                        if (
+                            job_pct > last_progress_update + 1
+                            or idx <= 3
+                            or idx % 10 == 0
+                            or (now - last_detail_update) >= 2.5
+                        ):
+                            self._update_transcription_stage_progress(
+                                job_id,
+                                engine="parakeet",
+                                completed_seconds=float(getattr(segment, "end", 0.0)),
+                                total_seconds=est_total_duration,
+                                segments_completed=len(segments),
+                            )
                             last_progress_update = job_pct
+                            last_detail_update = now
                     if job_id and idx % 10 == 0:
-                        self._update_job_status_detail(job_id, f"Transcribing with Parakeet ({idx}/{len(parakeet_segments)})...")
                         self._save_partial_transcript(video.id, segments, est_total_duration or 0.0)
                 duration_info = parakeet_duration or video.duration or 0
             except Exception as e:
@@ -8883,6 +10453,14 @@ class IngestionService:
             else:
                 total_duration = duration_info
             last_progress_update = 0
+            last_detail_update = 0.0
+            self._update_transcription_stage_progress(
+                job_id,
+                engine="whisper",
+                completed_seconds=start_time_offset,
+                total_seconds=total_duration if total_duration and total_duration > 0 else None,
+                segments_completed=len(segments),
+            )
             try:
                 seg_iter = iter(segments_generator)
             except RuntimeError as e:
@@ -8932,9 +10510,22 @@ class IngestionService:
                     if job_id and total_duration > 0:
                         transcription_pct = min(segment.end / total_duration, 1.0)
                         job_pct = int(transcription_pct * 100)
-                        if job_pct > last_progress_update + 2:
-                            self._update_job_progress(job_id, job_pct)
+                        now = time.time()
+                        if (
+                            job_pct > last_progress_update + 1
+                            or len(segments) <= 3
+                            or len(segments) % 10 == 0
+                            or (now - last_detail_update) >= 2.5
+                        ):
+                            self._update_transcription_stage_progress(
+                                job_id,
+                                engine="whisper",
+                                completed_seconds=segment.end,
+                                total_seconds=total_duration,
+                                segments_completed=len(segments),
+                            )
                             last_progress_update = job_pct
+                            last_detail_update = now
 
                     # Log every segment for real-time feedback (verbose only)
                     timestamp = self._format_timestamp(segment.start)
@@ -9211,7 +10802,7 @@ class IngestionService:
                 if job_id and (idx == 1 or idx % 3 == 0 or idx == total_labels):
                     self._update_job_status_detail(job_id, f"Analyzing speakers ({idx}/{total_labels})...")
                     # Keep some visible progress movement during long diarization post-processing
-                    self._update_job_progress(job_id, min(45, 5 + int((idx / total_labels) * 40)))
+                    self._update_job_progress(job_id, min(70, 45 + int((idx / total_labels) * 25)))
                 timeline = diarization.label_timeline(label)
                 if not timeline: continue
                     
@@ -9409,7 +11000,7 @@ class IngestionService:
                         job_id,
                         f"Writing transcript segments ({processed_segments}/{total_input_segments})..."
                     )
-                    self._update_job_progress(job_id, min(95, 45 + int((processed_segments / total_input_segments) * 50)))
+                    self._update_job_progress(job_id, min(95, 70 + int((processed_segments / total_input_segments) * 25)))
                 words = list(seg.words) if seg.words else []
 
                 if not words:
@@ -9504,6 +11095,9 @@ class IngestionService:
             log(f"Processing complete for {video_attached.title}")
             video_attached.status = "completed"
             video_attached.processed = True
+            video_attached.transcript_source = "local_transcription"
+            video_attached.transcript_language = None
+            video_attached.transcript_is_placeholder = False
             session.add(video_attached)
             session.commit()
         if self.device == "cuda" and self._should_unload_diarization_after_job(job_id=job_id):
@@ -9529,34 +11123,44 @@ class IngestionService:
         log_verbose(f"Extracting frame for {yt_id} at {timestamp}s with crop {crop_coords}")
         source_w = None
         source_h = None
+        input_source = None
+        media_source_type = str(getattr(video, "media_source_type", "") or "youtube").lower()
         try:
-            # Get generic URL
-            url = f"https://www.youtube.com/watch?v={yt_id}"
-            
-            # Use yt_dlp Python API to get the direct stream URL
-            ydl_opts = {
-                'quiet': True,
-                'no_warnings': True,
-                'format': 'bestvideo[ext=mp4]/best[ext=mp4]/best',
-            }
-            ydl_opts = self._apply_ytdlp_auth_opts(ydl_opts, purpose="extract_frame")
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                stream_url = info.get('url')
-                source_w = info.get("width")
-                source_h = info.get("height")
-                if not stream_url:
-                    # If no direct url, look in formats
-                    formats = info.get('formats', [])
-                    for f in reversed(formats):
-                        if f.get('url') and f.get('vcodec') != 'none':
-                            stream_url = f.get('url')
-                            source_w = f.get("width") or source_w
-                            source_h = f.get("height") or source_h
-                            break
-                if not stream_url:
-                    raise RuntimeError("Could not extract video stream URL")
-            
+            if media_source_type in {"upload", "tiktok"}:
+                local_path = self.get_audio_path(video)
+                if not local_path.exists():
+                    raise RuntimeError("Local media file is not available yet.")
+                if str(getattr(video, "media_kind", "") or "").lower() == "audio":
+                    raise RuntimeError("Cannot extract a speaker thumbnail from audio-only media.")
+                input_source = str(local_path)
+            else:
+                # Get generic URL
+                url = f"https://www.youtube.com/watch?v={yt_id}"
+
+                # Use yt_dlp Python API to get the direct stream URL
+                ydl_opts = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'format': 'bestvideo[ext=mp4]/best[ext=mp4]/best',
+                }
+                ydl_opts = self._apply_ytdlp_auth_opts(ydl_opts, purpose="extract_frame")
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    input_source = info.get('url')
+                    source_w = info.get("width")
+                    source_h = info.get("height")
+                    if not input_source:
+                        # If no direct url, look in formats
+                        formats = info.get('formats', [])
+                        for f in reversed(formats):
+                            if f.get('url') and f.get('vcodec') != 'none':
+                                input_source = f.get('url')
+                                source_w = f.get("width") or source_w
+                                source_h = f.get("height") or source_h
+                                break
+                    if not input_source:
+                        raise RuntimeError("Could not extract video stream URL")
+
         except Exception as e:
             raise RuntimeError(f"Failed to get video URL: {e}")
 
@@ -9571,30 +11175,30 @@ class IngestionService:
         w = float(crop_coords.get('w', 1) or 1)
         h = float(crop_coords.get('h', 1) or 1)
 
-        # Frontend crop overlay is currently rendered in a fixed 16:9 box.
-        # If the actual source stream is not 16:9, map overlay-normalized coords
-        # to source-normalized coords to avoid apparent "over-zoom" / misframing.
-        try:
-            sw = float(source_w) if source_w else 0.0
-            sh = float(source_h) if source_h else 0.0
-            if sw > 0 and sh > 0:
-                overlay_aspect = 16.0 / 9.0
-                source_aspect = sw / sh
-                if source_aspect < overlay_aspect:
-                    # Pillarbox: visible video occupies only the center X range.
-                    visible_w = source_aspect / overlay_aspect
-                    pad_x = (1.0 - visible_w) / 2.0
-                    x = (x - pad_x) / visible_w
-                    w = w / visible_w
-                elif source_aspect > overlay_aspect:
-                    # Letterbox: visible video occupies only the center Y range.
-                    visible_h = overlay_aspect / source_aspect
-                    pad_y = (1.0 - visible_h) / 2.0
-                    y = (y - pad_y) / visible_h
-                    h = h / visible_h
-        except Exception:
-            # If mapping fails, continue with raw coords.
-            pass
+        if media_source_type not in {"upload", "tiktok"}:
+            # Legacy YouTube crop overlay is rendered in a fixed 16:9 box.
+            # Map those overlay-normalized coords to the real source frame.
+            try:
+                sw = float(source_w) if source_w else 0.0
+                sh = float(source_h) if source_h else 0.0
+                if sw > 0 and sh > 0:
+                    overlay_aspect = 16.0 / 9.0
+                    source_aspect = sw / sh
+                    if source_aspect < overlay_aspect:
+                        # Pillarbox: visible video occupies only the center X range.
+                        visible_w = source_aspect / overlay_aspect
+                        pad_x = (1.0 - visible_w) / 2.0
+                        x = (x - pad_x) / visible_w
+                        w = w / visible_w
+                    elif source_aspect > overlay_aspect:
+                        # Letterbox: visible video occupies only the center Y range.
+                        visible_h = overlay_aspect / source_aspect
+                        pad_y = (1.0 - visible_h) / 2.0
+                        y = (y - pad_y) / visible_h
+                        h = h / visible_h
+            except Exception:
+                # If mapping fails, continue with raw coords.
+                pass
 
         # Add a modest safety margin so thumbnails retain context and do not look
         # unnaturally zoomed even when the face box is tight.
@@ -9641,12 +11245,42 @@ class IngestionService:
         if (ffmpeg_bin / "ffmpeg.exe").exists():
             ffmpeg_cmd = str(ffmpeg_bin / "ffmpeg.exe")
 
+        if input_source and media_source_type in {"upload", "tiktok"}:
+            ffprobe_cmd = "ffprobe"
+            if (ffmpeg_bin / "ffprobe.exe").exists():
+                ffprobe_cmd = str(ffmpeg_bin / "ffprobe.exe")
+            probe_cmd = [
+                ffprobe_cmd,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=s=x:p=0",
+                str(input_source),
+            ]
+            try:
+                probe_kwargs = {}
+                if os.name == 'nt':
+                    probe_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+                probe = subprocess.run(
+                    probe_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    **probe_kwargs,
+                )
+                dims = (probe.stdout or "").strip().split("x")
+                if len(dims) == 2:
+                    source_w = float(dims[0])
+                    source_h = float(dims[1])
+            except Exception:
+                pass
+
         # Debug logging
         debug_log_path = DATA_DIR / "debug_manual.log"
         with open(debug_log_path, "a", encoding="utf-8") as f:
             f.write(f"DEBUG: ingestion.py - ffmpeg_cmd: {ffmpeg_cmd}\n")
             f.write(f"DEBUG: ingestion.py - crop_coords: {x},{y},{w},{h}\n")
-            f.write(f"DEBUG: ingestion.py - stream_url: {stream_url}\n")
+            f.write(f"DEBUG: ingestion.py - input_source: {input_source}\n")
             f.write(f"DEBUG: ingestion.py - output_path: {output_path}\n")
 
         # FFmpeg filter: crop=w=iw*0.5:h=ih*0.5:x=iw*0.25:y=ih*0.25
@@ -9656,7 +11290,7 @@ class IngestionService:
         cmd = [
             ffmpeg_cmd, "-y",
             "-ss", str(timestamp),
-            "-i", stream_url,
+            "-i", str(input_source),
             "-vf", filter_str,
             "-vframes", "1",
             "-q:v", "2", # High quality jpeg
