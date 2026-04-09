@@ -12,10 +12,17 @@ import html
 import math
 import urllib.request
 import urllib.error
+import urllib.parse
 import xml.etree.ElementTree as ET
+import shutil
+import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Literal
+from contextlib import contextmanager
+from fastapi.encoders import jsonable_encoder
 from sqlmodel import Session, select, func
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -24,11 +31,17 @@ from dotenv import load_dotenv
 # blocking the process at startup. Only download/queue operations run
 # without them.
 
-from ..db.database import engine, Video, Channel, Speaker, SpeakerEmbedding, TranscriptSegment, TranscriptSegmentRevision, Clip, ClipExportArtifact, Job, FunnyMoment, create_db_and_tables
+from ..db.database import engine, Video, Channel, Speaker, SpeakerEmbedding, TranscriptSegment, TranscriptSegmentRevision, TranscriptRun, TranscriptQualitySnapshot, TranscriptGoldWindow, TranscriptEvaluationResult, TranscriptEvaluationReview, TranscriptOptimizationCampaign, TranscriptOptimizationCampaignItem, Clip, ClipExportArtifact, Job, FunnyMoment, create_db_and_tables
 from .logger import log, log_verbose, is_verbose
+from . import episode_clone as clone_svc
 
 class JobPausedException(Exception):
     """Raised when a job is paused by the user during processing."""
+    pass
+
+
+class JobCancelledException(Exception):
+    """Raised when a job is cancelled by the user during processing."""
     pass
 
 
@@ -55,6 +68,36 @@ class JobNoticeException(Exception):
         self.technical_detail = str(technical_detail or self.notice_message)
 
 
+class TransformersWhisperCompatModel:
+    """Compatibility adapter that presents a faster-whisper-like interface."""
+
+    def __init__(
+        self,
+        *,
+        service,
+        pipeline_runner,
+        model,
+        processor,
+        model_ref: str,
+        runtime_device: str,
+        torch_dtype_label: str,
+    ):
+        self._service = service
+        self._pipeline_runner = pipeline_runner
+        self.model = model
+        self.processor = processor
+        self.model_ref = model_ref
+        self.runtime_device = runtime_device
+        self.torch_dtype_label = torch_dtype_label
+
+    def transcribe(self, audio_path: str, **kwargs):
+        return self._service._run_transformers_whisper_transcribe(
+            self._pipeline_runner,
+            audio_path,
+            kwargs,
+        )
+
+
 def _env_float(name: str, default: str) -> float:
     """Parse a float from an environment variable with a fallback default."""
     try:
@@ -73,6 +116,7 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 AUDIO_DIR = DATA_DIR / "audio"
 MANUAL_MEDIA_DIR = DATA_DIR / "manual_media"
 TEMP_DIR = DATA_DIR / "temp"
+PYTHON_TEMP_DIR = TEMP_DIR / "python_runtime"
 EXPORT_DIR = DATA_DIR / "exports"
 HEARTBEAT_FILE = DATA_DIR / "worker_heartbeat"
 RUNTIME_DIR = Path(__file__).parent.parent.parent / "runtime"
@@ -83,20 +127,54 @@ CUDA_RESTART_WINDOW_SECONDS = int(os.getenv("CUDA_RESTART_WINDOW_SECONDS", "600"
 # Load .env from backend root
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
 HF_TOKEN = os.getenv("HF_TOKEN")
+YOUTUBE_DATA_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
 
 def ensure_dirs():
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     MANUAL_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    PYTHON_TEMP_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     create_db_and_tables()
 
 
+def configure_python_temp_dir():
+    PYTHON_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = str(PYTHON_TEMP_DIR)
+    os.environ["TMP"] = temp_path
+    os.environ["TEMP"] = temp_path
+    os.environ["TMPDIR"] = temp_path
+    tempfile.tempdir = temp_path
+
+
+configure_python_temp_dir()
+
+
+@contextmanager
+def temporary_disabled_blackhole_proxies():
+    proxy_keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+    removed: dict[str, str] = {}
+    try:
+        for key in proxy_keys:
+            value = str(os.environ.get(key) or "").strip()
+            lowered = value.lower()
+            if "127.0.0.1:9" in lowered or "localhost:9" in lowered:
+                removed[key] = value
+                os.environ.pop(key, None)
+        yield
+    finally:
+        for key, value in removed.items():
+            os.environ[key] = value
+
+
 PROCESS_JOB_TYPES = {"process"}
+VOICEFIXER_JOB_TYPES = {"voicefixer_cleanup"}
+RECONSTRUCTION_JOB_TYPES = {"conversation_reconstruct"}
 DIARIZE_JOB_TYPES = {"diarize"}
 FUNNY_JOB_TYPES = {"funny_detect", "funny_explain"}
-YOUTUBE_JOB_TYPES = {"youtube_metadata"}
+YOUTUBE_JOB_TYPES = {"youtube_metadata", "episode_clone"}
 CLIP_JOB_TYPES = {"clip_export_mp4", "clip_export_captions"}
+TRANSCRIPT_REPAIR_JOB_TYPES = {"transcript_repair"}
 
 class IngestionService:
     def __init__(self):
@@ -133,6 +211,8 @@ class IngestionService:
         self._force_float32 = False  # Set True if GPU doesn't support FP16 cuBLAS ops
         self._whisper_compute_type = None
         self._whisper_device = None
+        self._whisper_backend = None
+        self._whisper_model_cache_key = None
         self._gpu_total_vram_bytes = 0
         self._cuda_memory_fraction_applied = None
         self._cuda_unhealthy_reason = None
@@ -151,6 +231,9 @@ class IngestionService:
             "whisper": {"loaded": False, "ram_bytes": 0, "vram_bytes": 0},
             "pyannote": {"loaded": False, "ram_bytes": 0, "vram_bytes": 0},
         }
+        self._reconstruction_tts_model_guard = threading.Lock()
+        self._reconstruction_tts_model = None
+        self._reconstruction_tts_model_cache_key = None
         # Dynamic, in-process Parakeet batch cap that ratchets down after CUDA OOMs.
         # Persists for this backend process lifetime (resets on restart).
         self._parakeet_dynamic_batch_cap = None
@@ -162,6 +245,8 @@ class IngestionService:
         self._prefetch_backoff_until = {}
         self._funny_progress_lock = threading.Lock()
         self._funny_progress_by_video = {}
+        self._workbench_progress_lock = threading.Lock()
+        self._workbench_progress_by_video = {}
         self._speaker_match_cache_guard = threading.Lock()
         self._speaker_match_cache = {}
         self._partial_checkpoint_guard = threading.Lock()
@@ -312,6 +397,55 @@ class IngestionService:
             return False
         return bool(re.search(r'[.!?]["\')\]]*\s*$', text))
 
+    def _segment_starts_like_continuation(self, seg: TranscriptSegment) -> bool:
+        text = str(getattr(seg, "text", "") or "").lstrip()
+        if not text:
+            return False
+        if text[0] in {",", ";", ":", "-", ")", "]", "}"}:
+            return True
+
+        normalized = text.lstrip("\"'([{")
+        if not normalized:
+            return False
+
+        token_match = re.match(r"[A-Za-z0-9][A-Za-z0-9'\-]*", normalized)
+        if not token_match:
+            return False
+        token = token_match.group(0).lower()
+        continuation_tokens = {
+            "and",
+            "but",
+            "so",
+            "because",
+            "then",
+            "though",
+            "although",
+            "however",
+            "well",
+            "also",
+            "plus",
+            "except",
+            "if",
+            "when",
+            "while",
+            "where",
+            "which",
+            "that",
+            "who",
+            "whose",
+            "whom",
+            "or",
+            "nor",
+            "yet",
+            "still",
+            "anyway",
+            "anyways",
+            "meanwhile",
+            "like",
+            "because",
+        }
+        return token in continuation_tokens
+
     def _merge_transcript_segment_text(self, left_text: str, right_text: str) -> str:
         left = str(left_text or "").rstrip()
         right = str(right_text or "").lstrip()
@@ -355,8 +489,30 @@ class IngestionService:
                 "after_count": len(ordered),
             }
 
-        merge_gap_seconds = max(0.0, _env_float("TRANSCRIPT_CONSOLIDATE_MERGE_GAP_SECONDS", "0.45"))
-        sentence_break_gap_seconds = max(0.0, _env_float("TRANSCRIPT_CONSOLIDATE_SENTENCE_BREAK_GAP_SECONDS", "0.18"))
+        turn_merge_gap_seconds = max(
+            0.0,
+            _env_float(
+                "TRANSCRIPT_TURN_MERGE_GAP_SECONDS",
+                os.getenv("TRANSCRIPT_CONSOLIDATE_MERGE_GAP_SECONDS") or "1.1",
+            ),
+        )
+        sentence_break_gap_seconds = max(
+            0.0,
+            _env_float(
+                "TRANSCRIPT_TURN_SENTENCE_BREAK_GAP_SECONDS",
+                os.getenv("TRANSCRIPT_CONSOLIDATE_SENTENCE_BREAK_GAP_SECONDS") or "0.45",
+            ),
+        )
+        continuation_gap_seconds = max(
+            0.0,
+            _env_float("TRANSCRIPT_TURN_CONTINUATION_GAP_SECONDS", str(turn_merge_gap_seconds)),
+        )
+        noncontinuation_gap_seconds = max(
+            0.0,
+            _env_float("TRANSCRIPT_TURN_NONCONTINUATION_GAP_SECONDS", "0.55"),
+        )
+        turn_max_words = max(0, int((os.getenv("TRANSCRIPT_TURN_MAX_WORDS") or "80").strip() or "80"))
+        turn_max_seconds = max(0.0, _env_float("TRANSCRIPT_TURN_MAX_SECONDS", "30"))
         island_max_words = max(
             0,
             int(
@@ -418,14 +574,32 @@ class IngestionService:
             left_key = self._transcript_segment_assignment_key(left_seg)
             right_key = self._transcript_segment_assignment_key(seg)
             gap_seconds = self._transcript_segment_gap(left_seg, seg)
+            combined_words = self._transcript_segment_word_count(left_seg) + self._transcript_segment_word_count(seg)
+            combined_seconds = (
+                self._transcript_segment_duration(left_seg)
+                + gap_seconds
+                + self._transcript_segment_duration(seg)
+            )
+            left_has_terminal_punctuation = self._segment_has_strong_terminal_punctuation(left_seg)
+            right_continues_turn = self._segment_starts_like_continuation(seg)
 
             can_merge = (
                 left_key is not None
                 and left_key == right_key
-                and gap_seconds <= merge_gap_seconds
+                and gap_seconds <= turn_merge_gap_seconds
             )
-            if can_merge and self._segment_has_strong_terminal_punctuation(left_seg) and gap_seconds > sentence_break_gap_seconds:
+            if can_merge and turn_max_words > 0 and combined_words > turn_max_words:
                 can_merge = False
+            if can_merge and turn_max_seconds > 0.0 and combined_seconds > turn_max_seconds:
+                can_merge = False
+            if can_merge and not right_continues_turn and gap_seconds > noncontinuation_gap_seconds:
+                can_merge = False
+            if can_merge and left_has_terminal_punctuation:
+                if right_continues_turn:
+                    if gap_seconds > continuation_gap_seconds:
+                        can_merge = False
+                elif gap_seconds > sentence_break_gap_seconds:
+                    can_merge = False
 
             if can_merge:
                 self._merge_transcript_segment_pair(left_seg, seg)
@@ -480,6 +654,1761 @@ class IngestionService:
             "changed": bool(result["before_count"] != result["after_count"] or result["reassigned_islands"] > 0),
         }
 
+    def _serialize_transcript_segment_rows(self, segments: list[TranscriptSegment]) -> list[dict]:
+        rows: list[dict] = []
+        for seg in segments or []:
+            rows.append(
+                {
+                    "id": int(seg.id) if getattr(seg, "id", None) is not None else None,
+                    "video_id": int(seg.video_id),
+                    "speaker_id": int(seg.speaker_id) if getattr(seg, "speaker_id", None) is not None else None,
+                    "matched_profile_id": int(seg.matched_profile_id) if getattr(seg, "matched_profile_id", None) is not None else None,
+                    "start_time": float(seg.start_time),
+                    "end_time": float(seg.end_time),
+                    "text": str(seg.text or ""),
+                    "words": getattr(seg, "words", None),
+                }
+            )
+        return rows
+
+    def _write_transcript_repair_backup_rows(self, video: Video, rows: list[dict]) -> Path:
+        backup_dir = DATA_DIR / "transcript_repair_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        safe_title = self.sanitize_filename(str(video.title or f"video_{video.id}"))[:80] or f"video_{video.id}"
+        backup_path = backup_dir / f"{int(video.id)}_{safe_title}_{timestamp}.json"
+        payload = {
+            "video_id": int(video.id),
+            "youtube_id": str(video.youtube_id or ""),
+            "title": str(video.title or ""),
+            "created_at": datetime.now().isoformat(),
+            "segments": rows,
+        }
+        backup_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return backup_path
+
+    def _write_transcript_repair_backup(self, video: Video, segments: list[TranscriptSegment]) -> Path:
+        return self._write_transcript_repair_backup_rows(video, self._serialize_transcript_segment_rows(segments))
+
+    def _entity_repair_source_stopwords(self) -> set[str]:
+        return {
+            "the", "and", "for", "with", "from", "that", "this", "into", "about", "your", "their", "have",
+            "what", "when", "where", "which", "while", "after", "before", "episode", "interview", "podcast",
+            "video", "channel", "live", "show", "part", "full", "reaction", "review", "update", "story",
+            "discussion", "conversation", "talk", "news", "analysis", "breakdown", "guide", "question", "answer",
+            "today", "tonight", "topic", "session", "special", "guest", "host", "official", "edition", "road",
+        }
+
+    def _entity_repair_generic_phrase_tail_words(self) -> set[str]:
+        return {
+            "episode", "interview", "podcast", "video", "reaction", "review", "update", "story", "stories",
+            "discussion", "conversation", "talk", "analysis", "breakdown", "guide", "question", "answer",
+            "session", "edition", "diagnosis", "debate", "scandal",
+        }
+
+    def _normalize_entity_phrase(self, value: str | None) -> str:
+        text = unicodedata.normalize("NFKD", str(value or ""))
+        text = "".join(ch for ch in text if not unicodedata.combining(ch))
+        text = text.replace("&", " and ")
+        text = re.sub(r"[^A-Za-z0-9'\- ]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip().lower()
+        return text
+
+    def _tokenize_entity_phrase(self, value: str | None) -> list[str]:
+        return re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", str(value or ""))
+
+    def _collect_entity_repair_candidates(self, session: Session, video: Video) -> list[dict]:
+        stopwords = self._entity_repair_source_stopwords()
+        candidates: dict[str, dict] = {}
+
+        def add_candidate(raw_text: str | None, source: str, priority: float) -> None:
+            text = str(raw_text or "").strip()
+            if not text:
+                return
+            tokens = self._tokenize_entity_phrase(text)
+            if not tokens:
+                return
+            normalized = self._normalize_entity_phrase(" ".join(tokens))
+            if not normalized:
+                return
+            alpha_chars = sum(1 for ch in normalized if ch.isalpha())
+            if alpha_chars < 4:
+                return
+            if len(tokens) == 1 and normalized in stopwords:
+                return
+            if len(tokens) == 1 and len(normalized) < 5:
+                return
+            if len(tokens) > 4:
+                return
+            existing = candidates.get(normalized)
+            payload = {
+                "canonical": " ".join(tokens),
+                "normalized": normalized,
+                "tokens": tokens,
+                "token_count": len(tokens),
+                "source": source,
+                "priority": float(priority),
+            }
+            if existing is None or payload["priority"] > float(existing.get("priority") or 0.0):
+                candidates[normalized] = payload
+
+        channel = session.get(Channel, video.channel_id) if getattr(video, "channel_id", None) else None
+        if channel:
+            add_candidate(channel.name, "channel_name", 0.96)
+            for token in self._tokenize_entity_phrase(channel.name):
+                add_candidate(token, "channel_token", 0.82)
+
+        speakers = session.exec(select(Speaker).where(Speaker.channel_id == video.channel_id)).all()
+        for speaker in speakers:
+            add_candidate(speaker.name, "speaker_name", 1.0)
+            for token in self._tokenize_entity_phrase(speaker.name):
+                add_candidate(token, "speaker_token", 0.92)
+
+        title_tokens = self._tokenize_entity_phrase(getattr(video, "title", None))
+        for token in title_tokens:
+            normalized = self._normalize_entity_phrase(token)
+            if normalized in stopwords:
+                continue
+            if normalized in self._entity_repair_generic_phrase_tail_words():
+                continue
+            add_candidate(token, "title_token", 0.76)
+
+        # Add consecutive title bigrams/trigrams to capture named entities such as
+        # guest names or branded phrases that are not yet in speaker memory.
+        for size in (3, 2):
+            for idx in range(0, max(0, len(title_tokens) - size + 1)):
+                phrase_tokens = title_tokens[idx: idx + size]
+                phrase_norm = self._normalize_entity_phrase(" ".join(phrase_tokens))
+                if any(tok.lower() in stopwords for tok in phrase_tokens):
+                    continue
+                if self._normalize_entity_phrase(phrase_tokens[-1]) in self._entity_repair_generic_phrase_tail_words():
+                    continue
+                if len(phrase_norm.replace(" ", "")) < 8:
+                    continue
+                add_candidate(" ".join(phrase_tokens), "title_phrase", 0.84)
+
+        return sorted(candidates.values(), key=lambda item: (-float(item["priority"]), -int(item["token_count"]), item["canonical"]))
+
+    def _replace_word_window_with_entity(self, words_payload: list[dict] | None, start_idx: int, end_idx: int, replacement_tokens: list[str]) -> str | None:
+        if not words_payload or start_idx < 0 or end_idx >= len(words_payload):
+            return None
+        if (end_idx - start_idx + 1) != len(replacement_tokens):
+            return None
+        new_words = list(words_payload)
+        for offset, token in enumerate(replacement_tokens):
+            current = dict(new_words[start_idx + offset] or {})
+            current["word"] = token
+            new_words[start_idx + offset] = current
+        return self._dump_segment_words_json(new_words)
+
+    def _repair_segment_entities(self, segment: TranscriptSegment, candidates: list[dict]) -> dict:
+        original_text = str(getattr(segment, "text", "") or "").strip()
+        if not original_text or not candidates:
+            return {"changed": False, "applied": []}
+
+        token_matches = list(re.finditer(r"[A-Za-z0-9][A-Za-z0-9'\-]*", original_text))
+        if not token_matches:
+            return {"changed": False, "applied": []}
+        token_texts = [match.group(0) for match in token_matches]
+        normalized_tokens = [self._normalize_entity_phrase(token) for token in token_texts]
+        words_payload = self._parse_segment_words_json(getattr(segment, "words", None))
+
+        replacements: list[dict] = []
+        used_indices: set[int] = set()
+        max_len = min(4, len(token_texts))
+        for size in range(max_len, 0, -1):
+            for start_idx in range(0, len(token_texts) - size + 1):
+                window_indices = set(range(start_idx, start_idx + size))
+                if used_indices & window_indices:
+                    continue
+                current_tokens = token_texts[start_idx:start_idx + size]
+                current_phrase = " ".join(current_tokens)
+                current_normalized = self._normalize_entity_phrase(current_phrase)
+                if not current_normalized:
+                    continue
+                best = None
+                for candidate in candidates:
+                    if int(candidate.get("token_count") or 0) != size:
+                        continue
+                    candidate_normalized = str(candidate.get("normalized") or "")
+                    if not candidate_normalized:
+                        continue
+                    similarity = SequenceMatcher(None, current_normalized, candidate_normalized).ratio()
+                    exact_normalized = current_normalized == candidate_normalized
+                    candidate_source = str(candidate.get("source") or "")
+                    required_similarity = 0.88
+                    if candidate_source.startswith("title_"):
+                        required_similarity = 0.84
+                    if not exact_normalized and similarity < required_similarity:
+                        continue
+                    if abs(len(candidate_normalized) - len(current_normalized)) > 3:
+                        continue
+                    if current_normalized[0] != candidate_normalized[0]:
+                        continue
+                    canonical = str(candidate.get("canonical") or "")
+                    if exact_normalized and current_phrase == canonical:
+                        continue
+                    score = similarity + float(candidate.get("priority") or 0.0) * 0.05
+                    if best is None or score > best["score"]:
+                        best = {
+                            "score": score,
+                            "canonical": canonical,
+                            "source": candidate_source,
+                            "replacement_tokens": list(candidate.get("tokens") or []),
+                            "start_idx": start_idx,
+                            "end_idx": start_idx + size - 1,
+                            "current_phrase": current_phrase,
+                        }
+                if best is not None:
+                    replacements.append(best)
+                    used_indices.update(range(best["start_idx"], best["end_idx"] + 1))
+
+        if not replacements:
+            return {"changed": False, "applied": []}
+
+        updated_text = original_text
+        for item in sorted(replacements, key=lambda entry: token_matches[entry["start_idx"]].start(), reverse=True):
+            start_char = token_matches[item["start_idx"]].start()
+            end_char = token_matches[item["end_idx"]].end()
+            updated_text = f"{updated_text[:start_char]}{item['canonical']}{updated_text[end_char:]}"
+            replaced_words_json = self._replace_word_window_with_entity(
+                words_payload,
+                item["start_idx"],
+                item["end_idx"],
+                item["replacement_tokens"],
+            )
+            if replaced_words_json is not None:
+                words_payload = json.loads(replaced_words_json)
+
+        if updated_text == original_text:
+            return {"changed": False, "applied": []}
+
+        segment.text = updated_text
+        if words_payload is not None:
+            segment.words = json.dumps(words_payload, ensure_ascii=False)
+        return {"changed": True, "applied": replacements}
+
+    def _apply_entity_repair_to_segments(
+        self,
+        session: Session,
+        video: Video,
+        segments: list[TranscriptSegment],
+        *,
+        persist_revisions: bool = False,
+        revision_source: str = "entity_repair",
+    ) -> dict:
+        candidates = self._collect_entity_repair_candidates(session, video)
+        if not candidates:
+            return {"changed": False, "segments_changed": 0, "replacement_count": 0, "sources": []}
+
+        changed_segments = 0
+        replacements = 0
+        sources: set[str] = set()
+        for seg in segments or []:
+            old_text = str(getattr(seg, "text", "") or "")
+            result = self._repair_segment_entities(seg, candidates)
+            if not result.get("changed"):
+                continue
+            changed_segments += 1
+            replacements += len(result.get("applied") or [])
+            for applied in result.get("applied") or []:
+                source = str(applied.get("source") or "").strip()
+                if source:
+                    sources.add(source)
+            if persist_revisions and getattr(seg, "id", None) is not None and seg.text != old_text:
+                session.add(
+                    TranscriptSegmentRevision(
+                        segment_id=int(seg.id),
+                        video_id=int(seg.video_id),
+                        old_text=old_text,
+                        new_text=str(seg.text or ""),
+                        source=revision_source,
+                    )
+                )
+        return {
+            "changed": changed_segments > 0,
+            "segments_changed": changed_segments,
+            "replacement_count": replacements,
+            "sources": sorted(sources),
+        }
+
+    def _formatting_question_words(self, language: str | None) -> set[str]:
+        normalized = self._normalize_language_code(language)
+        if normalized == "es":
+            return {
+                "que", "qué", "como", "cómo", "cuando", "cuándo", "donde", "dónde",
+                "por", "por que", "por qué", "quien", "quién", "cual", "cuál",
+            }
+        return {
+            "who", "what", "when", "where", "why", "how", "which", "did", "does",
+            "do", "is", "are", "can", "could", "would", "should", "will",
+        }
+
+    def _looks_like_question_segment(self, text: str, language: str | None) -> bool:
+        normalized_text = self._normalize_entity_phrase(text)
+        if not normalized_text:
+            return False
+        for phrase in sorted(self._formatting_question_words(language), key=len, reverse=True):
+            if normalized_text == phrase or normalized_text.startswith(f"{phrase} "):
+                return True
+        return False
+
+    def _formatting_fillers(self, language: str | None) -> set[str]:
+        normalized = self._normalize_language_code(language)
+        if normalized == "es":
+            return {"eh", "em", "este", "pues"}
+        return {"uh", "um", "ah", "er", "eh"}
+
+    def _cleanup_segment_formatting(self, text: str, *, language: str | None = None, duration: float | None = None) -> tuple[str, list[str]]:
+        original = str(text or "")
+        if not original.strip():
+            return original, []
+
+        cleaned = original
+        steps: list[str] = []
+
+        replacements = {
+            "\u2018": "'",
+            "\u2019": "'",
+            "\u201c": '"',
+            "\u201d": '"',
+            "\u2013": "-",
+            "\u2014": "-",
+            "\u2026": "...",
+            "\u00a0": " ",
+        }
+        normalized_chars = "".join(replacements.get(ch, ch) for ch in cleaned)
+        if normalized_chars != cleaned:
+            cleaned = normalized_chars
+            steps.append("normalize_punctuation")
+
+        whitespace_cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        whitespace_cleaned = re.sub(r"\s+([,.;:!?])", r"\1", whitespace_cleaned)
+        whitespace_cleaned = re.sub(r'(["\'])\s+', r"\1", whitespace_cleaned)
+        whitespace_cleaned = re.sub(r"\s+([)\]])", r"\1", whitespace_cleaned)
+        whitespace_cleaned = re.sub(r"([(\[])\s+", r"\1", whitespace_cleaned)
+        if whitespace_cleaned != cleaned:
+            cleaned = whitespace_cleaned
+            steps.append("normalize_spacing")
+
+        punctuation_cleaned = re.sub(r"\.{4,}", "...", cleaned)
+        punctuation_cleaned = re.sub(r"([!?]){2,}", r"\1", punctuation_cleaned)
+        punctuation_cleaned = re.sub(r",,{2,}", ",", punctuation_cleaned)
+        punctuation_cleaned = re.sub(r";{2,}", ";", punctuation_cleaned)
+        if punctuation_cleaned != cleaned:
+            cleaned = punctuation_cleaned
+            steps.append("collapse_punctuation")
+
+        filler_pattern = "|".join(sorted(re.escape(token) for token in self._formatting_fillers(language)))
+        if filler_pattern:
+            filler_cleaned = re.sub(rf"\b({filler_pattern})(?:\s+\1\b){{2,}}", r"\1", cleaned, flags=re.IGNORECASE)
+            if filler_cleaned != cleaned:
+                cleaned = filler_cleaned
+                steps.append("collapse_fillers")
+
+        def _capitalize_match(match: re.Match[str]) -> str:
+            prefix = match.group(1)
+            letter = match.group(2)
+            return f"{prefix}{letter.upper()}"
+
+        capitalized = re.sub(r"^([^A-Za-z0-9]*)([a-z])", _capitalize_match, cleaned, count=1)
+        if capitalized != cleaned:
+            cleaned = capitalized
+            steps.append("capitalize_start")
+
+        if cleaned and not re.search(r'[.!?]["\')\]]*$', cleaned):
+            token_count = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", cleaned))
+            lower_tail = cleaned.rstrip().lower()
+            if (
+                token_count >= 4
+                and float(duration or 0.0) >= 1.0
+                and not lower_tail.endswith((",", ";", ":", "-", "--"))
+            ):
+                suffix = "?" if self._looks_like_question_segment(cleaned, language) else "."
+                cleaned = f"{cleaned}{suffix}"
+                steps.append("terminal_punctuation")
+
+        normalized_language = self._normalize_language_code(language)
+        if normalized_language == "es":
+            if cleaned.endswith("?") and not cleaned.startswith("¿") and self._looks_like_question_segment(cleaned[:-1], language):
+                cleaned = f"¿{cleaned}"
+                steps.append("spanish_inverted_question")
+            if cleaned.endswith("!") and not cleaned.startswith("¡"):
+                lead = self._normalize_entity_phrase(cleaned[:-1]).split(" ", 1)[0] if cleaned[:-1].strip() else ""
+                if lead in {"que", "qué", "como", "cómo", "vaya"}:
+                    cleaned = f"¡{cleaned}"
+                    steps.append("spanish_inverted_exclamation")
+
+        if cleaned == original:
+            return original, []
+        return cleaned, steps
+
+    def _apply_formatting_cleanup_to_segments(
+        self,
+        session: Session,
+        video: Video,
+        segments: list[TranscriptSegment],
+        *,
+        persist_revisions: bool = False,
+        revision_source: str = "formatting_cleanup",
+    ) -> dict:
+        language = self._normalize_language_code(getattr(video, "transcript_language", None))
+        changed_segments = 0
+        steps_applied: dict[str, int] = {}
+        for seg in segments or []:
+            old_text = str(getattr(seg, "text", "") or "")
+            new_text, steps = self._cleanup_segment_formatting(
+                old_text,
+                language=language,
+                duration=float(getattr(seg, "end_time", 0.0) or 0.0) - float(getattr(seg, "start_time", 0.0) or 0.0),
+            )
+            if not steps or new_text == old_text:
+                continue
+            seg.text = new_text
+            changed_segments += 1
+            for step in steps:
+                steps_applied[step] = int(steps_applied.get(step) or 0) + 1
+            if persist_revisions and getattr(seg, "id", None) is not None:
+                session.add(
+                    TranscriptSegmentRevision(
+                        segment_id=int(seg.id),
+                        video_id=int(seg.video_id),
+                        old_text=old_text,
+                        new_text=new_text,
+                        source=revision_source,
+                    )
+                )
+        return {
+            "changed": changed_segments > 0,
+            "segments_changed": changed_segments,
+            "steps": steps_applied,
+        }
+
+    def repair_existing_transcript(
+        self,
+        session: Session,
+        video_id: int,
+        *,
+        save_files: bool = True,
+        persist_run: bool = True,
+        persist_snapshot: bool = True,
+        source: str = "manual",
+        note: str | None = None,
+        trigger_semantic_index: bool = True,
+    ) -> dict:
+        video = session.get(Video, video_id)
+        if not video:
+            raise ValueError("Video not found")
+
+        segments = session.exec(
+            select(TranscriptSegment).where(TranscriptSegment.video_id == video_id).order_by(TranscriptSegment.start_time)
+        ).all()
+        if not segments:
+            raise ValueError("Transcript not found")
+        backup_rows = self._serialize_transcript_segment_rows(segments)
+
+        profile_before = self._detect_transcript_quality_profile(video, segments)
+        metrics_before = self._compute_transcript_quality_metrics(video, segments)
+        tier_before, reasons_before, score_before, _ = self._recommend_transcript_optimization(profile_before, metrics_before)
+
+        result = self._consolidate_transcript_segments(segments)
+        survivors = result["segments"]
+        removed_segments = result["removed_segments"]
+        entity_repair = self._apply_entity_repair_to_segments(
+            session,
+            video,
+            survivors,
+            persist_revisions=True,
+            revision_source="entity_repair",
+        )
+        formatting_cleanup = self._apply_formatting_cleanup_to_segments(
+            session,
+            video,
+            survivors,
+            persist_revisions=True,
+            revision_source="formatting_cleanup",
+        )
+        changed = bool(
+            result["before_count"] != result["after_count"]
+            or result["reassigned_islands"] > 0
+            or entity_repair["changed"]
+            or formatting_cleanup["changed"]
+        )
+        backup_path = self._write_transcript_repair_backup_rows(video, backup_rows) if changed else None
+
+        for seg in survivors:
+            session.add(seg)
+        for seg in removed_segments:
+            session.delete(seg)
+        session.commit()
+
+        if save_files:
+            channel = session.get(Channel, video.channel_id)
+            safe_channel = self.sanitize_filename(channel.name if channel else "Unknown")
+            safe_title = self.sanitize_filename(video.title)
+            out_dir = AUDIO_DIR / safe_channel / safe_title
+            out_dir.mkdir(parents=True, exist_ok=True)
+            synthetic_audio_path = out_dir / f"{safe_title}.m4a"
+            self._save_transcripts(session, video, survivors, synthetic_audio_path)
+
+        profile_after = self._detect_transcript_quality_profile(video, survivors)
+        metrics_after = self._compute_transcript_quality_metrics(video, survivors)
+        tier_after, reasons_after, score_after, _ = self._recommend_transcript_optimization(profile_after, metrics_after)
+
+        run = None
+        snapshot = None
+        if persist_run:
+            artifact_refs = {
+                "backup_file": str(backup_path) if backup_path else None,
+                "save_files": bool(save_files),
+                "changed": bool(changed),
+                "merged_count": int(result["merged_count"]),
+                "reassigned_islands": int(result["reassigned_islands"]),
+                "entity_segments_changed": int(entity_repair["segments_changed"]),
+                "entity_replacement_count": int(entity_repair["replacement_count"]),
+                "entity_sources": list(entity_repair["sources"]),
+                "formatting_segments_changed": int(formatting_cleanup["segments_changed"]),
+                "formatting_steps": dict(formatting_cleanup["steps"]),
+            }
+            model_provenance = {
+                "repair_strategy": "consolidate_segments_entity_repair_formatting_cleanup",
+                "source": str(source or "manual"),
+            }
+            run = self.create_transcript_run(
+                session,
+                video_id,
+                mode="low_risk_repair",
+                pipeline_version="transcript-repair-v1",
+                quality_profile=profile_after,
+                recommended_tier=tier_after,
+                metrics_before=metrics_before,
+                metrics_after=metrics_after,
+                artifact_refs=artifact_refs,
+                rollback_state=str(backup_path) if backup_path else None,
+                model_provenance=model_provenance,
+                note=note or "Transcript low-risk repair",
+            )
+            if persist_snapshot:
+                snapshot = TranscriptQualitySnapshot(
+                    video_id=int(video_id),
+                    run_id=run.id,
+                    source=str(source or "manual"),
+                    quality_profile=profile_after,
+                    recommended_tier=tier_after,
+                    score=score_after,
+                    metrics_json=json.dumps(metrics_after, ensure_ascii=False),
+                    reasons_json=json.dumps(reasons_after, ensure_ascii=False),
+                )
+                session.add(snapshot)
+            session.commit()
+            if run:
+                session.refresh(run)
+            if snapshot:
+                session.refresh(snapshot)
+
+        if changed and trigger_semantic_index:
+            self._trigger_semantic_index(int(video_id))
+
+        return {
+            "video_id": int(video_id),
+            "title": video.title,
+            "before_count": int(result["before_count"]),
+            "after_count": int(result["after_count"]),
+            "merged_count": int(result["merged_count"]),
+            "reassigned_islands": int(result["reassigned_islands"]),
+            "entity_segments_changed": int(entity_repair["segments_changed"]),
+            "entity_replacement_count": int(entity_repair["replacement_count"]),
+            "entity_sources": list(entity_repair["sources"]),
+            "formatting_segments_changed": int(formatting_cleanup["segments_changed"]),
+            "formatting_steps": dict(formatting_cleanup["steps"]),
+            "changed": bool(changed),
+            "backup_file": str(backup_path) if backup_path else None,
+            "run_id": int(run.id) if run and run.id is not None else None,
+            "snapshot_id": int(snapshot.id) if snapshot and snapshot.id is not None else None,
+            "quality_profile_before": profile_before,
+            "quality_profile_after": profile_after,
+            "recommended_tier_before": tier_before,
+            "recommended_tier_after": tier_after,
+            "quality_score_before": score_before,
+            "quality_score_after": score_after,
+            "reasons_before": reasons_before,
+            "reasons_after": reasons_after,
+        }
+
+    def _parse_entities_json(self, raw_entities: str | None) -> list[str]:
+        if not raw_entities:
+            return []
+        try:
+            data = json.loads(raw_entities)
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        items: list[str] = []
+        seen: set[str] = set()
+        for value in data:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            key = self._normalize_entity_phrase(text)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            items.append(text)
+        return items
+
+    def _levenshtein_distance(self, left: list[str] | str, right: list[str] | str) -> int:
+        left_seq = list(left)
+        right_seq = list(right)
+        if not left_seq:
+            return len(right_seq)
+        if not right_seq:
+            return len(left_seq)
+        prev = list(range(len(right_seq) + 1))
+        for i, left_item in enumerate(left_seq, start=1):
+            cur = [i]
+            for j, right_item in enumerate(right_seq, start=1):
+                cost = 0 if left_item == right_item else 1
+                cur.append(min(
+                    prev[j] + 1,
+                    cur[j - 1] + 1,
+                    prev[j - 1] + cost,
+                ))
+            prev = cur
+        return prev[-1]
+
+    def _normalize_eval_text(self, text: str | None) -> str:
+        value = unicodedata.normalize("NFKD", str(text or ""))
+        value = "".join(ch for ch in value if not unicodedata.combining(ch))
+        value = value.lower()
+        value = re.sub(r"[^a-z0-9'\s]", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
+
+    def _normalize_eval_chars(self, text: str | None) -> str:
+        return re.sub(r"\s+", "", self._normalize_eval_text(text))
+
+    def _punctuation_density(self, text: str | None) -> float:
+        value = str(text or "")
+        if not value:
+            return 0.0
+        punct_count = sum(1 for ch in value if ch in ".,;:!?")
+        return punct_count / max(len(value), 1)
+
+    def _collect_transcript_window_excerpt(self, session: Session, video_id: int, start_time: float, end_time: float) -> dict:
+        segments = session.exec(
+            select(TranscriptSegment)
+            .where(
+                TranscriptSegment.video_id == video_id,
+                TranscriptSegment.end_time > float(start_time),
+                TranscriptSegment.start_time < float(end_time),
+            )
+            .order_by(TranscriptSegment.start_time, TranscriptSegment.id)
+        ).all()
+        excerpt_parts: list[str] = []
+        unknown_count = 0
+        for seg in segments:
+            text = str(getattr(seg, "text", "") or "").strip()
+            if not text:
+                continue
+            excerpt_parts.append(text)
+            if getattr(seg, "speaker_id", None) is None:
+                unknown_count += 1
+        excerpt = " ".join(excerpt_parts).strip()
+        return {
+            "text": excerpt,
+            "segments": segments,
+            "segment_count": len(segments),
+            "unknown_speaker_rate": round((unknown_count / max(len(segments), 1)), 4) if segments else 0.0,
+        }
+
+    def upsert_transcript_gold_window(
+        self,
+        session: Session,
+        video_id: int,
+        *,
+        window_id: int | None = None,
+        label: str,
+        quality_profile: str | None,
+        language: str | None,
+        start_time: float,
+        end_time: float,
+        reference_text: str,
+        entities: list[str] | None = None,
+        notes: str | None = None,
+        active: bool = True,
+    ) -> TranscriptGoldWindow:
+        video = session.get(Video, video_id)
+        if not video:
+            raise ValueError("Video not found")
+        if float(end_time) <= float(start_time):
+            raise ValueError("end_time must be greater than start_time")
+
+        window = session.get(TranscriptGoldWindow, window_id) if window_id else None
+        if window is not None and int(window.video_id) != int(video_id):
+            raise ValueError("Gold window does not belong to this video")
+        if window is None:
+            window = TranscriptGoldWindow(video_id=int(video_id))
+        window.label = str(label or "window").strip() or "window"
+        window.quality_profile = str(quality_profile or "").strip() or None
+        window.language = self._normalize_language_code(language) or (self._normalize_language_code(getattr(video, "transcript_language", None)) or None)
+        window.start_time = float(start_time)
+        window.end_time = float(end_time)
+        window.reference_text = str(reference_text or "").strip()
+        window.entities_json = json.dumps(list(entities or []), ensure_ascii=False)
+        window.notes = str(notes or "").strip() or None
+        window.active = bool(active)
+        window.updated_at = datetime.now()
+        session.add(window)
+        session.commit()
+        session.refresh(window)
+        return window
+
+    def _score_transcript_gold_window(
+        self,
+        session: Session,
+        gold_window: TranscriptGoldWindow,
+        *,
+        run_id: int | None = None,
+        source: str = "manual",
+        candidate_text_override: str | None = None,
+    ) -> TranscriptEvaluationResult:
+        reference_text = str(gold_window.reference_text or "").strip()
+        excerpt = self._collect_transcript_window_excerpt(
+            session,
+            int(gold_window.video_id),
+            float(gold_window.start_time),
+            float(gold_window.end_time),
+        )
+        candidate_text = str(candidate_text_override if candidate_text_override is not None else excerpt["text"] or "").strip()
+
+        ref_norm = self._normalize_eval_text(reference_text)
+        cand_norm = self._normalize_eval_text(candidate_text)
+        ref_words = ref_norm.split() if ref_norm else []
+        cand_words = cand_norm.split() if cand_norm else []
+        wer_distance = self._levenshtein_distance(ref_words, cand_words)
+        wer = float(wer_distance / max(len(ref_words), 1)) if ref_words else (0.0 if not cand_words else 1.0)
+
+        ref_chars = list(self._normalize_eval_chars(reference_text))
+        cand_chars = list(self._normalize_eval_chars(candidate_text))
+        cer_distance = self._levenshtein_distance(ref_chars, cand_chars)
+        cer = float(cer_distance / max(len(ref_chars), 1)) if ref_chars else (0.0 if not cand_chars else 1.0)
+
+        entities = self._parse_entities_json(gold_window.entities_json)
+        matched_entities = 0
+        cand_phrase = self._normalize_entity_phrase(candidate_text)
+        for entity in entities:
+            entity_norm = self._normalize_entity_phrase(entity)
+            if entity_norm and entity_norm in cand_phrase:
+                matched_entities += 1
+        entity_accuracy = (matched_entities / len(entities)) if entities else None
+
+        punctuation_delta = round(
+            abs(self._punctuation_density(candidate_text) - self._punctuation_density(reference_text)),
+            4,
+        )
+
+        metrics = {
+            "window_seconds": round(float(gold_window.end_time) - float(gold_window.start_time), 3),
+            "reference_word_count": len(ref_words),
+            "candidate_word_count": len(cand_words),
+            "reference_char_count": len(ref_chars),
+            "candidate_char_count": len(cand_chars),
+            "levenshtein_word_distance": wer_distance,
+            "levenshtein_char_distance": cer_distance,
+            "window_language": self._normalize_language_code(gold_window.language),
+        }
+        result = TranscriptEvaluationResult(
+            gold_window_id=int(gold_window.id),
+            video_id=int(gold_window.video_id),
+            run_id=run_id,
+            source=str(source or "manual"),
+            candidate_text=candidate_text,
+            reference_text=reference_text,
+            wer=round(wer, 4),
+            cer=round(cer, 4),
+            entity_accuracy=round(float(entity_accuracy), 4) if entity_accuracy is not None else None,
+            matched_entity_count=int(matched_entities),
+            total_entity_count=len(entities),
+            segment_count=int(excerpt["segment_count"]),
+            unknown_speaker_rate=float(excerpt["unknown_speaker_rate"] or 0.0),
+            punctuation_density_delta=punctuation_delta,
+            metrics_json=json.dumps(metrics, ensure_ascii=False),
+        )
+        session.add(result)
+        session.commit()
+        session.refresh(result)
+        return result
+
+    def evaluate_transcript_gold_windows(
+        self,
+        session: Session,
+        video_id: int,
+        *,
+        run_id: int | None = None,
+        source: str = "manual",
+        active_only: bool = True,
+    ) -> dict:
+        windows_query = select(TranscriptGoldWindow).where(TranscriptGoldWindow.video_id == video_id)
+        if active_only:
+            windows_query = windows_query.where(TranscriptGoldWindow.active == True)  # noqa: E712
+        windows = session.exec(
+            windows_query.order_by(TranscriptGoldWindow.start_time, TranscriptGoldWindow.id)
+        ).all()
+        if not windows:
+            raise ValueError("No gold windows defined for this video")
+
+        results: list[TranscriptEvaluationResult] = []
+        for window in windows:
+            results.append(
+                self._score_transcript_gold_window(
+                    session,
+                    window,
+                    run_id=run_id,
+                    source=source,
+                )
+            )
+
+        avg_wer = round(sum(float(item.wer or 0.0) for item in results) / max(len(results), 1), 4)
+        avg_cer = round(sum(float(item.cer or 0.0) for item in results) / max(len(results), 1), 4)
+        entity_values = [float(item.entity_accuracy) for item in results if item.entity_accuracy is not None]
+        avg_entity = round(sum(entity_values) / len(entity_values), 4) if entity_values else None
+        avg_unknown = round(sum(float(item.unknown_speaker_rate or 0.0) for item in results) / max(len(results), 1), 4)
+
+        return {
+            "video_id": int(video_id),
+            "run_id": run_id,
+            "total_windows": len(results),
+            "average_wer": avg_wer,
+            "average_cer": avg_cer,
+            "average_entity_accuracy": avg_entity,
+            "average_unknown_speaker_rate": avg_unknown,
+            "items": results,
+        }
+
+    def maybe_evaluate_transcript_run_against_gold_windows(
+        self,
+        session: Session,
+        video_id: int,
+        *,
+        run_id: int | None = None,
+        source: str,
+    ) -> dict | None:
+        existing = session.exec(
+            select(TranscriptGoldWindow.id)
+            .where(TranscriptGoldWindow.video_id == video_id, TranscriptGoldWindow.active == True)  # noqa: E712
+            .limit(1)
+        ).first()
+        if not existing:
+            return None
+        return self.evaluate_transcript_gold_windows(session, video_id, run_id=run_id, source=source, active_only=True)
+
+    def _loads_json_object(self, raw: str | None, fallback):
+        if not raw:
+            return fallback
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return fallback
+        return parsed if isinstance(parsed, type(fallback)) else fallback
+
+    def list_transcript_rollback_options(self, session: Session, video_id: int) -> list[dict]:
+        runs = session.exec(
+            select(TranscriptRun)
+            .where(TranscriptRun.video_id == int(video_id))
+            .where(TranscriptRun.rollback_state.is_not(None))
+            .order_by(TranscriptRun.created_at.desc(), TranscriptRun.id.desc())
+        ).all()
+        options: list[dict] = []
+        for run in runs:
+            rollback_state = str(run.rollback_state or "").strip() or None
+            rollback_available = False
+            if rollback_state:
+                try:
+                    rollback_available = Path(rollback_state).exists()
+                except Exception:
+                    rollback_available = False
+            options.append(
+                {
+                    "run_id": int(run.id),
+                    "video_id": int(run.video_id),
+                    "mode": str(run.mode or "unknown"),
+                    "pipeline_version": str(run.pipeline_version or ""),
+                    "note": run.note,
+                    "created_at": run.created_at,
+                    "rollback_available": rollback_available,
+                    "rollback_state": rollback_state,
+                }
+            )
+        return options
+
+    def restore_transcript_from_run(
+        self,
+        session: Session,
+        video_id: int,
+        run_id: int,
+        *,
+        source: str = "api",
+    ) -> dict:
+        video = session.get(Video, int(video_id))
+        if not video:
+            raise ValueError("Video not found")
+        run = session.get(TranscriptRun, int(run_id))
+        if not run or int(run.video_id) != int(video_id):
+            raise ValueError("Transcript run not found")
+        backup_path_raw = str(run.rollback_state or "").strip()
+        if not backup_path_raw:
+            raise ValueError("Selected run does not have rollback data")
+        backup_path = Path(backup_path_raw)
+        if not backup_path.exists():
+            raise ValueError("Rollback backup file is missing")
+
+        try:
+            with open(backup_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception as exc:
+            raise ValueError(f"Rollback backup could not be read: {exc}") from exc
+
+        current_segments = session.exec(
+            select(TranscriptSegment).where(TranscriptSegment.video_id == int(video_id)).order_by(TranscriptSegment.start_time, TranscriptSegment.id)
+        ).all()
+        current_backup_rows = [
+            {
+                "speaker_id": seg.speaker_id,
+                "matched_profile_id": seg.matched_profile_id,
+                "start_time": float(seg.start_time or 0.0),
+                "end_time": float(seg.end_time or 0.0),
+                "text": str(seg.text or ""),
+                "words": seg.words,
+            }
+            for seg in current_segments
+        ]
+        current_funny_rows = session.exec(
+            select(FunnyMoment).where(FunnyMoment.video_id == int(video_id)).order_by(FunnyMoment.start_time, FunnyMoment.id)
+        ).all()
+        current_backup_payload = {
+            "video_id": int(video_id),
+            "video_status": video.status,
+            "video_processed": bool(video.processed),
+            "saved_at": datetime.now().isoformat(),
+            "segments": current_backup_rows,
+            "funny_moments": [
+                {
+                    "start_time": float(row.start_time or 0.0),
+                    "end_time": float(row.end_time or 0.0),
+                    "score": float(row.score or 0.0),
+                    "source": str(row.source or "heuristic"),
+                    "snippet": row.snippet,
+                    "humor_summary": row.humor_summary,
+                    "humor_confidence": row.humor_confidence,
+                    "humor_model": row.humor_model,
+                    "humor_explained_at": row.humor_explained_at.isoformat() if row.humor_explained_at else None,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in current_funny_rows
+            ],
+        }
+        current_backup_path = self._get_temp_redo_backup_path(int(video_id))
+        current_backup_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(current_backup_path, "w", encoding="utf-8") as f:
+            json.dump(current_backup_payload, f, ensure_ascii=False)
+
+        from sqlalchemy import delete as sa_delete
+
+        session.exec(sa_delete(TranscriptSegmentRevision).where(TranscriptSegmentRevision.video_id == int(video_id)))
+        session.exec(sa_delete(TranscriptSegment).where(TranscriptSegment.video_id == int(video_id)))
+        session.exec(sa_delete(FunnyMoment).where(FunnyMoment.video_id == int(video_id)))
+        session.flush()
+
+        def _parse_dt(value):
+            if not value:
+                return None
+            try:
+                return datetime.fromisoformat(str(value))
+            except Exception:
+                return None
+
+        restored_segment_count = 0
+        for row in payload.get("segments", []) or []:
+            session.add(
+                TranscriptSegment(
+                    video_id=int(video_id),
+                    speaker_id=row.get("speaker_id"),
+                    matched_profile_id=row.get("matched_profile_id"),
+                    start_time=float(row.get("start_time") or 0.0),
+                    end_time=float(row.get("end_time") or 0.0),
+                    text=str(row.get("text") or ""),
+                    words=row.get("words"),
+                )
+            )
+            restored_segment_count += 1
+
+        restored_funny_count = 0
+        for row in payload.get("funny_moments", []) or []:
+            session.add(
+                FunnyMoment(
+                    video_id=int(video_id),
+                    start_time=float(row.get("start_time") or 0.0),
+                    end_time=float(row.get("end_time") or 0.0),
+                    score=float(row.get("score") or 0.0),
+                    source=str(row.get("source") or "heuristic"),
+                    snippet=row.get("snippet"),
+                    humor_summary=row.get("humor_summary"),
+                    humor_confidence=row.get("humor_confidence"),
+                    humor_model=row.get("humor_model"),
+                    humor_explained_at=_parse_dt(row.get("humor_explained_at")),
+                    created_at=_parse_dt(row.get("created_at")) or datetime.now(),
+                )
+            )
+            restored_funny_count += 1
+
+        session.flush()
+
+        backup_metrics = self._loads_json_object(run.metrics_before_json, {})
+        profile = self._detect_transcript_quality_profile(
+            video,
+            session.exec(
+                select(TranscriptSegment).where(TranscriptSegment.video_id == int(video_id)).order_by(TranscriptSegment.start_time)
+            ).all(),
+        )
+        metrics = self._compute_transcript_quality_metrics(
+            video,
+            session.exec(
+                select(TranscriptSegment).where(TranscriptSegment.video_id == int(video_id)).order_by(TranscriptSegment.start_time)
+            ).all(),
+        )
+        recommended_tier, reasons, quality_score, _ = self._recommend_transcript_optimization(profile, metrics)
+
+        video.status = str(payload.get("video_status") or "completed")
+        video.processed = bool(payload.get("video_processed")) if payload.get("video_processed") is not None else restored_segment_count > 0
+        video.transcript_is_placeholder = False
+        if restored_segment_count > 0 and not str(video.transcript_source or "").strip():
+            video.transcript_source = "local_transcription"
+        session.add(video)
+
+        restore_run = self.create_transcript_run(
+            session,
+            int(video_id),
+            mode="rollback_restore",
+            pipeline_version="rollback-restore-v1",
+            quality_profile=profile,
+            recommended_tier=recommended_tier,
+            metrics_before=backup_metrics if isinstance(backup_metrics, dict) else None,
+            metrics_after=metrics,
+            artifact_refs={
+                "source_run_id": int(run.id),
+                "source_backup_file": str(backup_path),
+                "restore_source": str(source or "api"),
+                "previous_transcript_backup": str(current_backup_path),
+                "previous_funny_moment_count": len(current_funny_rows),
+            },
+            rollback_state=str(current_backup_path),
+            model_provenance={"strategy": "rollback_restore", "source": str(source or "api")},
+            note=f"Restored transcript from run {int(run.id)}",
+            input_run_id=int(run.id),
+        )
+        snapshot = TranscriptQualitySnapshot(
+            video_id=int(video_id),
+            run_id=restore_run.id,
+            source="rollback_restore",
+            quality_profile=profile,
+            recommended_tier=recommended_tier,
+            score=quality_score,
+            metrics_json=json.dumps(metrics, ensure_ascii=False),
+            reasons_json=json.dumps(reasons, ensure_ascii=False),
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(restore_run)
+
+        try:
+            self.save_transcript_files(video, session)
+        except Exception as exc:
+            log(f"Transcript restore save_files failed for video {video_id}: {exc}")
+        try:
+            self.reindex_video_semantic_embeddings(int(video_id))
+        except Exception as exc:
+            log(f"Transcript restore semantic reindex failed for video {video_id}: {exc}")
+
+        return {
+            "video_id": int(video_id),
+            "restored_from_run_id": int(run.id),
+            "restore_run_id": int(restore_run.id),
+            "segment_count": restored_segment_count,
+            "funny_moment_count": restored_funny_count,
+            "quality_profile": profile,
+            "recommended_tier": recommended_tier,
+            "quality_score": quality_score,
+        }
+
+    def summarize_transcript_evaluation(self, session: Session, *, channel_id: int | None = None) -> dict:
+        query = select(TranscriptEvaluationResult)
+        if channel_id is not None:
+            query = query.join(Video, Video.id == TranscriptEvaluationResult.video_id).where(Video.channel_id == int(channel_id))
+        results = session.exec(query.order_by(TranscriptEvaluationResult.created_at.desc(), TranscriptEvaluationResult.id.desc())).all()
+
+        windows_query = select(TranscriptGoldWindow)
+        if channel_id is not None:
+            windows_query = windows_query.join(Video, Video.id == TranscriptGoldWindow.video_id).where(Video.channel_id == int(channel_id))
+        windows = session.exec(windows_query).all()
+
+        result_ids = [int(item.id) for item in results if item.id is not None]
+        reviews: list[TranscriptEvaluationReview] = []
+        if result_ids:
+            reviews = session.exec(
+                select(TranscriptEvaluationReview).where(TranscriptEvaluationReview.evaluation_result_id.in_(result_ids))
+            ).all()
+
+        verdict_counts: dict[str, int] = {}
+        for review in reviews:
+            key = str(review.verdict or "same")
+            verdict_counts[key] = verdict_counts.get(key, 0) + 1
+
+        def _avg(values: list[float]) -> float | None:
+            return round(sum(values) / len(values), 4) if values else None
+
+        entity_values = [float(item.entity_accuracy) for item in results if item.entity_accuracy is not None]
+        return {
+            "scope": "channel" if channel_id is not None else "global",
+            "channel_id": int(channel_id) if channel_id is not None else None,
+            "total_gold_windows": len(windows),
+            "total_results": len(results),
+            "total_reviewed_results": len({int(review.evaluation_result_id) for review in reviews}),
+            "average_wer": _avg([float(item.wer or 0.0) for item in results]),
+            "average_cer": _avg([float(item.cer or 0.0) for item in results]),
+            "average_entity_accuracy": _avg(entity_values),
+            "average_unknown_speaker_rate": _avg([float(item.unknown_speaker_rate or 0.0) for item in results]),
+            "verdict_counts": verdict_counts,
+            "latest_result_at": results[0].created_at if results else None,
+        }
+
+    def summarize_diarization_benchmarks(self, session: Session, *, channel_id: int | None = None) -> list[dict]:
+        query = (
+            select(TranscriptRun, TranscriptEvaluationResult)
+            .join(TranscriptEvaluationResult, TranscriptEvaluationResult.run_id == TranscriptRun.id)
+            .where(TranscriptRun.mode == "diarization_rebuild")
+        )
+        if channel_id is not None:
+            query = query.join(Video, Video.id == TranscriptRun.video_id).where(Video.channel_id == int(channel_id))
+        rows = session.exec(query).all()
+
+        grouped: dict[str, dict] = {}
+        for run, result in rows:
+            provenance = self._loads_json_object(run.model_provenance_json, {})
+            sensitivity = str(provenance.get("diarization_sensitivity") or "balanced")
+            threshold_raw = provenance.get("speaker_match_threshold")
+            try:
+                threshold_value = round(float(threshold_raw), 2)
+            except Exception:
+                threshold_value = None
+            label = f"{sensitivity} / {threshold_value if threshold_value is not None else 'default'}"
+            bucket = grouped.setdefault(
+                label,
+                {
+                    "label": label,
+                    "run_ids": set(),
+                    "wers": [],
+                    "cers": [],
+                    "unknown_rates": [],
+                    "latest_run_id": None,
+                    "latest_created_at": None,
+                    "diarization_sensitivity": sensitivity,
+                    "speaker_match_threshold": threshold_value,
+                },
+            )
+            bucket["run_ids"].add(int(run.id))
+            bucket["wers"].append(float(result.wer or 0.0))
+            bucket["cers"].append(float(result.cer or 0.0))
+            bucket["unknown_rates"].append(float(result.unknown_speaker_rate or 0.0))
+            if bucket["latest_created_at"] is None or (run.created_at and run.created_at > bucket["latest_created_at"]):
+                bucket["latest_created_at"] = run.created_at
+                bucket["latest_run_id"] = int(run.id)
+
+        summaries: list[dict] = []
+        for bucket in grouped.values():
+            summaries.append(
+                {
+                    "label": bucket["label"],
+                    "run_count": len(bucket["run_ids"]),
+                    "average_wer": round(sum(bucket["wers"]) / len(bucket["wers"]), 4) if bucket["wers"] else None,
+                    "average_cer": round(sum(bucket["cers"]) / len(bucket["cers"]), 4) if bucket["cers"] else None,
+                    "average_unknown_speaker_rate": round(sum(bucket["unknown_rates"]) / len(bucket["unknown_rates"]), 4) if bucket["unknown_rates"] else None,
+                    "latest_run_id": bucket["latest_run_id"],
+                    "latest_created_at": bucket["latest_created_at"],
+                    "diarization_sensitivity": bucket["diarization_sensitivity"],
+                    "speaker_match_threshold": bucket["speaker_match_threshold"],
+                }
+            )
+        summaries.sort(key=lambda item: (item.get("average_wer") is None, item.get("average_wer") or 9999.0, item.get("average_cer") or 9999.0))
+        return summaries
+
+    def create_transcript_optimization_campaign(
+        self,
+        session: Session,
+        *,
+        channel_id: int | None = None,
+        limit: int = 100,
+        tiers: list[str] | None = None,
+        force_non_eligible: bool = False,
+        note: str | None = None,
+    ) -> TranscriptOptimizationCampaign:
+        requested_tiers = [str(item or "").strip() for item in (tiers or []) if str(item or "").strip()]
+        allowed_tiers = {"low_risk_repair", "diarization_rebuild", "full_retranscription", "manual_review"}
+        filtered_tiers = [item for item in requested_tiers if item in allowed_tiers]
+        dry_run = self.transcript_optimization_dry_run(
+            session,
+            channel_id=channel_id,
+            limit=limit,
+            persist_snapshots=False,
+        )
+        campaign = TranscriptOptimizationCampaign(
+            channel_id=int(channel_id) if channel_id is not None else None,
+            scope="channel" if channel_id is not None else "global",
+            status="draft",
+            tiers_json=json.dumps(filtered_tiers, ensure_ascii=False),
+            limit=max(1, int(limit)),
+            force_non_eligible=bool(force_non_eligible),
+            note=str(note or "").strip() or None,
+            updated_at=datetime.now(),
+        )
+        session.add(campaign)
+        session.flush()
+
+        for item in dry_run.get("items", []):
+            metrics = item.get("metrics") or {}
+            if int(metrics.get("total_segments") or 0) <= 0:
+                continue
+            recommended_tier = str(item.get("recommended_tier") or "none")
+            if filtered_tiers and recommended_tier not in filtered_tiers:
+                continue
+            reason_list = item.get("reasons") or []
+            session.add(
+                TranscriptOptimizationCampaignItem(
+                    campaign_id=int(campaign.id),
+                    video_id=int(item["video_id"]),
+                    recommended_tier=recommended_tier,
+                    action_tier=recommended_tier,
+                    quality_score=float(item.get("quality_score") or 0.0),
+                    reason=str(reason_list[0]) if reason_list else None,
+                    status="pending",
+                )
+            )
+        session.commit()
+        session.refresh(campaign)
+        return campaign
+
+    def _detect_transcript_quality_profile(self, video: Video, segments: list[TranscriptSegment]) -> str:
+        language = str(getattr(video, "transcript_language", "") or "").strip().lower()
+        title = str(getattr(video, "title", "") or "").strip().lower()
+        description = str(getattr(video, "description", "") or "").strip().lower()
+        haystack = f"{language} {title} {description}"
+        multilingual_markers = ("spanish", "espanol", "español", "bilingual", "portuguese", "french")
+        if language.startswith("es") or any(marker in haystack for marker in multilingual_markers):
+            return "multilingual_or_non_english"
+        if len(segments) >= 120:
+            return "english_longform"
+        return "english_general"
+
+    def _compute_transcript_quality_metrics(self, video: Video, segments: list[TranscriptSegment]) -> dict:
+        ordered = sorted(
+            list(segments or []),
+            key=lambda s: (float(getattr(s, "start_time", 0.0) or 0.0), int(getattr(s, "id", 0) or 0)),
+        )
+        total_segments = len(ordered)
+        if total_segments <= 0:
+            return {
+                "total_segments": 0,
+                "unknown_speaker_segments": 0,
+                "unknown_speaker_rate": 0.0,
+                "micro_segment_count": 0,
+                "micro_segment_rate": 0.0,
+                "tiny_unknown_count": 0,
+                "tiny_unknown_rate": 0.0,
+                "same_speaker_interruptions": 0,
+                "same_speaker_interruption_rate": 0.0,
+                "punctuated_segment_rate": 0.0,
+                "avg_segment_seconds": 0.0,
+                "avg_words_per_segment": 0.0,
+                "word_timed_segment_rate": 0.0,
+                "distinct_assigned_speakers": 0,
+                "assigned_speaker_segments": 0,
+                "language": getattr(video, "transcript_language", None),
+            }
+
+        durations = [self._transcript_segment_duration(seg) for seg in ordered]
+        word_counts = [self._transcript_segment_word_count(seg) for seg in ordered]
+        unknown_segments = [
+            seg for seg in ordered
+            if getattr(seg, "speaker_id", None) is None and getattr(seg, "matched_profile_id", None) is None
+        ]
+        micro_segments = [seg for seg, duration in zip(ordered, durations) if duration > 0.0 and duration < 1.5]
+        tiny_unknown_segments = [
+            seg for seg in unknown_segments
+            if self._transcript_segment_duration(seg) > 0.0 and self._transcript_segment_duration(seg) < 1.5
+        ]
+        punctuated_segments = [seg for seg in ordered if self._segment_has_strong_terminal_punctuation(seg)]
+        word_timed_segments = [
+            seg for seg in ordered
+            if isinstance(self._parse_segment_words_json(getattr(seg, "words", None)), list)
+        ]
+        assigned_speaker_ids = {
+            int(seg.speaker_id)
+            for seg in ordered
+            if getattr(seg, "speaker_id", None) is not None
+        }
+
+        same_speaker_interruptions = 0
+        for idx in range(1, len(ordered) - 1):
+            prev_seg = ordered[idx - 1]
+            cur_seg = ordered[idx]
+            next_seg = ordered[idx + 1]
+            prev_key = self._transcript_segment_assignment_key(prev_seg)
+            cur_key = self._transcript_segment_assignment_key(cur_seg)
+            next_key = self._transcript_segment_assignment_key(next_seg)
+            if not prev_key or prev_key != next_key or cur_key == prev_key:
+                continue
+            if self._transcript_segment_duration(cur_seg) > 2.0:
+                continue
+            if self._transcript_segment_word_count(cur_seg) > 8:
+                continue
+            same_speaker_interruptions += 1
+
+        return {
+            "total_segments": total_segments,
+            "unknown_speaker_segments": len(unknown_segments),
+            "unknown_speaker_rate": round(len(unknown_segments) / total_segments, 4),
+            "micro_segment_count": len(micro_segments),
+            "micro_segment_rate": round(len(micro_segments) / total_segments, 4),
+            "tiny_unknown_count": len(tiny_unknown_segments),
+            "tiny_unknown_rate": round(len(tiny_unknown_segments) / total_segments, 4),
+            "same_speaker_interruptions": same_speaker_interruptions,
+            "same_speaker_interruption_rate": round(same_speaker_interruptions / total_segments, 4),
+            "punctuated_segment_rate": round(len(punctuated_segments) / total_segments, 4),
+            "avg_segment_seconds": round(sum(durations) / total_segments, 3),
+            "avg_words_per_segment": round(sum(word_counts) / total_segments, 3),
+            "word_timed_segment_rate": round(len(word_timed_segments) / total_segments, 4),
+            "distinct_assigned_speakers": len(assigned_speaker_ids),
+            "assigned_speaker_segments": total_segments - len(unknown_segments),
+            "language": getattr(video, "transcript_language", None),
+        }
+
+    def _recommend_transcript_optimization(self, profile: str, metrics: dict) -> tuple[str, list[str], float, bool]:
+        total_segments = max(1, int(metrics.get("total_segments") or 0))
+        unknown_rate = float(metrics.get("unknown_speaker_rate") or 0.0)
+        micro_rate = float(metrics.get("micro_segment_rate") or 0.0)
+        tiny_unknown_rate = float(metrics.get("tiny_unknown_rate") or 0.0)
+        interruption_rate = float(metrics.get("same_speaker_interruption_rate") or 0.0)
+        punctuated_rate = float(metrics.get("punctuated_segment_rate") or 0.0)
+        word_timed_rate = float(metrics.get("word_timed_segment_rate") or 0.0)
+
+        reasons: list[str] = []
+        tier = "none"
+
+        if total_segments < 5:
+            reasons.append("Transcript is too small to evaluate reliably.")
+            score = 100.0
+            return tier, reasons, score, False
+
+        if profile == "multilingual_or_non_english":
+            if punctuated_rate < 0.9 or unknown_rate > 0.08 or micro_rate > 0.18:
+                tier = "full_retranscription"
+                reasons.append("Language profile suggests multilingual or non-English handling should be re-routed.")
+
+        if tier == "none" and word_timed_rate >= 0.4 and unknown_rate >= 0.12:
+            tier = "diarization_rebuild"
+            reasons.append("High unknown-speaker rate with usable word timing suggests diarization can be rebuilt.")
+
+        if tier == "none" and (interruption_rate >= 0.04 or tiny_unknown_rate >= 0.025 or micro_rate >= 0.22):
+            tier = "low_risk_repair"
+            reasons.append("Short interruptions and micro-segmentation indicate consolidation repair should help.")
+
+        if tier == "none" and punctuated_rate < 0.75:
+            tier = "manual_review"
+            reasons.append("Formatting quality is weak without a clear automatic repair path.")
+
+        score = 100.0
+        score -= unknown_rate * 180.0
+        score -= micro_rate * 70.0
+        score -= interruption_rate * 120.0
+        score -= max(0.0, 0.82 - punctuated_rate) * 55.0
+        if profile == "multilingual_or_non_english":
+            score -= 6.0
+        score = max(0.0, min(100.0, round(score, 2)))
+
+        if not reasons and tier == "none":
+            reasons.append("Transcript quality is within the current automatic optimization thresholds.")
+        return tier, reasons, score, tier != "none"
+
+    def create_transcript_run(
+        self,
+        session: Session,
+        video_id: int,
+        *,
+        mode: str,
+        pipeline_version: str,
+        status: str = "completed",
+        quality_profile: str | None = None,
+        recommended_tier: str | None = None,
+        metrics_before: dict | None = None,
+        metrics_after: dict | None = None,
+        artifact_refs: dict | None = None,
+        rollback_state: str | None = None,
+        model_provenance: dict | None = None,
+        note: str | None = None,
+        input_run_id: int | None = None,
+    ) -> TranscriptRun:
+        run = TranscriptRun(
+            video_id=int(video_id),
+            input_run_id=input_run_id,
+            mode=str(mode or "baseline"),
+            pipeline_version=str(pipeline_version or "baseline-v1"),
+            status=str(status or "completed"),
+            quality_profile=quality_profile,
+            recommended_tier=recommended_tier,
+            started_at=datetime.now(),
+            completed_at=datetime.now(),
+            metrics_before_json=json.dumps(metrics_before or {}, ensure_ascii=False),
+            metrics_after_json=json.dumps(metrics_after or {}, ensure_ascii=False) if metrics_after is not None else None,
+            artifact_refs_json=json.dumps(artifact_refs or {}, ensure_ascii=False) if artifact_refs is not None else None,
+            rollback_state=rollback_state,
+            model_provenance_json=json.dumps(model_provenance or {}, ensure_ascii=False) if model_provenance is not None else None,
+            note=note,
+        )
+        session.add(run)
+        session.flush()
+        return run
+
+    def evaluate_transcript_quality(
+        self,
+        session: Session,
+        video_id: int,
+        *,
+        source: str = "manual",
+        persist_snapshot: bool = False,
+    ) -> dict:
+        video = session.get(Video, video_id)
+        if not video:
+            raise ValueError("Video not found")
+
+        segments = session.exec(
+            select(TranscriptSegment).where(TranscriptSegment.video_id == video_id).order_by(TranscriptSegment.start_time)
+        ).all()
+        profile = self._detect_transcript_quality_profile(video, segments)
+        metrics = self._compute_transcript_quality_metrics(video, segments)
+        recommended_tier, reasons, score, eligible = self._recommend_transcript_optimization(profile, metrics)
+
+        snapshot = None
+        if persist_snapshot:
+            run = self.create_transcript_run(
+                session,
+                video_id,
+                mode="quality_assessment",
+                pipeline_version="quality-evaluator-v1",
+                quality_profile=profile,
+                recommended_tier=recommended_tier,
+                metrics_before=metrics,
+                note=f"Quality assessment snapshot via {source}",
+            )
+            snapshot = TranscriptQualitySnapshot(
+                video_id=int(video_id),
+                run_id=run.id,
+                source=str(source or "manual"),
+                quality_profile=profile,
+                recommended_tier=recommended_tier,
+                score=score,
+                metrics_json=json.dumps(metrics, ensure_ascii=False),
+                reasons_json=json.dumps(reasons, ensure_ascii=False),
+            )
+            session.add(snapshot)
+            session.commit()
+            session.refresh(snapshot)
+        result = {
+            "video_id": int(video_id),
+            "title": str(video.title or ""),
+            "channel_id": video.channel_id,
+            "quality_profile": profile,
+            "recommended_tier": recommended_tier,
+            "quality_score": score,
+            "eligible_for_optimization": bool(eligible),
+            "language": getattr(video, "transcript_language", None),
+            "metrics": metrics,
+            "reasons": reasons,
+            "created_snapshot_id": int(snapshot.id) if snapshot and snapshot.id is not None else None,
+            "snapshot_created_at": snapshot.created_at if snapshot else None,
+        }
+        return result
+
+    def transcript_optimization_dry_run(
+        self,
+        session: Session,
+        *,
+        channel_id: int | None = None,
+        video_id: int | None = None,
+        limit: int = 50,
+        persist_snapshots: bool = False,
+    ) -> dict:
+        query = select(Video).where(Video.processed == True)  # noqa: E712
+        if video_id is not None:
+            query = query.where(Video.id == int(video_id))
+        elif channel_id is not None:
+            query = query.where(Video.channel_id == int(channel_id))
+        query = query.order_by(Video.published_at.desc(), Video.id.desc()).limit(max(1, int(limit)))
+
+        items: list[dict] = []
+        for video in session.exec(query).all():
+            item = self.evaluate_transcript_quality(
+                session,
+                int(video.id),
+                source="dry_run",
+                persist_snapshot=bool(persist_snapshots),
+            )
+            if int((item.get("metrics") or {}).get("total_segments") or 0) <= 0:
+                continue
+            items.append(item)
+
+        eligible_count = len([item for item in items if item.get("eligible_for_optimization")])
+        return {
+            "total_scanned": len(items),
+            "total_eligible": eligible_count,
+            "items": items,
+        }
+
+    def create_diarization_rebuild_run(
+        self,
+        session: Session,
+        video_id: int,
+        *,
+        payload: dict | None = None,
+        note: str | None = None,
+    ) -> dict | None:
+        payload = dict(payload or {})
+        optimization_target = str(payload.get("optimization_target") or "").strip().lower()
+        mode = str(payload.get("mode") or "").strip().lower()
+        if optimization_target != "diarization_rebuild" and mode != "redo_diarization":
+            return None
+
+        video = session.get(Video, video_id)
+        if not video:
+            return None
+        segments = session.exec(
+            select(TranscriptSegment).where(TranscriptSegment.video_id == video_id).order_by(TranscriptSegment.start_time)
+        ).all()
+        profile_after = self._detect_transcript_quality_profile(video, segments)
+        metrics_after = self._compute_transcript_quality_metrics(video, segments)
+        tier_after, reasons_after, score_after, _ = self._recommend_transcript_optimization(profile_after, metrics_after)
+
+        metrics_before = payload.get("quality_metrics_before")
+        if not isinstance(metrics_before, dict):
+            metrics_before = {}
+        profile_before = str(payload.get("quality_profile_before") or "unknown")
+        tier_before = str(payload.get("recommended_tier_before") or "none")
+        score_before = float(payload.get("quality_score_before") or 0.0)
+        reasons_before = payload.get("quality_reasons_before")
+        if not isinstance(reasons_before, list):
+            reasons_before = []
+
+        artifact_refs = {
+            "redo_backup_file": payload.get("redo_diarization_backup_file"),
+            "optimization_target": optimization_target or "redo_diarization",
+            "queued_from": payload.get("queued_from"),
+            "raw_transcript_reused": True,
+        }
+        diarization_sensitivity = str(
+            payload.get("diarization_sensitivity_override")
+            or os.getenv("DIARIZATION_SENSITIVITY", "balanced")
+            or "balanced"
+        )
+        try:
+            speaker_match_threshold = float(
+                payload.get("speaker_match_threshold_override")
+                if payload.get("speaker_match_threshold_override") is not None
+                else os.getenv("SPEAKER_MATCH_THRESHOLD", "0.35")
+            )
+        except Exception:
+            speaker_match_threshold = 0.35
+        model_provenance = {
+            "strategy": "redo_diarization",
+            "diarization_sensitivity": diarization_sensitivity,
+            "speaker_match_threshold": speaker_match_threshold,
+            "benchmark_variant": bool(payload.get("benchmark_variant")),
+            "source": str(payload.get("queued_from") or "manual"),
+        }
+        run = self.create_transcript_run(
+            session,
+            video_id,
+            mode="diarization_rebuild",
+            pipeline_version="diarization-benchmark-v1" if bool(payload.get("benchmark_variant")) else "diarization-rebuild-v1",
+            quality_profile=profile_after,
+            recommended_tier=tier_after,
+            metrics_before=metrics_before,
+            metrics_after=metrics_after,
+            artifact_refs=artifact_refs,
+            rollback_state=str(payload.get("redo_diarization_backup_file") or "") or None,
+            model_provenance=model_provenance,
+            note=note or str(payload.get("note") or "").strip() or "Transcript diarization rebuild",
+        )
+        snapshot = TranscriptQualitySnapshot(
+            video_id=int(video_id),
+            run_id=run.id,
+            source="queued_job",
+            quality_profile=profile_after,
+            recommended_tier=tier_after,
+            score=score_after,
+            metrics_json=json.dumps(metrics_after, ensure_ascii=False),
+            reasons_json=json.dumps(reasons_after, ensure_ascii=False),
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(run)
+        session.refresh(snapshot)
+        return {
+            "run_id": int(run.id),
+            "snapshot_id": int(snapshot.id),
+            "quality_profile_before": profile_before,
+            "quality_profile_after": profile_after,
+            "recommended_tier_before": tier_before,
+            "recommended_tier_after": tier_after,
+            "quality_score_before": score_before,
+            "quality_score_after": score_after,
+            "reasons_before": reasons_before,
+            "reasons_after": reasons_after,
+        }
+
+    def create_full_retranscription_run(
+        self,
+        session: Session,
+        video_id: int,
+        *,
+        payload: dict | None = None,
+        note: str | None = None,
+    ) -> dict | None:
+        payload = dict(payload or {})
+        optimization_target = str(payload.get("optimization_target") or "").strip().lower()
+        mode = str(payload.get("mode") or "").strip().lower()
+        if optimization_target != "full_retranscription" and mode != "full_retranscription":
+            return None
+
+        video = session.get(Video, video_id)
+        if not video:
+            return None
+        segments = session.exec(
+            select(TranscriptSegment).where(TranscriptSegment.video_id == video_id).order_by(TranscriptSegment.start_time)
+        ).all()
+        profile_after = self._detect_transcript_quality_profile(video, segments)
+        metrics_after = self._compute_transcript_quality_metrics(video, segments)
+        tier_after, reasons_after, score_after, _ = self._recommend_transcript_optimization(profile_after, metrics_after)
+
+        metrics_before = payload.get("quality_metrics_before")
+        if not isinstance(metrics_before, dict):
+            metrics_before = {}
+        profile_before = str(payload.get("quality_profile_before") or "unknown")
+        tier_before = str(payload.get("recommended_tier_before") or "none")
+        score_before = float(payload.get("quality_score_before") or 0.0)
+        reasons_before = payload.get("quality_reasons_before")
+        if not isinstance(reasons_before, list):
+            reasons_before = []
+
+        artifact_refs = {
+            "redo_backup_file": payload.get("redo_diarization_backup_file"),
+            "optimization_target": optimization_target or "full_retranscription",
+            "queued_from": payload.get("queued_from"),
+            "raw_transcript_reused": False,
+            "force_retranscription": bool(payload.get("force_retranscription")),
+        }
+        model_provenance = {
+            "strategy": "full_retranscription",
+            "transcription_engine_requested": payload.get("transcription_engine_requested"),
+            "transcription_engine_routed": payload.get("transcription_engine_routed"),
+            "transcription_engine_used": payload.get("transcription_engine_used"),
+            "transcription_route_language": payload.get("transcription_route_language"),
+            "transcription_route_language_source": payload.get("transcription_route_language_source"),
+            "transcription_route_multilingual": payload.get("transcription_route_multilingual"),
+            "transcription_route_whisper_model": payload.get("transcription_route_whisper_model"),
+            "source": str(payload.get("queued_from") or "manual"),
+        }
+        run = self.create_transcript_run(
+            session,
+            video_id,
+            mode="full_retranscription",
+            pipeline_version="full-retranscription-v1",
+            quality_profile=profile_after,
+            recommended_tier=tier_after,
+            metrics_before=metrics_before,
+            metrics_after=metrics_after,
+            artifact_refs=artifact_refs,
+            rollback_state=str(payload.get("redo_diarization_backup_file") or "") or None,
+            model_provenance=model_provenance,
+            note=note or str(payload.get("note") or "").strip() or "Transcript full retranscription",
+        )
+        snapshot = TranscriptQualitySnapshot(
+            video_id=int(video_id),
+            run_id=run.id,
+            source="queued_job",
+            quality_profile=profile_after,
+            recommended_tier=tier_after,
+            score=score_after,
+            metrics_json=json.dumps(metrics_after, ensure_ascii=False),
+            reasons_json=json.dumps(reasons_after, ensure_ascii=False),
+        )
+        session.add(snapshot)
+        session.commit()
+        session.refresh(run)
+        session.refresh(snapshot)
+        return {
+            "run_id": int(run.id),
+            "snapshot_id": int(snapshot.id),
+            "quality_profile_before": profile_before,
+            "quality_profile_after": profile_after,
+            "recommended_tier_before": tier_before,
+            "recommended_tier_after": tier_after,
+            "quality_score_before": score_before,
+            "quality_score_after": score_after,
+            "reasons_before": reasons_before,
+            "reasons_after": reasons_after,
+        }
+
+    def _record_transcript_optimization_completion(self, job_id: int, video_id: int, payload: dict | None):
+        payload = dict(payload or {})
+        result = None
+        evaluation = None
+        with Session(engine) as session:
+            result = (
+                self.create_diarization_rebuild_run(session, video_id, payload=payload)
+                or self.create_full_retranscription_run(session, video_id, payload=payload)
+            )
+            if result and result.get("run_id"):
+                try:
+                    evaluation = self.maybe_evaluate_transcript_run_against_gold_windows(
+                        session,
+                        video_id,
+                        run_id=int(result["run_id"]),
+                        source="optimization_completion",
+                    )
+                except Exception as e:
+                    log(f"Transcript evaluation-on-completion failed for video {video_id}: {e}")
+        if not result:
+            return
+        payload_fields = {
+            "optimization_run_id": result.get("run_id"),
+            "optimization_snapshot_id": result.get("snapshot_id"),
+            "optimization_recommended_tier_after": result.get("recommended_tier_after"),
+            "optimization_quality_score_after": result.get("quality_score_after"),
+            "rebuild_run_id": result.get("run_id"),
+            "rebuild_snapshot_id": result.get("snapshot_id"),
+            "rebuild_recommended_tier_after": result.get("recommended_tier_after"),
+            "rebuild_quality_score_after": result.get("quality_score_after"),
+        }
+        if evaluation:
+            payload_fields.update(
+                {
+                    "optimization_evaluation_window_count": evaluation.get("total_windows"),
+                    "optimization_evaluation_average_wer": evaluation.get("average_wer"),
+                    "optimization_evaluation_average_cer": evaluation.get("average_cer"),
+                    "optimization_evaluation_average_entity_accuracy": evaluation.get("average_entity_accuracy"),
+                }
+            )
+        self._upsert_job_payload_fields(job_id, payload_fields)
+
     def _configure_cuda_allocator(self):
         if sys.platform != "win32":
             return
@@ -500,7 +2429,8 @@ class IngestionService:
 
     def _get_redo_backup_path_from_payload(self, payload_json: str | None) -> Path | None:
         payload = self._load_job_payload(payload_json)
-        if (payload.get("mode") or "").strip().lower() != "redo_diarization":
+        mode = (payload.get("mode") or "").strip().lower()
+        if mode not in {"redo_diarization", "full_retranscription"}:
             return None
         backup_file = (payload.get("redo_diarization_backup_file") or "").strip()
         if not backup_file:
@@ -684,27 +2614,29 @@ class IngestionService:
                 self._speaker_match_cache[channel_key] = cache
             return cache
 
+        parsed_rows = []
+        for row in rows:
+            vec = self._normalize_embedding_vector(getattr(row, "embedding", None))
+            if vec is None:
+                continue
+            parsed_rows.append((int(row.id), int(row.speaker_id), vec))
+
         vectors = []
         profile_ids = []
         speaker_ids = []
-        expected_dim = None
-        for row in rows:
-            try:
-                vec = np.asarray(row.embedding, dtype=np.float32).reshape(-1)
-            except Exception:
-                continue
-            if vec.size == 0:
-                continue
-            if expected_dim is None:
-                expected_dim = int(vec.size)
-            if int(vec.size) != expected_dim:
-                continue
-            norm = float(np.linalg.norm(vec))
-            if norm <= 1e-12:
-                continue
-            vectors.append((vec / norm).astype(np.float32, copy=False))
-            profile_ids.append(int(row.id))
-            speaker_ids.append(int(row.speaker_id))
+        expected_dim = 0
+        if parsed_rows:
+            dim_counts = {}
+            for _, _, vec in parsed_rows:
+                dim = int(vec.size)
+                dim_counts[dim] = int(dim_counts.get(dim, 0)) + 1
+            expected_dim = max(dim_counts.items(), key=lambda item: (item[1], item[0]))[0]
+            for profile_id, speaker_id, vec in parsed_rows:
+                if int(vec.size) != int(expected_dim):
+                    continue
+                vectors.append(vec)
+                profile_ids.append(int(profile_id))
+                speaker_ids.append(int(speaker_id))
 
         if not vectors:
             cache = {"dim": 0, "matrix": None, "profile_ids": np.array([], dtype=np.int64), "speaker_ids": np.array([], dtype=np.int64), "count": 0}
@@ -720,6 +2652,88 @@ class IngestionService:
         with self._speaker_match_cache_guard:
             self._speaker_match_cache[channel_key] = cache
         return cache
+
+    def _normalize_embedding_vector(self, embedding):
+        import numpy as np
+
+        try:
+            arr = np.asarray(embedding, dtype=np.float32)
+        except Exception:
+            return None
+        if arr.size == 0:
+            return None
+        if arr.ndim > 1:
+            try:
+                arr = np.mean(arr, axis=0, dtype=np.float32)
+            except Exception:
+                arr = arr.reshape(-1)
+        vec = np.asarray(arr, dtype=np.float32).reshape(-1)
+        if vec.size < 16:
+            return None
+        if not np.all(np.isfinite(vec)):
+            return None
+        norm = float(np.linalg.norm(vec))
+        if not np.isfinite(norm) or norm <= 1e-12:
+            return None
+        return (vec / norm).astype(np.float32, copy=False)
+
+    def _select_speaker_embedding_segments(self, timeline):
+        max_samples = max(1, int(os.getenv("SPEAKER_PROFILE_SAMPLE_COUNT", "4")))
+        min_sample_seconds = max(0.5, _env_float("SPEAKER_PROFILE_MIN_SAMPLE_SECONDS", "2.0"))
+        fallback_min_seconds = max(0.5, _env_float("SPEAKER_PROFILE_FALLBACK_MIN_SECONDS", "0.75"))
+
+        candidates = []
+        for seg in timeline or []:
+            try:
+                duration = float(seg.duration)
+            except Exception:
+                duration = 0.0
+            if duration <= 0.0:
+                continue
+            candidates.append(seg)
+
+        if not candidates:
+            return []
+
+        candidates.sort(key=lambda seg: (-float(seg.duration), float(seg.start)))
+        selected = [seg for seg in candidates if float(seg.duration) >= min_sample_seconds]
+        if not selected:
+            selected = [seg for seg in candidates if float(seg.duration) >= fallback_min_seconds]
+        if not selected:
+            selected = candidates
+
+        return selected[:max_samples]
+
+    def _build_speaker_embedding_profile(self, audio_source, timeline):
+        import numpy as np
+
+        selected_segments = self._select_speaker_embedding_segments(timeline)
+        sample_embeddings = []
+        for seg in selected_segments:
+            emb = self.get_speaker_embedding(audio_source, seg)
+            normalized = self._normalize_embedding_vector(emb)
+            if normalized is None:
+                continue
+            sample_embeddings.append((seg, normalized))
+
+        if not sample_embeddings:
+            return None, None, []
+
+        dim_counts = {}
+        for _, vec in sample_embeddings:
+            dim_counts[int(vec.size)] = int(dim_counts.get(int(vec.size), 0)) + 1
+        target_dim = max(dim_counts.items(), key=lambda item: (item[1], item[0]))[0]
+        sample_embeddings = [(seg, vec) for seg, vec in sample_embeddings if int(vec.size) == int(target_dim)]
+        if not sample_embeddings:
+            return None, None, []
+
+        centroid = np.mean(np.stack([vec for _, vec in sample_embeddings], axis=0), axis=0)
+        centroid_norm = float(np.linalg.norm(centroid))
+        if centroid_norm <= 1e-12:
+            return None, None, []
+        centroid = (centroid / centroid_norm).astype(np.float32, copy=False)
+        primary_segment = max((seg for seg, _ in sample_embeddings), key=lambda seg: float(seg.duration))
+        return centroid, primary_segment, sample_embeddings
 
     def _parse_ytdlp_cookies_from_browser(self, raw_value: str):
         text = (raw_value or "").strip()
@@ -834,6 +2848,22 @@ class IngestionService:
                 ),
                 "video_status": "access_restricted",
                 "access_restricted": True,
+            }
+
+        if (
+            "premieres in " in lowered
+            or "premieres on " in lowered
+            or "premieres at " in lowered
+            or "upcoming live event" in lowered
+        ):
+            return {
+                "code": "youtube_premiere_scheduled",
+                "message": (
+                    "This YouTube video is an upcoming premiere and cannot be downloaded yet. "
+                    "Retry after the premiere has started or the VOD is available."
+                ),
+                "video_status": "pending",
+                "access_restricted": False,
             }
 
         if self._is_ytdlp_auth_required_error(exc):
@@ -1147,21 +3177,14 @@ class IngestionService:
             entries = self._parse_vtt_placeholder_captions(payload_text)
         return self._consolidate_placeholder_caption_entries(entries)
 
-    def populate_placeholder_transcript(self, session: Session, video: Video, *, info: dict | None = None) -> int:
-        if not self._placeholder_captions_enabled():
-            return 0
-        if not video or not video.id or not video.youtube_id:
+    def _populate_placeholder_transcript_from_track(self, session: Session, video: Video, track: dict | None) -> int:
+        if not video or not video.id or not video.youtube_id or not isinstance(track, dict):
             return 0
 
         existing_count = session.exec(
             select(func.count(TranscriptSegment.id)).where(TranscriptSegment.video_id == video.id)
         ).one()
         if int(existing_count or 0) > 0:
-            return 0
-
-        info = info or self._fetch_youtube_video_info(video.youtube_id)
-        track = self._choose_caption_track(info)
-        if not track:
             return 0
 
         entries = self._download_placeholder_caption_entries(track)
@@ -1188,6 +3211,16 @@ class IngestionService:
             f"({video.transcript_source}, {video.transcript_language or 'unknown'}): {len(entries)} segments"
         )
         return len(entries)
+
+    def populate_placeholder_transcript(self, session: Session, video: Video, *, info: dict | None = None) -> int:
+        if not self._placeholder_captions_enabled():
+            return 0
+        if not video or not video.id or not video.youtube_id:
+            return 0
+
+        info = info or self._fetch_youtube_video_info(video.youtube_id)
+        track = self._choose_caption_track(info)
+        return self._populate_placeholder_transcript_from_track(session, video, track)
 
     def _set_prefetch_backoff(self, video_id: int, seconds: float):
         until = time.time() + max(1.0, float(seconds))
@@ -1225,11 +3258,15 @@ class IngestionService:
                         return
                     if job.status == 'paused':
                         raise JobPausedException("Job paused by user")
+                    if job.status == 'cancelled':
+                        raise JobCancelledException("Job cancelled by user")
                     job.progress = progress
                     session.add(job)
                     session.commit()
                     return
             except JobPausedException:
+                raise
+            except JobCancelledException:
                 raise
             except OperationalError as e:
                 if "database is locked" not in str(e).lower():
@@ -1256,10 +3293,18 @@ class IngestionService:
                     job = session.get(Job, job_id)
                     if not job:
                         return
+                    if job.status == 'paused':
+                        raise JobPausedException("Job paused by user")
+                    if job.status == 'cancelled':
+                        raise JobCancelledException("Job cancelled by user")
                     job.status_detail = detail
                     session.add(job)
                     session.commit()
                     return
+            except JobPausedException:
+                raise
+            except JobCancelledException:
+                raise
             except OperationalError as e:
                 if "database is locked" not in str(e).lower():
                     log(f"Failed to update status_detail: {e}")
@@ -1285,12 +3330,18 @@ class IngestionService:
                     job = session.get(Job, job_id)
                     if not job:
                         return
+                    if job.status == 'paused':
+                        raise JobPausedException("Job paused by user")
+                    if job.status == 'cancelled':
+                        raise JobCancelledException("Job cancelled by user")
                     payload = self._load_job_payload(job.payload_json)
                     payload.update({k: v for k, v in fields.items() if v is not None})
                     job.payload_json = json.dumps(payload, sort_keys=True)
                     session.add(job)
                     session.commit()
                     return
+            except (JobPausedException, JobCancelledException):
+                raise
             except OperationalError as e:
                 if "database is locked" not in str(e).lower():
                     log(f"Failed to update job payload_json: {e}")
@@ -1334,6 +3385,7 @@ class IngestionService:
         source = payload if isinstance(payload, dict) else {}
         cleaned: dict = {}
         transient_prefixes = ("stage_", "parakeet_", "whisper_")
+        preserved_exact = set()
         transient_exact = {
             "pipeline_started_at",
             "transcription_engine_requested",
@@ -1350,6 +3402,9 @@ class IngestionService:
             "result_notice_detail",
         }
         for key, value in source.items():
+            if key in preserved_exact:
+                cleaned[key] = value
+                continue
             if key in transient_exact:
                 continue
             if any(key.startswith(prefix) for prefix in transient_prefixes):
@@ -1387,6 +3442,53 @@ class IngestionService:
         with self._funny_progress_lock:
             self._funny_progress_by_video[int(video_id)] = payload
 
+    def _set_workbench_task_progress(
+        self,
+        video_id: int,
+        *,
+        area: str,
+        task: str,
+        status: str = "running",
+        stage: str | None = None,
+        message: str | None = None,
+        percent: int | float | None = None,
+        current: int | None = None,
+        total: int | None = None,
+    ) -> None:
+        try:
+            pct = None if percent is None else max(0, min(100, int(round(float(percent)))))
+        except Exception:
+            pct = None
+        payload = {
+            "video_id": int(video_id),
+            "area": str(area or "").strip().lower() or None,
+            "task": str(task or "").strip().lower() or None,
+            "status": str(status or "running").strip().lower() or "running",
+            "stage": stage,
+            "message": message,
+            "percent": pct,
+            "current": None if current is None else int(current),
+            "total": None if total is None else int(total),
+            "updated_at": time.time(),
+        }
+        with self._workbench_progress_lock:
+            self._workbench_progress_by_video[int(video_id)] = payload
+
+    def get_workbench_task_progress(self, video_id: int) -> dict:
+        vid = int(video_id)
+        with self._workbench_progress_lock:
+            progress = self._workbench_progress_by_video.get(vid)
+            if not progress:
+                return {"video_id": vid, "status": "idle"}
+
+            updated_at = float(progress.get("updated_at") or 0)
+            age = time.time() - updated_at if updated_at else 999999
+            if progress.get("status") in {"completed", "error"} and age > 20:
+                self._workbench_progress_by_video.pop(vid, None)
+                return {"video_id": vid, "status": "idle"}
+
+            return dict(progress)
+
     def get_funny_task_progress(self, video_id: int) -> dict:
         """Return latest funny-moment task progress for a video (best-effort)."""
         vid = int(video_id)
@@ -1406,36 +3508,53 @@ class IngestionService:
 
     def _claim_next_queued_job(self, allowed_job_types: set[str]):
         """Atomically claim the next queued job for a given queue."""
+        from sqlalchemy import update as sa_update
+
         with Session(engine) as session:
-            job = session.exec(
-                select(Job)
+            candidates = session.exec(
+                select(Job.id, Job.video_id, Job.job_type, Job.payload_json)
                 .where(Job.status == "queued", Job.job_type.in_(list(allowed_job_types)))
                 .order_by(Job.created_at.asc(), Job.id.asc())
-            ).first()
-            if not job:
+                .limit(12)
+            ).all()
+            if not candidates:
                 return None
-            payload = self._strip_transient_job_payload_fields(self._load_job_payload(job.payload_json))
-            job.status = "running"
-            job.started_at = datetime.now()
-            job.completed_at = None
-            job.error = None
-            job.progress = 0
-            job.status_detail = None
-            job.payload_json = json.dumps(payload, sort_keys=True) if payload else None
-            session.add(job)
-            session.commit()
-            session.refresh(job)
-            return {
-                "id": int(job.id),
-                "video_id": int(job.video_id),
-                "job_type": str(job.job_type),
-                "payload_json": job.payload_json,
-            }
+
+            for job_id, video_id, job_type, payload_json in candidates:
+                payload = self._strip_transient_job_payload_fields(self._load_job_payload(payload_json))
+                normalized_payload_json = json.dumps(payload, sort_keys=True) if payload else None
+                claim_time = datetime.now()
+                result = session.exec(
+                    sa_update(Job)
+                    .where(Job.id == job_id, Job.status == "queued")
+                    .values(
+                        status="running",
+                        started_at=claim_time,
+                        completed_at=None,
+                        error=None,
+                        progress=0,
+                        status_detail=None,
+                        payload_json=normalized_payload_json,
+                    )
+                )
+                if int(getattr(result, "rowcount", 0) or 0) <= 0:
+                    session.rollback()
+                    continue
+                session.commit()
+                return {
+                    "id": int(job_id),
+                    "video_id": int(video_id),
+                    "job_type": str(job_type),
+                    "payload_json": normalized_payload_json,
+                }
+            return None
 
     def _mark_job_success(self, job_id: int):
         with Session(engine) as session:
             job = session.get(Job, job_id)
             if not job:
+                return
+            if str(job.status or "").strip().lower() == "cancelled":
                 return
             job.status = "completed"
             job.completed_at = datetime.now()
@@ -1444,10 +3563,21 @@ class IngestionService:
             session.add(job)
             session.commit()
 
+    def _trigger_semantic_index(self, video_id: int) -> None:
+        """Fire-and-forget semantic index build for a single video after transcription."""
+        try:
+            from .semantic_search import start_index_job
+            start_index_job([video_id])
+            log(f"[semantic] Queued semantic indexing for video {video_id}.")
+        except Exception as exc:
+            log(f"[semantic] Failed to queue semantic index for video {video_id}: {exc}")
+
     def _mark_job_failure(self, job_id: int, error: str):
         with Session(engine) as session:
             job = session.get(Job, job_id)
             if not job:
+                return
+            if str(job.status or "").strip().lower() == "cancelled":
                 return
             job.status = "failed"
             job.error = _truncate_error(error)
@@ -1859,6 +3989,8 @@ class IngestionService:
                     self._mark_job_success(job_id)
                 except JobPausedException:
                     log(f"Job {job_id} paused by user")
+                except JobCancelledException:
+                    log(f"Job {job_id} cancelled by user")
                 except Exception as e:
                     log(f"{worker_name} job {job_id} failed: {e}")
                     if is_verbose():
@@ -1898,14 +4030,80 @@ class IngestionService:
         raise ValueError(f"Unsupported funny queue job_type '{job_type}'")
 
     def _handle_youtube_job(self, job_id: int, video_id: int, job_type: str, payload: dict):
-        if job_type != "youtube_metadata":
-            raise ValueError(f"Unsupported youtube queue job_type '{job_type}'")
-        force = bool(payload.get("force", True))
-        self._update_job_status_detail(job_id, "Generating YouTube summary + chapters...")
-        self._update_job_progress(job_id, 5)
-        self.generate_youtube_metadata_suggestion(video_id, force=force)
-        self._update_job_progress(job_id, 100)
-        self._update_job_status_detail(job_id, None)
+        if job_type == "youtube_metadata":
+            force = bool(payload.get("force", True))
+            self._update_job_status_detail(job_id, "Generating YouTube summary + chapters...")
+            self._update_job_progress(job_id, 5)
+            self.generate_youtube_metadata_suggestion(video_id, force=force)
+            self._update_job_progress(job_id, 100)
+            self._update_job_status_detail(job_id, None)
+            return
+        if job_type == "episode_clone":
+            request_payload = clone_svc.normalize_clone_request(
+                style_prompt=str(payload.get("style_prompt") or ""),
+                notes=payload.get("notes"),
+                semantic_query=payload.get("semantic_query"),
+                related_limit=int(payload.get("related_limit") or 8),
+                variant_label=payload.get("variant_label"),
+                provider_override=payload.get("provider_override"),
+                model_override=payload.get("model_override"),
+                approved_concepts=payload.get("approved_concepts"),
+                excluded_references=payload.get("excluded_references"),
+            )
+            request_signature = clone_svc.clone_request_signature(video_id=video_id, request_payload=request_payload)
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    **request_payload,
+                    "request_signature": request_signature,
+                },
+            )
+            self._update_job_status_detail(job_id, "Gathering source and channel context...")
+            self._update_job_progress(job_id, 15)
+            target_provider, target_model, model_name = self.resolve_clone_llm_target(
+                provider_override=str(request_payload.get("provider_override") or ""),
+                model_override=str(request_payload.get("model_override") or ""),
+            )
+            with Session(engine) as session:
+                result = clone_svc.generate_episode_clone(
+                    session,
+                    video_id=video_id,
+                    style_prompt=str(request_payload["style_prompt"]),
+                    notes=request_payload.get("notes"),
+                    semantic_query=request_payload.get("semantic_query"),
+                    related_limit=int(request_payload.get("related_limit") or 8),
+                    approved_concepts=list(request_payload.get("approved_concepts") or []),
+                    excluded_references=list(request_payload.get("excluded_references") or []),
+                    text_generator=lambda prompt: self.generate_clone_text(
+                        self._mark_clone_job_generation_started(job_id, prompt),
+                        provider_override=target_provider,
+                        model_override=target_model,
+                        temperature=0.35,
+                        num_predict=1800,
+                        timeout_seconds=180,
+                    ),
+                    model_name=model_name,
+                )
+            self._update_job_status_detail(job_id, "Saving clone result...")
+            self._update_job_progress(job_id, 95)
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "request_signature": request_signature,
+                    "clone_result": jsonable_encoder(result),
+                    "clone_result_ready": True,
+                    "clone_generated_at": datetime.now().isoformat(),
+                },
+            )
+            self._update_job_progress(job_id, 100)
+            self._update_job_status_detail(job_id, None)
+            return
+        raise ValueError(f"Unsupported youtube queue job_type '{job_type}'")
+
+    def _mark_clone_job_generation_started(self, job_id: int, prompt: str) -> str:
+        self._update_job_status_detail(job_id, "Generating clone script...")
+        self._update_job_progress(job_id, 65)
+        return prompt
 
     def _handle_clip_job(self, job_id: int, video_id: int, job_type: str, payload: dict):
         clip_id = payload.get("clip_id")
@@ -1931,6 +4129,593 @@ class IngestionService:
             self._update_job_progress(job_id, 100)
             return
         raise ValueError(f"Unsupported clip queue job_type '{job_type}'")
+
+    def _handle_transcript_repair_job(self, job_id: int, video_id: int, payload: dict):
+        self._update_job_status_detail(job_id, "Repairing transcript segmentation...")
+        self._update_job_progress(job_id, 5)
+        with Session(engine) as session:
+            result = self.repair_existing_transcript(
+                session,
+                video_id,
+                save_files=bool(payload.get("save_files", True)),
+                persist_run=True,
+                persist_snapshot=True,
+                source="queued_job",
+                note=str(payload.get("note") or "").strip() or f"Queued transcript repair job {job_id}",
+                trigger_semantic_index=True,
+            )
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "repair_run_id": result.get("run_id"),
+                "repair_snapshot_id": result.get("snapshot_id"),
+                "repair_changed": bool(result.get("changed")),
+                "repair_backup_file": result.get("backup_file"),
+                "repair_recommended_tier_after": result.get("recommended_tier_after"),
+                "repair_quality_score_after": result.get("quality_score_after"),
+            },
+        )
+        self._update_job_progress(job_id, 100)
+        self._update_job_status_detail(job_id, None)
+
+    def _handle_voicefixer_job(self, job_id: int, video_id: int, payload: dict):
+        force = bool(payload.get("force", False))
+        self._run_voicefixer_cleanup(video_id, job_id=job_id, force=force)
+        self._update_job_progress(job_id, 100)
+        self._update_job_status_detail(job_id, None)
+
+    def _handle_reconstruction_job(self, job_id: int, video_id: int, payload: dict):
+        force = bool(payload.get("force", False))
+        self._run_conversation_reconstruction(video_id, job_id=job_id, force=force)
+        self._update_job_progress(job_id, 100)
+        self._update_job_status_detail(job_id, None)
+
+    def _run_voicefixer_cleanup(self, video_id: int, *, job_id: int | None = None, force: bool = False) -> Path:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            if (video.media_source_type or "youtube") != "upload":
+                raise ValueError("VoiceFixer is only available for uploaded manual media.")
+            original_path, input_wav, restored_wav, final_path = self._voicefixer_paths_for_manual_video(video)
+            voicefixer_source_path = self._get_cleanup_selected_candidate_path(video) or original_path
+            blended_wav = input_wav.parent / f"{input_wav.stem.replace('.input', '')}.voicefixer.blended.wav"
+            leveled_wav = input_wav.parent / f"{input_wav.stem.replace('.input', '')}.voicefixer.leveled.wav"
+            cleaned_rel_path = final_path.relative_to(MANUAL_MEDIA_DIR).as_posix()
+            current_cleaned_exists = final_path.exists()
+            mode = max(0, min(2, int(getattr(video, "voicefixer_mode", 0) or 0)))
+            mix_ratio = max(0.0, min(1.0, float(getattr(video, "voicefixer_mix_ratio", 1.0) or 1.0)))
+            leveling_mode = str(getattr(video, "voicefixer_leveling_mode", "off") or "off").strip().lower()
+            use_cleaned = self._voicefixer_apply_scope(video) != "none"
+
+        if current_cleaned_exists and not force:
+            self._set_voicefixer_state(
+                video_id,
+                status="ready",
+                use_cleaned=use_cleaned,
+                cleaned_path=cleaned_rel_path,
+                error="",
+            )
+            return final_path
+
+        self._set_voicefixer_state(video_id, status="processing", error="")
+        ffmpeg_cmd = self._get_ffmpeg_cmd()
+
+        for path in (input_wav, restored_wav, blended_wav, leveled_wav, final_path):
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+
+        try:
+            if job_id:
+                self._update_job_progress(job_id, 10)
+                self._update_job_status_detail(job_id, "Preparing media for VoiceFixer...")
+
+            self._run_external_command(
+                [
+                    ffmpeg_cmd,
+                    "-y",
+                    "-v",
+                    "error",
+                    "-i",
+                    str(voicefixer_source_path),
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "44100",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(input_wav),
+                ],
+                "Failed to prepare audio for VoiceFixer",
+            )
+
+            if job_id:
+                self._update_job_progress(job_id, 45)
+                self._update_job_status_detail(job_id, "Running VoiceFixer restoration...")
+
+            from voicefixer import VoiceFixer  # type: ignore
+            try:
+                self._ensure_device()
+            except Exception:
+                pass
+
+            use_cuda = False
+            try:
+                import torch  # type: ignore
+                use_cuda = bool(torch.cuda.is_available() and str(self.device or "") == "cuda" and not self._cuda_recovery_pending)
+            except Exception:
+                use_cuda = False
+
+            restorer = VoiceFixer()
+            restorer.restore(input=str(input_wav), output=str(restored_wav), cuda=use_cuda, mode=mode)
+
+            current_audio_path = restored_wav
+
+            if mix_ratio < 0.999:
+                if job_id:
+                    self._update_job_progress(job_id, 62)
+                    self._update_job_status_detail(job_id, "Blending restored and original audio...")
+                restored_weight = max(0.0, min(1.0, mix_ratio))
+                original_weight = max(0.0, 1.0 - restored_weight)
+                self._run_external_command(
+                    [
+                        ffmpeg_cmd,
+                        "-y",
+                        "-v",
+                        "error",
+                        "-i",
+                        str(restored_wav),
+                        "-i",
+                        str(input_wav),
+                        "-filter_complex",
+                        f"amix=inputs=2:weights='{restored_weight:.4f} {original_weight:.4f}':normalize=0",
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "44100",
+                        "-c:a",
+                        "pcm_s16le",
+                        str(blended_wav),
+                    ],
+                    "Failed to blend VoiceFixer-restored and original audio",
+                )
+                current_audio_path = blended_wav
+
+            leveling_filter = self._voicefixer_leveling_filter(leveling_mode)
+            if leveling_filter:
+                if job_id:
+                    self._update_job_progress(job_id, 72)
+                    self._update_job_status_detail(job_id, "Applying voice leveling...")
+                self._run_external_command(
+                    [
+                        ffmpeg_cmd,
+                        "-y",
+                        "-v",
+                        "error",
+                        "-i",
+                        str(current_audio_path),
+                        "-af",
+                        leveling_filter,
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "44100",
+                        "-c:a",
+                        "pcm_s16le",
+                        str(leveled_wav),
+                    ],
+                    "Failed to apply VoiceFixer leveling",
+                )
+                current_audio_path = leveled_wav
+
+            if final_path.suffix.lower() == ".mp4":
+                if job_id:
+                    self._update_job_progress(job_id, 80)
+                    self._update_job_status_detail(job_id, "Merging restored audio back into video...")
+                self._run_external_command(
+                    [
+                        ffmpeg_cmd,
+                        "-y",
+                        "-v",
+                        "error",
+                        "-i",
+                        str(original_path),
+                        "-i",
+                        str(current_audio_path),
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "1:a:0",
+                        "-c:v",
+                        "copy",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "192k",
+                        "-shortest",
+                        str(final_path),
+                    ],
+                    "Failed to merge VoiceFixer audio into video",
+                )
+            else:
+                current_audio_path.replace(final_path)
+
+            self._set_voicefixer_state(
+                video_id,
+                status="ready",
+                use_cleaned=use_cleaned,
+                cleaned_path=cleaned_rel_path,
+                error="",
+            )
+            return final_path
+        except JobPausedException:
+            self._set_voicefixer_state(video_id, status="paused", error="")
+            raise
+        except JobCancelledException:
+            raise
+        except Exception as e:
+            self._set_voicefixer_state(video_id, status="failed", error=str(e))
+            raise
+        finally:
+            for temp_path in (input_wav, restored_wav, blended_wav, leveled_wav):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def _run_conversation_reconstruction(self, video_id: int, *, job_id: int | None = None, force: bool = False) -> Path:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            if (video.media_source_type or "youtube") != "upload":
+                raise ValueError("Conversation reconstruction is currently available for uploaded manual media only.")
+            output_wav, sidecar_json = self._reconstruction_output_paths(video)
+            rel_output = output_wav.relative_to(MANUAL_MEDIA_DIR).as_posix()
+            transcript_segments = session.exec(
+                select(TranscriptSegment).where(TranscriptSegment.video_id == video_id).order_by(TranscriptSegment.start_time)
+            ).all()
+            if not transcript_segments:
+                raise ValueError("Transcript segments are required before running conversation reconstruction.")
+            if not any(getattr(seg, "speaker_id", None) is not None for seg in transcript_segments):
+                raise ValueError("Diarization must be completed before running conversation reconstruction.")
+            source_path = self.get_audio_path(video, purpose="processing")
+            performance_source_path = self.get_original_manual_media_path(video) or source_path
+            reconstruction_mode = self._get_reconstruction_mode(video)
+            performance_mode = reconstruction_mode == "performance"
+            instruction_template = self._get_reconstruction_instruction_template(video)
+            current_exists = output_wav.exists()
+
+        if current_exists and not force:
+            self._set_reconstruction_state(video_id, status="ready", audio_path=rel_output, error="")
+            return output_wav
+
+        model_name = (os.getenv("RECONSTRUCTION_TTS_MODEL") or "Qwen/Qwen3-TTS-12Hz-0.6B-Base").strip()
+        self._set_reconstruction_state(video_id, status="processing", error="", model=model_name)
+        work_dir = output_wav.parent / f".reconstruction_{video_id}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if job_id:
+                self._update_job_progress(job_id, 5)
+                self._update_job_status_detail(job_id, "Extracting speaker references...")
+            self._check_job_not_paused(job_id)
+            grouped_segments: dict[int, list[TranscriptSegment]] = {}
+            for seg in transcript_segments:
+                seg_speaker_id = getattr(seg, "speaker_id", None)
+                if seg_speaker_id is not None:
+                    grouped_segments.setdefault(int(seg_speaker_id), []).append(seg)
+            state = self._sync_reconstruction_workbench_state(video, grouped_segments)
+            references = self._extract_reconstruction_references(
+                source_path,
+                transcript_segments,
+                work_dir,
+                video=video,
+                state=state,
+            )
+            if not references:
+                raise ValueError("Could not extract any speaker reference clips from the diarized transcript.")
+
+            if job_id:
+                self._update_job_progress(job_id, 15)
+                self._update_job_status_detail(job_id, "Loading reconstruction TTS model...")
+
+            import soundfile as sf  # type: ignore
+
+            tts_model, use_cuda, _ = self._get_reconstruction_tts_model(model_name)
+
+            xvector_only_mode = (os.getenv("RECONSTRUCTION_XVECTOR_ONLY") or "true").strip().lower() in {"1", "true", "yes", "on"}
+            clean_prompts_by_speaker: dict[int, object] = {}
+            for speaker_id, ref in references.items():
+                prompt_items = tts_model.create_voice_clone_prompt(
+                    ref_audio=str(ref["path"]),
+                    ref_text=None if xvector_only_mode else str(ref["text"]),
+                    x_vector_only_mode=xvector_only_mode,
+                )
+                if not prompt_items:
+                    continue
+                clean_prompts_by_speaker[speaker_id] = prompt_items[0]
+
+            sample_rate = 44100
+            placements: list[dict] = []
+            total_segments = max(1, len(transcript_segments))
+            sidecar_rows: list[dict] = []
+            use_cuda_batch = bool(use_cuda)
+            batch_size = self._reconstruction_batch_size(use_cuda_batch)
+            batch_token_budget = self._reconstruction_batch_token_budget(use_cuda_batch)
+            batch_duration_budget = self._reconstruction_batch_duration_budget(use_cuda_batch)
+
+            def append_original(seg, *, synthesized: bool = False):
+                seg_text = str(getattr(seg, "text", "") or "").strip()
+                start_time = float(seg.start_time)
+                end_time = float(seg.end_time)
+                target_duration = max(0.05, end_time - start_time)
+                wav, wav_sr = self._load_original_audio_segment(source_path, start_time, end_time)
+                fitted = self._fit_waveform_duration(wav, wav_sr, target_duration)
+                placements.append({
+                    "start_time": start_time,
+                    "wav": fitted,
+                })
+                sidecar_rows.append({
+                    "segment_id": int(getattr(seg, "id", 0) or 0),
+                    "speaker_id": int(getattr(seg, "speaker_id", None)) if getattr(seg, "speaker_id", None) is not None else None,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "text": seg_text,
+                    "source": "tts" if synthesized else "original",
+                })
+
+            batch_items: list[dict] = []
+            batch_cost = 0
+            batch_duration = 0.0
+
+            def flush_batch(end_index: int) -> None:
+                nonlocal batch_items, batch_cost, batch_duration, batch_token_budget, batch_duration_budget
+                if not batch_items:
+                    return
+                self._check_job_not_paused(job_id)
+                batch_token_budget = self._reconstruction_batch_token_budget(use_cuda_batch)
+                batch_duration_budget = self._reconstruction_batch_duration_budget(use_cuda_batch)
+                if job_id:
+                    first_idx = int(batch_items[0]["index"]) + 1
+                    last_idx = int(batch_items[-1]["index"]) + 1
+                    progress = 15 + int((min(end_index, total_segments) / total_segments) * 75)
+                    self._update_job_progress(job_id, progress)
+                    self._update_job_status_detail(job_id, f"Reconstructing segments {first_idx}-{last_idx}/{total_segments}...")
+                try:
+                    batch_prompts, batch_texts = self._prepare_reconstruction_batch_prompts(
+                        tts_model,
+                        batch_items,
+                        clean_prompts_by_speaker=clean_prompts_by_speaker,
+                        performance_source_path=performance_source_path,
+                        performance_mode=performance_mode,
+                        work_dir=work_dir,
+                    )
+                    wavs, batch_sr = self._synthesize_reconstruction_batch(
+                        tts_model,
+                        batch_prompts,
+                        batch_texts,
+                        [item["target_duration"] for item in batch_items],
+                        model_name,
+                    )
+                    if len(wavs) != len(batch_items):
+                        raise RuntimeError(f"Qwen3-TTS returned {len(wavs)} outputs for {len(batch_items)} requested segments.")
+                    for item, wav in zip(batch_items, wavs):
+                        validation_error = self._validate_reconstruction_waveform(wav, int(batch_sr), float(item["target_duration"]))
+                        if validation_error and performance_mode:
+                            fitted, _, _ = self._synthesize_validated_reconstruction_segment(
+                                tts_model,
+                                clean_prompts_by_speaker[int(item["speaker_id"])],
+                                str(item["text"]),
+                                model_name=model_name,
+                                target_seconds=float(item["target_duration"]),
+                            )
+                        elif validation_error:
+                            raise RuntimeError(validation_error)
+                        else:
+                            fitted = self._fit_waveform_duration(wav, batch_sr, float(item["target_duration"]))
+                        placements.append({
+                            "start_time": float(item["start_time"]),
+                            "wav": fitted,
+                        })
+                        sidecar_rows.append({
+                            "segment_id": int(item["segment_id"]),
+                            "speaker_id": int(item["speaker_id"]) if item["speaker_id"] is not None else None,
+                            "start_time": float(item["start_time"]),
+                            "end_time": float(item["end_time"]),
+                            "text": str(item["text"]),
+                            "source": "tts",
+                        })
+                except Exception:
+                    for item in batch_items:
+                        try:
+                            perf_prompt = item["prompt"]
+                            perf_text = str(item["generation_text"])
+                            if performance_mode:
+                                prompt_list, text_list = self._prepare_reconstruction_batch_prompts(
+                                    tts_model,
+                                    [item],
+                                    clean_prompts_by_speaker=clean_prompts_by_speaker,
+                                    performance_source_path=performance_source_path,
+                                    performance_mode=True,
+                                    work_dir=work_dir,
+                                )
+                                perf_prompt = prompt_list[0]
+                                perf_text = text_list[0]
+                            fitted, _, _ = self._synthesize_validated_reconstruction_segment(
+                                tts_model,
+                                perf_prompt,
+                                perf_text,
+                                model_name=model_name,
+                                target_seconds=float(item["target_duration"]),
+                                fallback_prompt=clean_prompts_by_speaker[int(item["speaker_id"])] if performance_mode else None,
+                                fallback_text=str(item["text"]),
+                            )
+                            placements.append({
+                                "start_time": float(item["start_time"]),
+                                "wav": fitted,
+                            })
+                            sidecar_rows.append({
+                                "segment_id": int(item["segment_id"]),
+                                "speaker_id": int(item["speaker_id"]) if item["speaker_id"] is not None else None,
+                                "start_time": float(item["start_time"]),
+                                "end_time": float(item["end_time"]),
+                                "text": str(item["text"]),
+                                "source": "tts",
+                            })
+                        except Exception:
+                            append_original(item["segment_obj"], synthesized=False)
+                finally:
+                    batch_items = []
+                    batch_cost = 0
+                    batch_duration = 0.0
+                    self._release_reconstruction_cuda_cache()
+
+            def synthesize_isolated_item(item: dict, end_index: int) -> None:
+                self._check_job_not_paused(job_id)
+                if job_id:
+                    progress = 15 + int((min(end_index, total_segments) / total_segments) * 75)
+                    self._update_job_progress(job_id, progress)
+                    self._update_job_status_detail(
+                        job_id,
+                        f"Reconstructing long segment {int(item['index']) + 1}/{total_segments}...",
+                    )
+                try:
+                    prompt_to_use = item["prompt"]
+                    text_to_use = str(item["generation_text"])
+                    if performance_mode:
+                        prompt_list, text_list = self._prepare_reconstruction_batch_prompts(
+                            tts_model,
+                            [item],
+                            clean_prompts_by_speaker=clean_prompts_by_speaker,
+                            performance_source_path=performance_source_path,
+                            performance_mode=True,
+                            work_dir=work_dir,
+                        )
+                        prompt_to_use = prompt_list[0]
+                        text_to_use = text_list[0]
+                    fitted, _, _ = self._synthesize_validated_reconstruction_segment(
+                        tts_model,
+                        prompt_to_use,
+                        text_to_use,
+                        model_name=model_name,
+                        target_seconds=float(item["target_duration"]),
+                        fallback_prompt=clean_prompts_by_speaker[int(item["speaker_id"])] if performance_mode else None,
+                        fallback_text=str(item["text"]),
+                    )
+                    placements.append({
+                        "start_time": float(item["start_time"]),
+                        "wav": fitted,
+                    })
+                    sidecar_rows.append({
+                        "segment_id": int(item["segment_id"]),
+                        "speaker_id": int(item["speaker_id"]) if item["speaker_id"] is not None else None,
+                        "start_time": float(item["start_time"]),
+                        "end_time": float(item["end_time"]),
+                        "text": str(item["text"]),
+                        "source": "tts",
+                    })
+                except Exception:
+                    append_original(item["segment_obj"], synthesized=False)
+                finally:
+                    self._release_reconstruction_cuda_cache()
+
+            for idx, seg in enumerate(transcript_segments):
+                self._check_job_not_paused(job_id)
+                seg_text = str(getattr(seg, "text", "") or "").strip()
+                start_time = float(seg.start_time)
+                end_time = float(seg.end_time)
+                target_duration = max(0.05, end_time - start_time)
+                speaker_id = getattr(seg, "speaker_id", None)
+                can_use_tts = (
+                    speaker_id is not None
+                    and int(speaker_id) in clean_prompts_by_speaker
+                    and self._should_reconstruct_with_tts(seg_text, target_duration)
+                )
+                if can_use_tts:
+                    item_cost = self._estimate_reconstruction_item_cost(model_name, target_duration, seg_text)
+                    item = {
+                        "index": idx,
+                        "segment_obj": seg,
+                        "segment_id": int(getattr(seg, "id", 0) or 0),
+                        "speaker_id": int(speaker_id),
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "target_duration": target_duration,
+                        "text": seg_text,
+                        "generation_text": self._build_reconstruction_generation_text(
+                            seg_text,
+                            performance_mode=performance_mode,
+                            instruction_template=instruction_template,
+                        ),
+                        "prompt": clean_prompts_by_speaker[int(speaker_id)],
+                    }
+                    if self._should_force_original_reconstruction_segment(seg_text, target_duration):
+                        flush_batch(idx)
+                        if job_id:
+                            progress = 15 + int(((idx + 1) / total_segments) * 75)
+                            self._update_job_progress(job_id, progress)
+                            self._update_job_status_detail(job_id, f"Using original audio for long segment {idx + 1}/{total_segments}...")
+                        append_original(seg, synthesized=False)
+                    elif self._should_isolate_reconstruction_segment(seg_text, target_duration):
+                        flush_batch(idx)
+                        synthesize_isolated_item(item, idx + 1)
+                    else:
+                        if batch_items and (
+                            (batch_cost + item_cost) > batch_token_budget
+                            or (batch_duration + target_duration) > batch_duration_budget
+                        ):
+                            flush_batch(idx)
+                        batch_items.append(item)
+                        batch_cost += item_cost
+                        batch_duration += float(target_duration)
+                    if batch_items and (
+                        len(batch_items) >= batch_size
+                        or batch_cost >= batch_token_budget
+                        or batch_duration >= batch_duration_budget
+                    ):
+                        flush_batch(idx + 1)
+                else:
+                    flush_batch(idx)
+                    if job_id:
+                        progress = 15 + int(((idx + 1) / total_segments) * 75)
+                        self._update_job_progress(job_id, progress)
+                        self._update_job_status_detail(job_id, f"Copying original segment {idx + 1}/{total_segments}...")
+                    append_original(seg, synthesized=False)
+
+            flush_batch(total_segments)
+
+            total_duration = max(float(transcript_segments[-1].end_time), max((row["end_time"] for row in sidecar_rows), default=0.0))
+            assembled = self._assemble_reconstructed_audio(sample_rate, total_duration, placements)
+
+            if job_id:
+                self._update_job_progress(job_id, 94)
+                self._update_job_status_detail(job_id, "Writing reconstructed studio mix...")
+
+            sf.write(str(output_wav), assembled, sample_rate)
+            sidecar_json.write_text(json.dumps(sidecar_rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            self._set_reconstruction_state(video_id, status="ready", audio_path=rel_output, error="", model=model_name)
+            return output_wav
+        except JobPausedException:
+            self._set_reconstruction_state(video_id, status="paused", error="", model=model_name)
+            raise
+        except JobCancelledException:
+            raise
+        except Exception as e:
+            self._set_reconstruction_state(video_id, status="failed", error=str(e), model=model_name)
+            raise
+        finally:
+            try:
+                for child in work_dir.glob("*"):
+                    child.unlink(missing_ok=True)
+                work_dir.rmdir()
+            except Exception:
+                pass
 
     def _extract_channel_artwork(self, info: dict | None) -> tuple[str | None, str | None]:
         """Best-effort extraction of channel icon/banner URLs from yt-dlp metadata."""
@@ -2014,6 +4799,17 @@ class IngestionService:
         if not isinstance(info, dict):
             return None
 
+        direct_value = info.get("published_at")
+        if isinstance(direct_value, datetime):
+            return direct_value
+        if direct_value not in (None, ""):
+            text = str(direct_value).strip()
+            if text:
+                try:
+                    return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+                except ValueError:
+                    pass
+
         def _parse_yyyymmdd(value) -> datetime | None:
             text = str(value or "").strip()
             if len(text) != 8 or not text.isdigit():
@@ -2059,6 +4855,96 @@ class IngestionService:
         if (ffmpeg_bin / "ffprobe.exe").exists():
             return str(ffmpeg_bin / "ffprobe.exe")
         return "ffprobe"
+
+    def _run_external_command(self, cmd: list[str], failure_label: str, *, timeout: int = 3600) -> None:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or failure_label).strip()
+            raise RuntimeError(f"{failure_label}: {detail[:1200]}")
+
+    def _probe_audio_file(self, audio_path: Path) -> dict:
+        result = subprocess.run(
+            [
+                self._get_ffprobe_cmd(),
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=sample_rate,channels,duration",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
+                str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "ffprobe failed").strip()
+            raise RuntimeError(f"Failed to inspect audio file: {detail[:800]}")
+        payload = json.loads(result.stdout or "{}")
+        streams = payload.get("streams") or []
+        stream = streams[0] if streams else {}
+        fmt = payload.get("format") or {}
+        duration = fmt.get("duration") if fmt.get("duration") is not None else stream.get("duration")
+        return {
+            "duration_seconds": float(duration) if duration is not None else None,
+            "sample_rate": int(stream.get("sample_rate")) if stream.get("sample_rate") is not None else None,
+            "channels": int(stream.get("channels")) if stream.get("channels") is not None else None,
+        }
+
+    def _analyze_audio_file(self, audio_path: Path, *, source_label: str) -> dict:
+        import numpy as np
+        import soundfile as sf  # type: ignore
+        import tempfile
+
+        probe = self._probe_audio_file(audio_path)
+        with tempfile.TemporaryDirectory(prefix="cleanup-analysis-") as tmp_dir:
+            temp_wav = Path(tmp_dir) / "analysis.wav"
+            self._run_external_command(
+                [
+                    self._get_ffmpeg_cmd(),
+                    "-y",
+                    "-v",
+                    "error",
+                    "-i",
+                    str(audio_path),
+                    "-vn",
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "44100",
+                    "-c:a",
+                    "pcm_s16le",
+                    str(temp_wav),
+                ],
+                "Failed to prepare audio for cleanup analysis",
+                timeout=1800,
+            )
+            samples, _ = sf.read(str(temp_wav), dtype="float32", always_2d=False)
+        arr = np.asarray(samples, dtype=np.float32).reshape(-1)
+        peak = float(np.max(np.abs(arr))) if arr.size else 0.0
+        rms = float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0
+        clipped_ratio = float(np.mean(np.abs(arr) >= 0.995)) if arr.size else 0.0
+        return {
+            "source_label": str(source_label or "Original upload"),
+            "duration_seconds": probe.get("duration_seconds"),
+            "sample_rate": probe.get("sample_rate"),
+            "channels": probe.get("channels"),
+            "peak": peak,
+            "rms": rms,
+            "clipped_ratio": clipped_ratio,
+        }
 
     def _load_audio_for_pyannote(self, audio_path: str):
         """
@@ -2139,6 +5025,21 @@ class IngestionService:
                 log_verbose(f"  Cast pipeline.{attr} to float32")
         torch.set_float32_matmul_precision('high')
 
+    def _detect_nvidia_gpu_name(self) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=6,
+            )
+            if proc.returncode != 0:
+                return None
+            names = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+            return names[0] if names else None
+        except Exception:
+            return None
+
     def _ensure_device(self):
         import torch
         if self.device is None:
@@ -2147,6 +5048,25 @@ class IngestionService:
             else:
                 self.device = "cuda" if torch.cuda.is_available() else "cpu"
             log(f"Using device: {self.device}")
+            if self.device == "cpu" and not self._cuda_unhealthy_reason:
+                gpu_name = self._detect_nvidia_gpu_name()
+                if gpu_name:
+                    try:
+                        import importlib.metadata as importlib_metadata
+                        torch_version = importlib_metadata.version("torch")
+                    except Exception:
+                        torch_version = "unknown"
+                    try:
+                        import importlib.metadata as importlib_metadata
+                        torchaudio_version = importlib_metadata.version("torchaudio")
+                    except Exception:
+                        torchaudio_version = "unknown"
+                    log(
+                        f"NVIDIA GPU detected ({gpu_name}) but torch CUDA is unavailable. "
+                        f"Installed torch={torch_version}, torchaudio={torchaudio_version}, "
+                        f"torch.version.cuda={getattr(torch.version, 'cuda', None)}. "
+                        "The backend is running transcription on CPU, which will be much slower."
+                    )
             if self.device == "cuda":
                 try:
                     log_verbose(f"  GPU: {torch.cuda.get_device_name(0)}")
@@ -2728,6 +5648,12 @@ class IngestionService:
         if module is None:
             return
         try:
+            if self._module_has_meta_tensors(module):
+                log_verbose("Skipping CPU move for meta-backed module during release.")
+                return
+        except Exception:
+            pass
+        try:
             if hasattr(module, "to"):
                 module.to("cpu")
                 return
@@ -2738,6 +5664,23 @@ class IngestionService:
                 module.cpu()
         except Exception:
             pass
+
+    def _module_has_meta_tensors(self, module) -> bool:
+        if module is None:
+            return False
+        try:
+            for param in module.parameters():
+                if bool(getattr(param, "is_meta", False)):
+                    return True
+        except Exception:
+            pass
+        try:
+            for buffer in module.buffers():
+                if bool(getattr(buffer, "is_meta", False)):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def _apply_cuda_memory_fraction_limit(self):
         """Cap process CUDA memory to avoid spilling into shared memory on WDDM."""
@@ -2793,6 +5736,8 @@ class IngestionService:
         self.whisper_model = None
         self._whisper_compute_type = None
         self._whisper_device = None
+        self._whisper_backend = None
+        self._whisper_model_cache_key = None
         try:
             inner_model = getattr(model, "model", None)
             if inner_model is not None:
@@ -3595,12 +6540,320 @@ class IngestionService:
         sys.modules["pkg_resources"] = shim
         log("Applied runtime pkg_resources shim (ctranslate2 / pyannote / NeMo compatibility).")
 
-    def _load_whisper_model(self, job_id: int = None, force_float32: bool = False):
+    def _normalize_whisper_backend(self, value: str | None) -> str:
+        raw = str(value or "").strip().lower().replace("-", "_")
+        if raw in {"", "default", "faster", "faster_whisper"}:
+            return "faster_whisper"
+        if raw in {"transformers", "hf_transformers", "transformers_whisper", "insanely_fast_whisper"}:
+            return "insanely_fast_whisper"
+        return "faster_whisper"
+
+    def _resolve_whisper_backend(self, requested_backend: str | None = None) -> dict:
+        import importlib.util
+
+        requested = self._normalize_whisper_backend(requested_backend or os.getenv("WHISPER_BACKEND"))
+        if requested == "faster_whisper":
+            return {
+                "requested": requested,
+                "resolved": "faster_whisper",
+                "fallback_used": False,
+                "fallback_reason": None,
+                "available": True,
+            }
+
+        has_insanely_fast = importlib.util.find_spec("insanely_fast_whisper") is not None
+        has_transformers = importlib.util.find_spec("transformers") is not None
+
+        if has_insanely_fast and has_transformers:
+            return {
+                "requested": requested,
+                "resolved": "insanely_fast_whisper",
+                "fallback_used": False,
+                "fallback_reason": None,
+                "available": True,
+            }
+
+        if has_transformers:
+            return {
+                "requested": requested,
+                "resolved": "transformers_compat",
+                "fallback_used": False,
+                "fallback_reason": None,
+                "available": True,
+            }
+
+        return {
+            "requested": requested,
+            "resolved": "faster_whisper",
+            "fallback_used": True,
+            "fallback_reason": (
+                "Requested insanely_fast_whisper-compatible backend, but transformers is not installed. "
+                "Falling back to faster_whisper."
+            ),
+            "available": False,
+        }
+
+    def _resolve_transformers_whisper_model_ref(self, model_size: str) -> str:
+        normalized = str(model_size or "small").strip() or "small"
+        if "/" in normalized:
+            return normalized
+        aliases = {
+            "tiny": "openai/whisper-tiny",
+            "base": "openai/whisper-base",
+            "small": "openai/whisper-small",
+            "medium": "openai/whisper-medium",
+            "large": "openai/whisper-large-v3",
+            "large-v2": "openai/whisper-large-v2",
+            "large-v3": "openai/whisper-large-v3",
+            "large-v3-turbo": "openai/whisper-large-v3-turbo",
+            "turbo": "openai/whisper-large-v3-turbo",
+        }
+        return aliases.get(normalized.lower(), normalized)
+
+    def _resolve_transformers_whisper_dtype(self, requested_compute_type: str, device: str) -> tuple[object, str]:
+        import torch
+
+        compute = str(requested_compute_type or "").strip().lower()
+        if device != "cuda":
+            return torch.float32, "float32"
+        if compute == "float32":
+            return torch.float32, "float32"
+        return torch.float16, "float16"
+
+    def _join_transcribed_words(self, words: list) -> str:
+        text = " ".join(str(getattr(word, "word", "") or "").strip() for word in words if str(getattr(word, "word", "") or "").strip())
+        return re.sub(r"\s+([,.;:!?])", r"\1", text).strip()
+
+    def _resolve_whisper_language_hint(self, language_code: str | None) -> str | None:
+        normalized = self._normalize_language_code(language_code)
+        if not normalized:
+            return None
+        return {
+            "en": "english",
+            "es": "spanish",
+            "fr": "french",
+            "de": "german",
+            "it": "italian",
+            "pt": "portuguese",
+            "nl": "dutch",
+            "pl": "polish",
+            "uk": "ukrainian",
+            "ru": "russian",
+        }.get(normalized, normalized)
+
+    def _build_transformers_whisper_segments(self, words: list, full_text: str, total_duration: float) -> list:
+        if not words:
+            if not str(full_text or "").strip():
+                return []
+            end_time = float(total_duration or 0.0)
+            if end_time <= 0.0:
+                end_time = max(1.0, float(len(str(full_text).split())) * 0.35)
+            return [
+                self._build_whisper_style_segment(
+                    seg_id=0,
+                    start=0.0,
+                    end=end_time,
+                    text=str(full_text).strip(),
+                    words=None,
+                )
+            ]
+
+        segments = []
+        current_words = []
+        max_words = 24
+        max_seconds = 14.0
+        punctuation_marks = {".", "!", "?", ";", ":"}
+
+        for index, word in enumerate(words):
+            current_words.append(word)
+            is_last = index == len(words) - 1
+            current_duration = float(current_words[-1].end) - float(current_words[0].start)
+            current_text = str(getattr(current_words[-1], "word", "") or "").strip()
+            next_gap = 0.0
+            if not is_last:
+                next_gap = max(0.0, float(words[index + 1].start) - float(current_words[-1].end))
+            should_split = False
+            if is_last:
+                should_split = True
+            elif len(current_words) >= max_words or current_duration >= max_seconds:
+                should_split = True
+            elif next_gap >= 0.85:
+                should_split = True
+            elif current_text and current_text[-1] in punctuation_marks and len(current_words) >= 6:
+                should_split = True
+
+            if not should_split:
+                continue
+
+            segments.append(
+                self._build_whisper_style_segment(
+                    seg_id=len(segments),
+                    start=float(current_words[0].start),
+                    end=float(current_words[-1].end),
+                    text=self._join_transcribed_words(current_words),
+                    words=list(current_words),
+                )
+            )
+            current_words = []
+
+        return segments
+
+    def _run_transformers_whisper_transcribe(self, pipeline_runner, audio_path: str, kwargs: dict):
+        from types import SimpleNamespace
+
+        word_timestamps = bool(kwargs.get("word_timestamps", True))
+        beam_size = max(1, int(kwargs.get("beam_size", 1) or 1))
+        batch_size = 8 if os.getenv("TRANSCRIPTION_BATCHED", "true").strip().lower() == "true" else 1
+        total_duration = float(self._probe_audio_duration_seconds(Path(audio_path)) or 0.0)
+
+        generate_kwargs = {"task": "transcribe", "num_beams": beam_size}
+        language_hint = self._resolve_whisper_language_hint(kwargs.get("language"))
+        if language_hint:
+            generate_kwargs["language"] = language_hint
+        result = pipeline_runner(
+            str(audio_path),
+            chunk_length_s=30,
+            batch_size=batch_size,
+            return_timestamps="word" if word_timestamps else True,
+            generate_kwargs=generate_kwargs,
+        )
+
+        chunk_items = result.get("chunks") if isinstance(result, dict) else None
+        words = []
+        if word_timestamps and isinstance(chunk_items, list):
+            for chunk in chunk_items:
+                text_value = str(chunk.get("text") or "").strip()
+                timestamp = chunk.get("timestamp") or chunk.get("timestamps") or ()
+                if not text_value:
+                    continue
+                if not isinstance(timestamp, (list, tuple)) or len(timestamp) < 2:
+                    continue
+                start_value = timestamp[0]
+                end_value = timestamp[1]
+                if start_value is None:
+                    continue
+                try:
+                    ws = float(start_value)
+                    we = float(end_value if end_value is not None else start_value)
+                except Exception:
+                    continue
+                if we < ws:
+                    we = ws
+                words.append(self._build_whisper_style_word(start=ws, end=we, word=text_value))
+
+        text_value = ""
+        if isinstance(result, dict):
+            text_value = str(result.get("text") or "").strip()
+        segments = self._build_transformers_whisper_segments(words, text_value, total_duration)
+        info = SimpleNamespace(
+            duration=total_duration,
+            language=None,
+            language_probability=0.0,
+        )
+        return iter(segments), info
+
+    def _load_transformers_whisper_model(
+        self,
+        *,
+        model_size: str,
+        requested_compute_type: str,
+        desired_cache_key: str,
+        job_id: int | None,
+        memory_profile,
+        backend_label: str = "transformers_compat",
+    ):
+        import torch
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+
+        model_ref = self._resolve_transformers_whisper_model_ref(model_size)
+        attempted_cuda = self.device == "cuda"
+        dtype, dtype_label = self._resolve_transformers_whisper_dtype(requested_compute_type, self.device)
+        self._release_whisper_model("reload_transformers_whisper", job_id=job_id)
+
+        def _load_for_device(runtime_device: str, runtime_dtype, runtime_dtype_label: str):
+            with temporary_disabled_blackhole_proxies():
+                model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    model_ref,
+                    torch_dtype=runtime_dtype,
+                    low_cpu_mem_usage=True,
+                    use_safetensors=True,
+                )
+                processor = AutoProcessor.from_pretrained(model_ref)
+            if runtime_device == "cuda":
+                model.to("cuda")
+                device_arg = 0
+            else:
+                device_arg = -1
+            pipe = pipeline(
+                "automatic-speech-recognition",
+                model=model,
+                tokenizer=processor.tokenizer,
+                feature_extractor=processor.feature_extractor,
+                torch_dtype=runtime_dtype,
+                device=device_arg,
+            )
+            self.whisper_model = TransformersWhisperCompatModel(
+                service=self,
+                pipeline_runner=pipe,
+                model=model,
+                processor=processor,
+                model_ref=model_ref,
+                runtime_device=runtime_device,
+                torch_dtype_label=runtime_dtype_label,
+            )
+            self._whisper_compute_type = runtime_dtype_label
+            self._whisper_device = runtime_device
+            self._whisper_backend = backend_label
+            self._whisper_model_cache_key = desired_cache_key
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "whisper_compute_type": runtime_dtype_label,
+                    "whisper_runtime_device": runtime_device,
+                    "whisper_fallback_to_cpu": runtime_device == "cpu",
+                    "stage_model_load_completed_at": datetime.now().isoformat(),
+                },
+            )
+            self._finish_component_memory_profile("whisper", memory_profile, loaded=True)
+            log(f"Whisper {backend_label} backend loaded ({model_ref}, dtype={runtime_dtype_label}, device={runtime_device})")
+            if runtime_device == "cuda" and runtime_dtype_label != "float16":
+                self._force_float32 = True
+
+        try:
+            _load_for_device(self.device, dtype, dtype_label)
+            return
+        except Exception as e:
+            if self._is_cuda_illegal_access(e):
+                self._mark_cuda_unhealthy(str(e), job_id=job_id)
+            log(f"Failed to load transformers Whisper backend on {self.device}: {e}")
+            if not attempted_cuda:
+                raise
+
+        try:
+            _load_for_device("cpu", torch.float32, "float32")
+            self._update_job_status_detail(job_id, "Transformers Whisper CUDA load failed; using CPU fallback.")
+            return
+        except Exception as e:
+            log(f"Failed to load transformers Whisper backend on CPU fallback: {e}")
+            raise RuntimeError(
+                f"Could not load transformers-compatible Whisper backend ({model_ref}) on CUDA or CPU. "
+                f"Last error: {e}"
+            ) from e
+
+    def _load_whisper_model(
+        self,
+        job_id: int = None,
+        force_float32: bool = False,
+        model_size_override: str | None = None,
+        backend_override: str | None = None,
+    ):
         self._ensure_ctranslate2_pkg_resources()
-        from faster_whisper import WhisperModel
 
         self._ensure_device()
-        model_size = os.getenv("TRANSCRIPTION_MODEL", "tiny")
+        model_size = str(model_size_override or os.getenv("TRANSCRIPTION_MODEL", "tiny")).strip() or "tiny"
+        backend_info = self._resolve_whisper_backend(backend_override)
+        requested_backend = backend_info["requested"]
+        resolved_backend = backend_info["resolved"]
         if force_float32:
             requested_compute_type = "float32"
         else:
@@ -3613,26 +6866,102 @@ class IngestionService:
             )
             requested_compute_type = ""
 
+        desired_cache_key = f"{resolved_backend}::{model_size}"
+
         # Keep an already-loaded compatible model.
-        if self.whisper_model is not None and self._whisper_compute_type and self._whisper_device:
+        if (
+            self.whisper_model is not None
+            and self._whisper_compute_type
+            and self._whisper_device
+            and self._whisper_backend == resolved_backend
+            and self._whisper_model_cache_key == desired_cache_key
+        ):
             if not force_float32 or self._whisper_compute_type == "float32":
+                self._upsert_job_payload_fields(
+                    job_id,
+                    {
+                        "whisper_backend_requested": requested_backend,
+                        "whisper_backend_resolved": resolved_backend,
+                        "whisper_backend_fallback_used": bool(backend_info.get("fallback_used")),
+                        "whisper_backend_fallback_reason": backend_info.get("fallback_reason"),
+                    },
+                )
                 return
 
         self._record_job_stage_start(job_id, "model_load")
-        log(f"Loading Whisper model ({model_size})...")
-        self._update_job_status_detail(job_id, f"Loading Whisper model ({model_size})...")
+        log(f"Loading Whisper model ({model_size}, backend={resolved_backend})...")
+        self._update_job_status_detail(job_id, f"Loading Whisper model ({model_size}, {resolved_backend})...")
         memory_profile = self._start_component_memory_profile()
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "whisper_backend_requested": requested_backend,
+                "whisper_backend_resolved": resolved_backend,
+                "whisper_backend_fallback_used": bool(backend_info.get("fallback_used")),
+                "whisper_backend_fallback_reason": backend_info.get("fallback_reason"),
+            },
+        )
 
-        self.whisper_model = None
-        self._whisper_compute_type = None
-        self._whisper_device = None
+        if resolved_backend in {"transformers_compat", "insanely_fast_whisper"}:
+            try:
+                self._load_transformers_whisper_model(
+                    model_size=model_size,
+                    requested_compute_type=requested_compute_type,
+                    desired_cache_key=desired_cache_key,
+                    job_id=job_id,
+                    memory_profile=memory_profile,
+                    backend_label=resolved_backend,
+                )
+                return
+            except Exception as e:
+                fallback_reason = (
+                    f"{resolved_backend} backend failed to load ({type(e).__name__}: {e}). "
+                    "Falling back to faster_whisper."
+                )
+                log(fallback_reason)
+                self._upsert_job_payload_fields(
+                    job_id,
+                    {
+                        "whisper_backend_requested": requested_backend,
+                        "whisper_backend_resolved": "faster_whisper",
+                        "whisper_backend_fallback_used": True,
+                        "whisper_backend_fallback_reason": fallback_reason[:1000],
+                    },
+                )
+                resolved_backend = "faster_whisper"
+                desired_cache_key = f"{resolved_backend}::{model_size}"
+
+        from faster_whisper import WhisperModel
+        from faster_whisper.utils import download_model as resolve_whisper_model
+
+        self._release_whisper_model("reload_faster_whisper", job_id=job_id)
         attempted_cuda = (self.device == "cuda")
+        whisper_model_ref = model_size
+        whisper_local_only = False
+
+        try:
+            with temporary_disabled_blackhole_proxies():
+                resolved_model_path = resolve_whisper_model(model_size, local_files_only=True)
+            if resolved_model_path:
+                whisper_model_ref = resolved_model_path
+                whisper_local_only = True
+                log(f"Using cached Whisper model from {resolved_model_path}")
+        except Exception as e:
+            log_verbose(f"Whisper local cache probe missed for {model_size}: {e}")
 
         if requested_compute_type:
             try:
-                self.whisper_model = WhisperModel(model_size, device=self.device, compute_type=requested_compute_type)
+                with temporary_disabled_blackhole_proxies():
+                    self.whisper_model = WhisperModel(
+                        whisper_model_ref,
+                        device=self.device,
+                        compute_type=requested_compute_type,
+                        local_files_only=whisper_local_only,
+                    )
                 self._whisper_compute_type = requested_compute_type
                 self._whisper_device = self.device
+                self._whisper_backend = "faster_whisper"
+                self._whisper_model_cache_key = desired_cache_key
                 self._upsert_job_payload_fields(
                     job_id,
                     {
@@ -3646,7 +6975,7 @@ class IngestionService:
                 log(f"Whisper loaded with compute_type={requested_compute_type}")
                 if requested_compute_type != "float16" and self.device == "cuda":
                     self._force_float32 = True
-                    log("Non-float16 compute type detected â€” pyannote models will use float32")
+                    log("Non-float16 compute type detected - pyannote models will use float32")
                 return
             except Exception as e:
                 if self._is_cuda_illegal_access(e):
@@ -3659,9 +6988,17 @@ class IngestionService:
         candidates = ["float16", "int8_float16", "float32"] if self.device == "cuda" else ["int8", "float32"]
         for ct in candidates:
             try:
-                self.whisper_model = WhisperModel(model_size, device=self.device, compute_type=ct)
+                with temporary_disabled_blackhole_proxies():
+                    self.whisper_model = WhisperModel(
+                        whisper_model_ref,
+                        device=self.device,
+                        compute_type=ct,
+                        local_files_only=whisper_local_only,
+                    )
                 self._whisper_compute_type = ct
                 self._whisper_device = self.device
+                self._whisper_backend = "faster_whisper"
+                self._whisper_model_cache_key = desired_cache_key
                 self._upsert_job_payload_fields(
                     job_id,
                     {
@@ -3675,7 +7012,7 @@ class IngestionService:
                 log(f"Whisper loaded with compute_type={ct}")
                 if ct != "float16" and self.device == "cuda":
                     self._force_float32 = True
-                    log("GPU FP16 cuBLAS unsupported â€” pyannote models will use float32")
+                    log("GPU FP16 cuBLAS unsupported - pyannote models will use float32")
                 return
             except Exception as e:
                 if self._is_cuda_illegal_access(e):
@@ -3687,9 +7024,17 @@ class IngestionService:
             cpu_candidates = ["int8", "float32"]
             for ct in cpu_candidates:
                 try:
-                    self.whisper_model = WhisperModel(model_size, device="cpu", compute_type=ct)
+                    with temporary_disabled_blackhole_proxies():
+                        self.whisper_model = WhisperModel(
+                            whisper_model_ref,
+                            device="cpu",
+                            compute_type=ct,
+                            local_files_only=whisper_local_only,
+                        )
                     self._whisper_compute_type = ct
                     self._whisper_device = "cpu"
+                    self._whisper_backend = "faster_whisper"
+                    self._whisper_model_cache_key = desired_cache_key
                     self._upsert_job_payload_fields(
                         job_id,
                         {
@@ -3736,15 +7081,6 @@ class IngestionService:
             self._upsert_job_payload_fields(job_id, {"parakeet_model_cached": True})
             return
 
-        if not self._parakeet_dependencies_available():
-            raise RuntimeError(
-                "Parakeet dependencies are not installed. Install backend/requirements-parakeet.txt in the app venv."
-            )
-
-        import torch
-        from nemo.collections.asr.models import ASRModel
-
-        parakeet_model = (os.getenv("PARAKEET_MODEL") or "nvidia/parakeet-tdt-0.6b-v2").strip()
         payload = {}
         if job_id:
             try:
@@ -3757,6 +7093,28 @@ class IngestionService:
 
         transcribe_started_at = payload.get("stage_transcribe_started_at")
         reload_during_transcribe = bool(transcribe_started_at)
+        max_reload_during_transcribe = max(
+            1,
+            int((os.getenv("PARAKEET_MAX_RELOADS_DURING_TRANSCRIBE") or "2").strip() or "2"),
+        )
+        existing_reload_count = int(payload.get("parakeet_model_reload_count") or 0)
+        observed_soft_resets = int(payload.get("cuda_soft_reset_count") or self._cuda_soft_reset_count or 0)
+        if reload_during_transcribe and existing_reload_count >= max_reload_during_transcribe:
+            raise RuntimeError(
+                "Parakeet reload-thrash detected during transcription "
+                f"(reloads={existing_reload_count}, soft_resets={observed_soft_resets}). "
+                "Falling back to Whisper to avoid prolonged GPU stalls."
+            )
+
+        if not self._parakeet_dependencies_available():
+            raise RuntimeError(
+                "Parakeet dependencies are not installed. Install backend/requirements-parakeet.txt in the app venv."
+            )
+
+        import torch
+        from nemo.collections.asr.models import ASRModel
+
+        parakeet_model = (os.getenv("PARAKEET_MODEL") or "nvidia/parakeet-tdt-0.6b-v2").strip()
         if not reload_during_transcribe:
             self._record_job_stage_start(job_id, "model_load")
         load_started = time.time()
@@ -4816,6 +8174,9 @@ class IngestionService:
                     ]
 
                 require_word_timestamps = os.getenv("PARAKEET_REQUIRE_WORD_TIMESTAMPS", "true").lower() == "true"
+                allow_whisper_fallback = (
+                    os.getenv("PARAKEET_ALLOW_WHISPER_FALLBACK", "true").strip().lower() == "true"
+                )
                 word_coverage = 0.0
                 if segments:
                     with_words = sum(1 for s in segments if getattr(s, "words", None))
@@ -4856,6 +8217,28 @@ class IngestionService:
                             },
                         )
                         continue
+                    if not allow_whisper_fallback and segments:
+                        payload.update(
+                            {
+                                "parakeet_word_timestamps_degraded": True,
+                                "parakeet_word_timestamps_degraded_reason": (
+                                    f"low_word_coverage_{word_coverage:.3f}"
+                                ),
+                            }
+                        )
+                        self._upsert_job_payload_fields(job_id, payload)
+                        log(
+                            "Parakeet word timestamps unavailable and Whisper fallback disabled. "
+                            f"Continuing with segment-level timing only (coverage={word_coverage:.1%})."
+                        )
+                        self._update_job_status_detail(
+                            job_id,
+                            "Parakeet returned segment timing without reliable word timestamps. Continuing."
+                        )
+                        for segment in segments:
+                            segment.words = None
+                        duration_guess = float(getattr(segments[-1], "end", 0.0)) if segments else 0.0
+                        return segments, duration_guess
                     raise RuntimeError(
                         f"Parakeet returned low word timestamp coverage ({word_coverage:.1%}); falling back to Whisper."
                     )
@@ -4912,11 +8295,321 @@ class IngestionService:
             return "parakeet"
         return "whisper"
 
-    def test_transcription_engine(self, requested_engine: str = "auto") -> dict:
+    def _transcription_queue_pressure(self, current_job_id: int | None = None) -> int:
+        try:
+            with Session(engine) as session:
+                statement = select(func.count()).select_from(Job).where(
+                    Job.job_type == "process",
+                    Job.status.in_(("queued", "downloading", "transcribing", "diarizing", "processing")),
+                )
+                if current_job_id:
+                    statement = statement.where(Job.id != int(current_job_id))
+                count = session.exec(statement).one()
+                return max(0, int(count or 0))
+        except Exception:
+            return 0
+
+    def _should_reroute_parakeet_for_queue_throughput(
+        self,
+        video: Video,
+        audio_path: Path | None,
+        *,
+        requested_engine: str,
+        job_id: int | None = None,
+    ) -> tuple[bool, str | None]:
+        if requested_engine != "parakeet":
+            return False, None
+        configured_preference = (os.getenv("TRANSCRIPTION_ENGINE") or "auto").strip().lower()
+        if configured_preference == "parakeet":
+            return False, None
+        if (os.getenv("PIPELINE_EXECUTION_MODE") or "parallel").strip().lower() != "sequential":
+            return False, None
+        if os.getenv("PARAKEET_QUEUE_THROUGHPUT_GUARD", "true").strip().lower() != "true":
+            return False, None
+        if self.parakeet_model is not None:
+            return False, None
+
+        try:
+            backlog_threshold = max(
+                1,
+                int((os.getenv("PARAKEET_QUEUE_BACKLOG_WHISPER_THRESHOLD") or "1").strip() or "1"),
+            )
+        except Exception:
+            backlog_threshold = 1
+        backlog = self._transcription_queue_pressure(current_job_id=job_id)
+        if backlog < backlog_threshold:
+            return False, None
+
+        try:
+            duration_threshold = max(
+                300.0,
+                float((os.getenv("PARAKEET_QUEUE_LONG_AUDIO_WHISPER_THRESHOLD_SECONDS") or "1200").strip() or "1200"),
+            )
+        except Exception:
+            duration_threshold = 1200.0
+
+        duration_seconds = 0.0
+        try:
+            duration_seconds = float(getattr(video, "duration", 0) or 0.0)
+        except Exception:
+            duration_seconds = 0.0
+        if duration_seconds <= 0.0 and audio_path is not None:
+            try:
+                duration_seconds = float(self._probe_audio_duration_seconds(audio_path) or 0.0)
+            except Exception:
+                duration_seconds = 0.0
+        if duration_seconds < duration_threshold:
+            return False, None
+
+        return (
+            True,
+            "Sequential queue throughput guard rerouted this job to Whisper "
+            f"(backlog={backlog}, duration={int(round(duration_seconds))}s, "
+            f"threshold={int(round(duration_threshold))}s, parakeet_cached=false).",
+        )
+
+    def _normalize_language_code(self, value: str | None) -> str | None:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return None
+        raw = raw.replace("_", "-")
+        aliases = {
+            "english": "en",
+            "spanish": "es",
+            "espanol": "es",
+            "español": "es",
+            "portuguese": "pt",
+            "portugues": "pt",
+            "português": "pt",
+            "french": "fr",
+            "francais": "fr",
+            "français": "fr",
+            "multilingual": "multilingual",
+            "bilingual": "multilingual",
+            "code-switch": "multilingual",
+            "code_switched": "multilingual",
+            "mixed": "multilingual",
+        }
+        if raw in aliases:
+            return aliases[raw]
+        if len(raw) > 2 and "-" in raw:
+            raw = raw.split("-", 1)[0]
+        if len(raw) == 2 and raw.isalpha():
+            return raw
+        return None
+
+    def _language_routing_enabled(self) -> bool:
+        return str(os.getenv("MULTILINGUAL_ROUTING_ENABLED", "true")).strip().lower() == "true"
+
+    def _multilingual_whisper_model(self) -> str:
+        return str(os.getenv("MULTILINGUAL_WHISPER_MODEL") or "large-v3").strip() or "large-v3"
+
+    def _language_detection_sample_seconds(self) -> int:
+        try:
+            return max(15, min(int(os.getenv("LANGUAGE_DETECTION_SAMPLE_SECONDS", "45")), 180))
+        except Exception:
+            return 45
+
+    def _language_detection_confidence_threshold(self) -> float:
+        try:
+            return max(0.30, min(float(os.getenv("LANGUAGE_DETECTION_CONFIDENCE_THRESHOLD", "0.65")), 0.99))
+        except Exception:
+            return 0.65
+
+    def _infer_language_from_text_hints(self, video: Video) -> dict:
+        title = str(getattr(video, "title", "") or "")
+        description = str(getattr(video, "description", "") or "")
+        haystack = f"{title}\n{description}".lower()
+        normalized_existing = self._normalize_language_code(getattr(video, "transcript_language", None))
+        if normalized_existing:
+            return {
+                "language": normalized_existing,
+                "confidence": 0.98,
+                "source": "video_metadata_existing",
+                "reason": f"Existing transcript language '{normalized_existing}' is already stored on the video.",
+            }
+
+        bilingual_markers = (
+            "bilingual",
+            "multilingual",
+            "code-switch",
+            "code switch",
+            "english + spanish",
+            "spanish + english",
+            "english and spanish",
+            "spanish and english",
+        )
+        if any(marker in haystack for marker in bilingual_markers):
+            return {
+                "language": "multilingual",
+                "confidence": 0.93,
+                "source": "video_metadata_text",
+                "reason": "Title or description explicitly signals bilingual or multilingual content.",
+            }
+
+        language_markers = {
+            "es": (" en español", "español", "espanol", "spanish", "latino", "castellano"),
+            "pt": ("portuguese", "português", "portugues", "brasileiro"),
+            "fr": ("french", "français", "francais"),
+        }
+        for code, markers in language_markers.items():
+            if any(marker in haystack for marker in markers):
+                return {
+                    "language": code,
+                    "confidence": 0.89,
+                    "source": "video_metadata_text",
+                    "reason": f"Title or description contains clear {code} language markers.",
+                }
+
+        return {
+            "language": None,
+            "confidence": 0.0,
+            "source": "video_metadata_text",
+            "reason": "No strong non-English or multilingual text markers were found.",
+        }
+
+    def _probe_language_with_whisper(
+        self,
+        audio_path: Path,
+        *,
+        job_id: int | None = None,
+        model_override: str | None = None,
+        sample_seconds: int | None = None,
+    ) -> dict:
+        sample_path = None
+        try:
+            probe_seconds = max(15, min(int(sample_seconds or self._language_detection_sample_seconds()), 180))
+            sample_path = self._slice_audio(audio_path, 0.0, probe_seconds)
+            self._load_whisper_model(
+                job_id=job_id,
+                force_float32=False,
+                model_size_override=model_override,
+                backend_override="faster_whisper",
+            )
+            transcribe_params = {
+                "beam_size": 1,
+                "vad_filter": False,
+                "word_timestamps": False,
+                "condition_on_previous_text": False,
+                "temperature": 0.0,
+            }
+            whisper_runtime_device = self._whisper_device or self.device
+            segments_generator, info = self.whisper_model.transcribe(str(sample_path), **transcribe_params)
+            segment_iter = iter(segments_generator)
+            try:
+                for _ in range(2):
+                    next(segment_iter)
+            except StopIteration:
+                pass
+            language = self._normalize_language_code(getattr(info, "language", None))
+            confidence = float(getattr(info, "language_probability", 0.0) or 0.0)
+            return {
+                "language": language,
+                "confidence": confidence,
+                "source": "audio_probe",
+                "reason": f"Whisper language probe on the opening {probe_seconds}s reported {language or 'unknown'} ({confidence:.2f}) on {whisper_runtime_device}.",
+                "model": str(model_override or os.getenv("TRANSCRIPTION_MODEL", "tiny")).strip() or "tiny",
+            }
+        except Exception as e:
+            return {
+                "language": None,
+                "confidence": 0.0,
+                "source": "audio_probe",
+                "reason": f"Audio language probe failed: {e}",
+                "error": str(e),
+                "model": str(model_override or os.getenv("TRANSCRIPTION_MODEL", "tiny")).strip() or "tiny",
+            }
+        finally:
+            if sample_path and Path(sample_path).exists():
+                try:
+                    Path(sample_path).unlink()
+                except Exception:
+                    pass
+
+    def _resolve_transcription_route(self, video: Video, audio_path: Path | None, job_id: int | None = None) -> dict:
+        requested_engine = self._select_transcription_engine()
+        route = {
+            "requested_engine": requested_engine,
+            "engine": requested_engine,
+            "language": None,
+            "language_confidence": 0.0,
+            "language_source": None,
+            "language_reason": None,
+            "whisper_model_override": None,
+            "multilingual_route_applied": False,
+            "operational_route_applied": False,
+            "operational_route_reason": None,
+        }
+        text_hint = self._infer_language_from_text_hints(video)
+        detected_language = self._normalize_language_code(text_hint.get("language"))
+        detected_confidence = float(text_hint.get("confidence") or 0.0)
+        detected_source = text_hint.get("source")
+        detected_reason = text_hint.get("reason")
+        threshold = self._language_detection_confidence_threshold()
+
+        should_probe_audio = (
+            audio_path is not None
+            and self._language_routing_enabled()
+            and (not detected_language or detected_confidence < threshold)
+        )
+        if should_probe_audio:
+            probe_model = self._multilingual_whisper_model()
+            audio_probe = self._probe_language_with_whisper(
+                audio_path,
+                job_id=job_id,
+                model_override=probe_model,
+                sample_seconds=self._language_detection_sample_seconds(),
+            )
+            probe_language = self._normalize_language_code(audio_probe.get("language"))
+            probe_confidence = float(audio_probe.get("confidence") or 0.0)
+            if probe_language and probe_confidence >= max(0.45, threshold - 0.10):
+                if detected_language and detected_language != probe_language and detected_confidence >= threshold:
+                    detected_language = "multilingual"
+                    detected_confidence = max(detected_confidence, probe_confidence)
+                    detected_source = "metadata_plus_audio_probe"
+                    detected_reason = (
+                        f"{text_hint.get('reason')} Audio probe disagreed with {probe_language} ({probe_confidence:.2f}), "
+                        "so the episode is treated as multilingual."
+                    )
+                else:
+                    detected_language = probe_language
+                    detected_confidence = probe_confidence
+                    detected_source = audio_probe.get("source")
+                    detected_reason = audio_probe.get("reason")
+            elif not detected_language and audio_probe.get("reason"):
+                detected_source = audio_probe.get("source")
+                detected_reason = audio_probe.get("reason")
+
+        route["language"] = detected_language
+        route["language_confidence"] = detected_confidence
+        route["language_source"] = detected_source
+        route["language_reason"] = detected_reason
+
+        non_english = detected_language not in {None, "", "en"}
+        if self._language_routing_enabled() and non_english:
+            route["engine"] = "whisper"
+            route["whisper_model_override"] = self._multilingual_whisper_model()
+            route["multilingual_route_applied"] = True
+            return route
+
+        reroute_for_queue, reroute_reason = self._should_reroute_parakeet_for_queue_throughput(
+            video,
+            audio_path,
+            requested_engine=requested_engine,
+            job_id=job_id,
+        )
+        if reroute_for_queue:
+            route["engine"] = "whisper"
+            route["operational_route_applied"] = True
+            route["operational_route_reason"] = reroute_reason
+        return route
+
+    def test_transcription_engine(self, requested_engine: str = "auto", whisper_backend_override: str | None = None) -> dict:
         self._ensure_device()
         req = (requested_engine or "auto").strip().lower()
         if req not in {"auto", "whisper", "parakeet"}:
             req = "auto"
+        requested_whisper_backend = self._normalize_whisper_backend(whisper_backend_override or os.getenv("WHISPER_BACKEND"))
 
         response = {
             "status": "ok",
@@ -4924,6 +8617,9 @@ class IngestionService:
             "resolved_engine": None,
             "device": self.device,
             "whisper_runtime_device": None,
+            "whisper_backend_requested": requested_whisper_backend,
+            "whisper_backend_resolved": None,
+            "whisper_backend_available": None,
             "cuda_unhealthy": bool(self._cuda_unhealthy_reason),
             "cuda_unhealthy_reason": self._cuda_unhealthy_reason,
             "parakeet_dependencies_available": self._parakeet_dependencies_available(),
@@ -4965,10 +8661,25 @@ class IngestionService:
         response["parakeet_keep_loaded_min_free_ratio"] = round(float(keep_ratio), 3)
 
         def _check_whisper():
-            self._load_whisper_model(job_id=None, force_float32=False)
+            self._load_whisper_model(job_id=None, force_float32=False, backend_override=requested_whisper_backend)
             response["resolved_engine"] = "whisper"
             response["whisper_compute_type"] = self._whisper_compute_type or response["whisper_compute_type"]
             response["whisper_runtime_device"] = self._whisper_device or self.device
+            response["whisper_backend_resolved"] = self._whisper_backend or "faster_whisper"
+            backend_info = self._resolve_whisper_backend(requested_whisper_backend)
+            response["whisper_backend_available"] = bool(backend_info.get("available"))
+            if backend_info.get("fallback_used"):
+                response["fallback_used"] = True
+                response["whisper_backend_fallback_reason"] = backend_info.get("fallback_reason")
+            elif (
+                requested_whisper_backend == "insanely_fast_whisper"
+                and response["whisper_backend_resolved"] not in {"insanely_fast_whisper", "transformers_compat"}
+            ):
+                response["fallback_used"] = True
+                response["whisper_backend_fallback_reason"] = (
+                    "Requested insanely_fast_whisper-compatible backend could not be used at runtime. "
+                    "Falling back to faster_whisper."
+                )
 
         def _check_parakeet():
             if self.device == "cuda" and response.get("parakeet_release_other_models_before_transcribe"):
@@ -5010,7 +8721,17 @@ class IngestionService:
 
     def _load_models(self, job_id: int = None, load_transcription_model: bool = False):
         import torch
-        from pyannote.audio import Pipeline, Inference, Model
+        import warnings
+        from huggingface_hub import snapshot_download
+
+        with warnings.catch_warnings():
+            # This app feeds pyannote preloaded audio tensors, so its optional
+            # torchcodec-backed file decoder is not required at runtime.
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*torchcodec is not installed correctly so built-in audio decoding will fail.*",
+            )
+            from pyannote.audio import Pipeline, Inference, Model
 
         self._ensure_device()
 
@@ -5025,14 +8746,35 @@ class IngestionService:
         if not self.diarization_pipeline or not self.embedding_model or not self.embedding_inference:
             pyannote_profile = self._start_component_memory_profile()
 
+        diarization_model_ref = "pyannote/speaker-diarization-3.1"
+        embedding_model_ref = "pyannote/embedding"
+        try:
+            with temporary_disabled_blackhole_proxies():
+                resolved_diarization = snapshot_download(diarization_model_ref, local_files_only=True)
+            if resolved_diarization:
+                diarization_model_ref = resolved_diarization
+                log(f"Using cached diarization pipeline from {resolved_diarization}")
+        except Exception as e:
+            log_verbose(f"Diarization cache probe missed for {diarization_model_ref}: {e}")
+
+        try:
+            with temporary_disabled_blackhole_proxies():
+                resolved_embedding = snapshot_download(embedding_model_ref, local_files_only=True)
+            if resolved_embedding:
+                embedding_model_ref = resolved_embedding
+                log(f"Using cached speaker embedding model from {resolved_embedding}")
+        except Exception as e:
+            log_verbose(f"Embedding cache probe missed for {embedding_model_ref}: {e}")
+
         if not self.diarization_pipeline:
            log("Loading Diarization pipeline...")
            self._update_job_status_detail(job_id, "Loading diarization pipeline...")
            try:
-               self.diarization_pipeline = Pipeline.from_pretrained(
-                   "pyannote/speaker-diarization-3.1",
-                   token=os.getenv("HF_TOKEN")
-               )
+               with temporary_disabled_blackhole_proxies():
+                   self.diarization_pipeline = Pipeline.from_pretrained(
+                       diarization_model_ref,
+                       token=os.getenv("HF_TOKEN")
+                   )
                if self.diarization_pipeline:
                    # By default, Pyannote uses a batch_size of 32 which massively underutilizes
                    # modern GPUs and results in very low VRAM allocation and slower processing.
@@ -5064,10 +8806,11 @@ class IngestionService:
                     warnings.filterwarnings("ignore", message=".*ModelCheckpoint.*callback states.*")
                     warnings.filterwarnings("ignore", message=".*task-dependent loss function.*")
                     warnings.filterwarnings("ignore", message=".*Found keys that are not in the model state dict.*")
-                    self.embedding_model = Model.from_pretrained(
-                        "pyannote/embedding",
-                        token=os.getenv("HF_TOKEN")
-                    )
+                    with temporary_disabled_blackhole_proxies():
+                        self.embedding_model = Model.from_pretrained(
+                            embedding_model_ref,
+                            token=os.getenv("HF_TOKEN")
+                        )
                 if self.embedding_model:
                     if self._force_float32:
                         self.embedding_model = self.embedding_model.float()
@@ -5191,6 +8934,1964 @@ class IngestionService:
             return None
         return candidate
 
+    def get_original_manual_media_path(self, video: Video) -> Path | None:
+        if (video.media_source_type or "youtube") != "upload":
+            return None
+        return self.get_manual_media_absolute_path(video.manual_media_path)
+
+    def get_voicefixer_cleaned_absolute_path(self, video: Video) -> Path | None:
+        if (video.media_source_type or "youtube") != "upload":
+            return None
+        return self.get_manual_media_absolute_path(getattr(video, "voicefixer_cleaned_path", None))
+
+    def _voicefixer_apply_scope(self, video: Video) -> str:
+        scope = str(getattr(video, "voicefixer_apply_scope", "") or "").strip().lower()
+        if scope in {"none", "playback", "processing", "both"}:
+            return scope
+        return "both" if bool(getattr(video, "voicefixer_use_cleaned", False)) else "none"
+
+    def _voicefixer_leveling_filter(self, mode: str) -> str | None:
+        preset = str(mode or "off").strip().lower()
+        if preset == "gentle":
+            return "dynaudnorm=f=150:g=7:p=0.9:m=8"
+        if preset == "balanced":
+            return "dynaudnorm=f=200:g=11:p=0.92:m=12,acompressor=threshold=0.18:ratio=2.2:attack=15:release=220:makeup=1"
+        if preset == "strong":
+            return "dynaudnorm=f=250:g=15:p=0.95:m=16,acompressor=threshold=0.12:ratio=3.0:attack=10:release=180:makeup=2"
+        return None
+
+    def _voicefixer_paths_for_manual_video(self, video: Video) -> tuple[Path, Path, Path, Path]:
+        original_path = self.get_original_manual_media_path(video)
+        if original_path is None:
+            raise FileNotFoundError(f"Original uploaded media is missing for video {video.id}")
+
+        stem = original_path.stem
+        working_dir = original_path.parent
+        input_wav = working_dir / f"{stem}.voicefixer.input.wav"
+        restored_wav = working_dir / f"{stem}.voicefixer.restored.wav"
+        final_ext = ".mp4" if str(getattr(video, "media_kind", "") or "").lower() == "video" else ".wav"
+        final_path = working_dir / f"{stem}.voicefixer.cleaned{final_ext}"
+        return original_path, input_wav, restored_wav, final_path
+
+    def _cleanup_workbench_dir(self, video: Video) -> Path:
+        original_path = self.get_original_manual_media_path(video)
+        if original_path is None:
+            raise FileNotFoundError(f"Original uploaded media is missing for video {video.id}")
+        workbench_dir = original_path.parent / ".cleanup_workbench"
+        workbench_dir.mkdir(parents=True, exist_ok=True)
+        return workbench_dir
+
+    def _cleanup_workbench_state_path(self, video: Video) -> Path:
+        return self._cleanup_workbench_dir(video) / "state.json"
+
+    def _load_cleanup_workbench_state(self, video: Video) -> dict:
+        path = self._cleanup_workbench_state_path(video)
+        default_state = {"analysis": None, "selected_candidate_id": None, "candidates": {}}
+        if not path.exists():
+            return dict(default_state)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("analysis", None)
+                data.setdefault("selected_candidate_id", None)
+                data.setdefault("candidates", {})
+                return data
+        except Exception:
+            pass
+        return dict(default_state)
+
+    def _save_cleanup_workbench_state(self, video: Video, state: dict) -> None:
+        path = self._cleanup_workbench_state_path(video)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _cleanup_candidate_stage_config(self, stage: str) -> dict:
+        stage_key = str(stage or "").strip().lower()
+        if stage_key == "enhancement":
+            return {
+                "stage": "enhancement",
+                "task": "speech_enhancement",
+                "models": {
+                    "FRCRN_SE_16K": "Focused on rough 16k speech cleanup",
+                    "MossFormerGAN_SE_16K": "Alternative 16k enhancement with stronger denoising",
+                    "MossFormer2_SE_48K": "Full-band 48k enhancement for higher fidelity material",
+                },
+            }
+        raise ValueError("Unsupported ClearVoice stage.")
+
+    def _cleanup_candidate_filename(self, stage: str, model_name: str, source_candidate_id: str | None = None) -> str:
+        safe_stage = re.sub(r"[^a-z0-9]+", "_", str(stage or "").strip().lower()).strip("_") or "stage"
+        safe_model = re.sub(r"[^A-Za-z0-9]+", "_", str(model_name or "").strip()).strip("_") or "model"
+        if source_candidate_id:
+            safe_source = re.sub(r"[^A-Za-z0-9]+", "_", str(source_candidate_id or "").strip()).strip("_")
+            return f"{safe_stage}.{safe_model}.from_{safe_source}.wav"
+        return f"{safe_stage}.{safe_model}.wav"
+
+    def _cleanup_candidate_path(self, video: Video, stage: str, model_name: str, source_candidate_id: str | None = None) -> Path:
+        return self._cleanup_workbench_dir(video) / self._cleanup_candidate_filename(stage, model_name, source_candidate_id)
+
+    def _cleanup_candidate_audio_url(self, video: Video, filename: str) -> str | None:
+        safe_name = str(filename or "").strip()
+        if not safe_name:
+            return None
+        audio_path = self._cleanup_workbench_dir(video) / Path(safe_name).name
+        if not audio_path.exists():
+            return None
+        version = ""
+        try:
+            version = str(int(audio_path.stat().st_mtime_ns))
+        except Exception:
+            version = str(int(time.time() * 1000))
+        params = {"name": Path(safe_name).name, "v": version}
+        return f"/videos/{int(video.id)}/cleanup/workbench/audio?{urllib.parse.urlencode(params)}"
+
+    def _get_cleanup_selected_candidate_path(self, video: Video) -> Path | None:
+        state = self._load_cleanup_workbench_state(video)
+        selected_candidate_id = str(state.get("selected_candidate_id") or "").strip()
+        if not selected_candidate_id:
+            return None
+        candidates = state.get("candidates", {})
+        if not isinstance(candidates, dict):
+            return None
+        candidate = candidates.get(selected_candidate_id)
+        if not isinstance(candidate, dict):
+            return None
+        filename = str(candidate.get("audio_filename") or "").strip()
+        if not filename:
+            return None
+        candidate_path = self._cleanup_workbench_dir(video) / Path(filename).name
+        if not candidate_path.exists():
+            return None
+        return candidate_path
+
+    def build_cleanup_workbench(self, video_id: int) -> dict:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            if (video.media_source_type or "youtube") != "upload":
+                raise ValueError("Cleanup workbench is only available for uploaded manual media.")
+            state = self._load_cleanup_workbench_state(video)
+            candidates_state = state.get("candidates", {}) if isinstance(state.get("candidates"), dict) else {}
+            selected_candidate_id = str(state.get("selected_candidate_id") or "").strip() or None
+            candidates: list[dict] = []
+            stale_keys: list[str] = []
+            for candidate_id, item in sorted(candidates_state.items(), key=lambda row: str(row[0])):
+                if not isinstance(item, dict):
+                    stale_keys.append(str(candidate_id))
+                    continue
+                filename = str(item.get("audio_filename") or "").strip()
+                if not filename:
+                    stale_keys.append(str(candidate_id))
+                    continue
+                audio_path = self._cleanup_workbench_dir(video) / Path(filename).name
+                if not audio_path.exists():
+                    stale_keys.append(str(candidate_id))
+                    continue
+                candidates.append({
+                    "candidate_id": str(candidate_id),
+                    "stage": str(item.get("stage") or "enhancement"),
+                    "task": str(item.get("task") or "speech_enhancement"),
+                    "model_name": str(item.get("model_name") or ""),
+                    "source_candidate_id": str(item.get("source_candidate_id") or "").strip() or None,
+                    "source_label": str(item.get("source_label") or "Original upload"),
+                    "selected_for_processing": str(candidate_id) == selected_candidate_id,
+                    "audio_url": self._cleanup_candidate_audio_url(video, filename),
+                    "sample_rate": int(item.get("sample_rate")) if item.get("sample_rate") is not None else None,
+                    "duration_seconds": float(item.get("duration_seconds")) if item.get("duration_seconds") is not None else None,
+                    "peak": float(item.get("peak")) if item.get("peak") is not None else None,
+                    "rms": float(item.get("rms")) if item.get("rms") is not None else None,
+                })
+            if stale_keys:
+                for key in stale_keys:
+                    candidates_state.pop(key, None)
+                if selected_candidate_id and selected_candidate_id in stale_keys:
+                    state["selected_candidate_id"] = None
+                    selected_candidate_id = None
+                state["candidates"] = candidates_state
+                self._save_cleanup_workbench_state(video, state)
+
+            selected_source_label = "Original upload"
+            if selected_candidate_id:
+                selected_row = next((row for row in candidates if row["candidate_id"] == selected_candidate_id), None)
+                if selected_row:
+                    selected_source_label = f"{selected_row['model_name']} candidate"
+
+            return {
+                "selected_candidate_id": selected_candidate_id,
+                "selected_source_label": selected_source_label,
+                "analysis": state.get("analysis"),
+                "candidates": candidates,
+            }
+
+    def analyze_cleanup_workbench_audio(self, video_id: int) -> dict:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            if (video.media_source_type or "youtube") != "upload":
+                raise ValueError("Cleanup workbench is only available for uploaded manual media.")
+            source_path = self.get_original_manual_media_path(video)
+            if source_path is None or not source_path.exists():
+                raise FileNotFoundError("Original uploaded media is missing.")
+            state = self._load_cleanup_workbench_state(video)
+
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="cleanup",
+            task="analyze",
+            status="running",
+            stage="analyze",
+            message="Inspecting the original uploaded audio for pre-cleanup workbench setup...",
+            percent=16,
+        )
+        analysis = self._analyze_audio_file(source_path, source_label="Original upload")
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            state = self._load_cleanup_workbench_state(video)
+            state["analysis"] = analysis
+            self._save_cleanup_workbench_state(video, state)
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="cleanup",
+            task="analyze",
+            status="completed",
+            stage="complete",
+            message="Cleanup analysis is ready.",
+            percent=100,
+        )
+        return self.build_cleanup_workbench(video_id)
+
+    def run_cleanup_clearvoice_candidate(
+        self,
+        video_id: int,
+        *,
+        stage: str,
+        model_name: str,
+        source_candidate_id: str | None = None,
+    ) -> dict:
+        stage_config = self._cleanup_candidate_stage_config(stage)
+        model_name = str(model_name or "").strip()
+        if model_name not in stage_config["models"]:
+            raise ValueError("Unsupported ClearVoice model for this stage.")
+
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            if (video.media_source_type or "youtube") != "upload":
+                raise ValueError("Cleanup workbench is only available for uploaded manual media.")
+            state = self._load_cleanup_workbench_state(video)
+            source_path = self.get_original_manual_media_path(video)
+            source_label = "Original upload"
+            if source_path is None or not source_path.exists():
+                raise FileNotFoundError("Original uploaded media is missing.")
+            if source_candidate_id:
+                candidates_state = state.get("candidates", {}) if isinstance(state.get("candidates"), dict) else {}
+                candidate = candidates_state.get(str(source_candidate_id))
+                if not isinstance(candidate, dict):
+                    raise ValueError("Selected ClearVoice source candidate was not found.")
+                filename = str(candidate.get("audio_filename") or "").strip()
+                candidate_path = self._cleanup_workbench_dir(video) / Path(filename).name
+                if not candidate_path.exists():
+                    raise FileNotFoundError("Selected ClearVoice source candidate audio file is missing.")
+                source_path = candidate_path
+                source_label = f"{str(candidate.get('model_name') or 'candidate')} candidate"
+            output_path = self._cleanup_candidate_path(video, stage_config["stage"], model_name, source_candidate_id)
+
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="cleanup",
+            task="clearvoice_candidate",
+            status="running",
+            stage="load_model",
+            message=f"Loading ClearVoice {model_name} for pre-cleanup enhancement...",
+            percent=18,
+        )
+        try:
+            import torch  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"ClearVoice runtime could not import torch: {e}")
+        try:
+            import torchaudio  # type: ignore
+        except Exception as e:
+            torch_version = str(getattr(torch, "__version__", "") or "").strip() or "unknown"
+            raise RuntimeError(
+                "ClearVoice runtime could not import torchaudio. "
+                f"Installed torch version: {torch_version}. "
+                "This usually means the backend environment has mismatched torch/torchaudio wheels. "
+                f"Repair the ClearVoice runtime from Settings, then try again. Raw error: {e}"
+            )
+        try:
+            from clearvoice import ClearVoice  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"ClearVoice is not available: {e}")
+
+        processor = ClearVoice(task=stage_config["task"], model_names=[model_name])
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="cleanup",
+            task="clearvoice_candidate",
+            status="running",
+            stage="render",
+            message=f"Generating {model_name} candidate audio...",
+            percent=62,
+        )
+        result = processor(input_path=str(source_path), online_write=False)
+        processor.write(result, output_path=str(output_path))
+        stats = self._analyze_audio_file(output_path, source_label=f"{model_name} candidate")
+
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            state = self._load_cleanup_workbench_state(video)
+            candidates_state = state.setdefault("candidates", {})
+            candidate_id = f"{stage_config['stage']}::{model_name}" if not source_candidate_id else f"{stage_config['stage']}::{model_name}::{source_candidate_id}"
+            candidates_state[candidate_id] = {
+                "stage": stage_config["stage"],
+                "task": stage_config["task"],
+                "model_name": model_name,
+                "source_candidate_id": str(source_candidate_id or "").strip() or None,
+                "source_label": source_label,
+                "audio_filename": output_path.name,
+                "sample_rate": stats.get("sample_rate"),
+                "duration_seconds": stats.get("duration_seconds"),
+                "peak": stats.get("peak"),
+                "rms": stats.get("rms"),
+            }
+            self._save_cleanup_workbench_state(video, state)
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="cleanup",
+            task="clearvoice_candidate",
+            status="completed",
+            stage="complete",
+            message=f"{model_name} candidate is ready to preview.",
+            percent=100,
+        )
+        return self.build_cleanup_workbench(video_id)
+
+    def select_cleanup_workbench_candidate(self, video_id: int, *, candidate_id: str | None = None) -> dict:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            if (video.media_source_type or "youtube") != "upload":
+                raise ValueError("Cleanup workbench is only available for uploaded manual media.")
+            state = self._load_cleanup_workbench_state(video)
+            candidates_state = state.get("candidates", {}) if isinstance(state.get("candidates"), dict) else {}
+            resolved_id = str(candidate_id or "").strip() or None
+            if resolved_id is not None and resolved_id not in candidates_state:
+                raise ValueError("Selected ClearVoice candidate was not found.")
+            if resolved_id is not None:
+                filename = str((candidates_state.get(resolved_id) or {}).get("audio_filename") or "").strip()
+                candidate_path = self._cleanup_workbench_dir(video) / Path(filename).name
+                if not candidate_path.exists():
+                    raise FileNotFoundError("Selected ClearVoice candidate audio file is missing.")
+            state["selected_candidate_id"] = resolved_id
+            self._save_cleanup_workbench_state(video, state)
+        return self.build_cleanup_workbench(video_id)
+
+    def _set_voicefixer_state(
+        self,
+        video_id: int,
+        *,
+        status: str | None = None,
+        use_cleaned: bool | None = None,
+        cleaned_path: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                return
+            if status is not None:
+                video.voicefixer_status = status
+            if use_cleaned is not None:
+                video.voicefixer_use_cleaned = bool(use_cleaned)
+            if cleaned_path is not None:
+                video.voicefixer_cleaned_path = cleaned_path
+            if error is not None:
+                video.voicefixer_error = error
+            session.add(video)
+            session.commit()
+
+    def _set_reconstruction_state(
+        self,
+        video_id: int,
+        *,
+        status: str | None = None,
+        audio_path: str | None = None,
+        error: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                return
+            if status is not None:
+                video.reconstruction_status = status
+            if audio_path is not None:
+                video.reconstruction_audio_path = audio_path
+            if error is not None:
+                video.reconstruction_error = error
+            if model is not None:
+                video.reconstruction_model = model
+            session.add(video)
+            session.commit()
+
+    def _check_job_not_paused(self, job_id: int | None) -> None:
+        if not job_id:
+            return
+        with Session(engine) as session:
+            job = session.get(Job, int(job_id))
+            if not job:
+                return
+            if str(job.status or "").strip().lower() == "paused":
+                raise JobPausedException("Job paused by user")
+            if str(job.status or "").strip().lower() == "cancelled":
+                raise JobCancelledException("Job cancelled by user")
+
+    def _reconstruction_output_paths(self, video: Video) -> tuple[Path, Path]:
+        original_path = self.get_original_manual_media_path(video)
+        if original_path is None:
+            raise FileNotFoundError(f"Original uploaded media is missing for video {video.id}")
+        working_dir = original_path.parent
+        stem = original_path.stem
+        wav_path = working_dir / f"{stem}.reconstructed.wav"
+        json_path = working_dir / f"{stem}.reconstructed.segments.json"
+        return wav_path, json_path
+
+    def _reconstruction_workbench_dir(self, video: Video) -> Path:
+        original_path = self.get_original_manual_media_path(video)
+        if original_path is None:
+            raise FileNotFoundError(f"Original uploaded media is missing for video {video.id}")
+        workbench_dir = original_path.parent / ".reconstruction_workbench"
+        workbench_dir.mkdir(parents=True, exist_ok=True)
+        return workbench_dir
+
+    def _reconstruction_workbench_state_path(self, video: Video) -> Path:
+        return self._reconstruction_workbench_dir(video) / "state.json"
+
+    def _load_reconstruction_workbench_state(self, video: Video) -> dict:
+        path = self._reconstruction_workbench_state_path(video)
+        if not path.exists():
+            return {"speakers": {}, "preview": {}}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data.setdefault("speakers", {})
+                data.setdefault("preview", {})
+                return data
+        except Exception:
+            pass
+        return {"speakers": {}, "preview": {}}
+
+    def _save_reconstruction_workbench_state(self, video: Video, state: dict) -> None:
+        path = self._reconstruction_workbench_state_path(video)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _reconstruction_sample_clip_path(self, work_dir: Path, speaker_id: int, segment_id: int) -> Path:
+        return work_dir / f"speaker_{int(speaker_id)}_sample_{int(segment_id)}.wav"
+
+    def _reconstruction_sample_cleaned_clip_path(self, work_dir: Path, speaker_id: int, segment_id: int) -> Path:
+        return work_dir / f"speaker_{int(speaker_id)}_sample_{int(segment_id)}.cleaned.wav"
+
+    def _reconstruction_speaker_test_path(self, work_dir: Path, speaker_id: int) -> Path:
+        return work_dir / f"speaker_{int(speaker_id)}.test.wav"
+
+    def _reconstruction_preview_path(self, work_dir: Path, segment_id: int) -> Path:
+        return work_dir / f"preview_segment_{int(segment_id)}.wav"
+
+    def _ensure_reconstruction_sample_clip(
+        self,
+        source_path: Path,
+        work_dir: Path,
+        speaker_id: int,
+        seg: TranscriptSegment,
+    ) -> Path:
+        clip_path = self._reconstruction_sample_clip_path(work_dir, int(speaker_id), int(getattr(seg, "id", 0) or 0))
+        if not clip_path.exists():
+            self._write_audio_clip(source_path, clip_path, float(seg.start_time), float(seg.end_time))
+        return clip_path
+
+    def _reconstruction_sample_state(self, state: dict, speaker_id: int, segment_id: int) -> dict:
+        speakers = state.setdefault("speakers", {})
+        speaker_state = speakers.setdefault(str(int(speaker_id)), {})
+        samples = speaker_state.setdefault("samples", {})
+        return samples.setdefault(str(int(segment_id)), {})
+
+    def _sync_reconstruction_workbench_state(
+        self,
+        video: Video,
+        grouped_segments: dict[int, list[TranscriptSegment]],
+    ) -> dict:
+        state = self._load_reconstruction_workbench_state(video)
+        speakers_state = state.setdefault("speakers", {})
+        valid_speaker_keys = {str(int(speaker_id)) for speaker_id in grouped_segments.keys()}
+        for stale_key in list(speakers_state.keys()):
+            if stale_key not in valid_speaker_keys:
+                speakers_state.pop(stale_key, None)
+
+        for speaker_id, speaker_segments in grouped_segments.items():
+            speaker_key = str(int(speaker_id))
+            speaker_state = speakers_state.setdefault(speaker_key, {})
+            sample_state = speaker_state.setdefault("samples", {})
+            ranked = sorted(
+                speaker_segments,
+                key=lambda s: (-(float(s.end_time) - float(s.start_time)), float(s.start_time)),
+            )
+            all_ids = [int(getattr(seg, "id", 0) or 0) for seg in ranked if int(getattr(seg, "id", 0) or 0) > 0]
+            valid_ids = {str(seg_id) for seg_id in all_ids}
+            for stale_segment_key in list(sample_state.keys()):
+                if stale_segment_key not in valid_ids:
+                    sample_state.pop(stale_segment_key, None)
+
+            active_ids = [int(seg_id) for seg_id in speaker_state.get("active_sample_segment_ids", []) if int(seg_id) in all_ids]
+            if not active_ids:
+                active_ids = []
+            for seg in ranked:
+                seg_id = int(getattr(seg, "id", 0) or 0)
+                if seg_id <= 0:
+                    continue
+                seg_state = sample_state.setdefault(str(seg_id), {})
+                if seg_id in active_ids:
+                    continue
+                if len(active_ids) >= 3:
+                    break
+                if bool(seg_state.get("rejected")):
+                    continue
+                active_ids.append(seg_id)
+            speaker_state["active_sample_segment_ids"] = active_ids[:8]
+
+            selected_id = speaker_state.get("selected_sample_segment_id")
+            try:
+                selected_id = int(selected_id) if selected_id is not None else None
+            except Exception:
+                selected_id = None
+            if selected_id not in active_ids:
+                selected_id = next((seg_id for seg_id in active_ids if not bool(sample_state.get(str(seg_id), {}).get("rejected"))), active_ids[0] if active_ids else None)
+            speaker_state["selected_sample_segment_id"] = selected_id
+            speaker_state["approved"] = bool(speaker_state.get("approved", False))
+            speaker_state.setdefault("latest_test_audio_filename", None)
+            speaker_state.setdefault("latest_test_text", None)
+            speaker_state.setdefault("latest_test_mode", None)
+
+        self._save_reconstruction_workbench_state(video, state)
+        return state
+
+    def _resolve_reconstruction_reference_for_speaker(
+        self,
+        video: Video,
+        speaker_id: int,
+        speaker_segments: list[TranscriptSegment],
+        source_path: Path,
+        work_dir: Path,
+        state: dict,
+    ) -> dict | None:
+        speaker_state = state.get("speakers", {}).get(str(int(speaker_id)), {})
+        sample_state = speaker_state.get("samples", {}) if isinstance(speaker_state, dict) else {}
+        by_id = {int(getattr(seg, "id", 0) or 0): seg for seg in speaker_segments}
+        preferred_segment_id = speaker_state.get("selected_sample_segment_id")
+        try:
+            preferred_segment_id = int(preferred_segment_id) if preferred_segment_id is not None else None
+        except Exception:
+            preferred_segment_id = None
+        if preferred_segment_id and preferred_segment_id in by_id:
+            seg = by_id[preferred_segment_id]
+            seg_state = sample_state.get(str(preferred_segment_id), {})
+            cleaned_name = str(seg_state.get("cleaned_audio_filename") or "").strip() if isinstance(seg_state, dict) else ""
+            if cleaned_name:
+                cleaned_path = work_dir / cleaned_name
+                if cleaned_path.exists():
+                    return {
+                        "path": cleaned_path,
+                        "text": str(getattr(seg, "text", "") or "").strip(),
+                        "start": float(seg.start_time),
+                        "end": float(seg.end_time),
+                        "source": "selected_cleaned_sample",
+                    }
+            try:
+                clip_path = self._ensure_reconstruction_sample_clip(source_path, work_dir, int(speaker_id), seg)
+                return {
+                    "path": clip_path,
+                    "text": str(getattr(seg, "text", "") or "").strip(),
+                    "start": float(seg.start_time),
+                    "end": float(seg.end_time),
+                    "source": "selected_sample",
+                }
+            except Exception:
+                pass
+        return None
+
+    def _reconstruction_default_instruction_template(self) -> str:
+        return (
+            "Speak with the exact same intonation, emotion, rhythm, breathing, pauses, and emphasis as "
+            "the reference audio. Maintain the original speaking style and prosody precisely, but deliver "
+            "clearly at normal volume without background noise."
+        )
+
+    def _get_reconstruction_mode(self, video: Video) -> str:
+        return "performance"
+
+    def _get_reconstruction_instruction_template(self, video: Video) -> str:
+        value = str(getattr(video, "reconstruction_instruction_template", "") or "").strip()
+        return value or self._reconstruction_default_instruction_template()
+
+    def _reference_duration_score(self, start_time: float, end_time: float, text: str) -> float:
+        duration = max(0.0, float(end_time) - float(start_time))
+        if duration <= 0:
+            return 0.0
+        words = len([token for token in str(text or "").split() if token])
+        return duration + min(words / 50.0, 1.5)
+
+    def _fit_waveform_duration_with_ffmpeg(self, wav, sample_rate: int, stretch_rate: float):
+        import numpy as np
+        import soundfile as sf  # type: ignore
+        import tempfile
+
+        arr = np.asarray(wav, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return arr.astype(np.float32)
+
+        def _build_atempo_chain(rate: float) -> str:
+            rate = max(0.05, float(rate))
+            factors: list[float] = []
+            while rate < 0.5:
+                factors.append(0.5)
+                rate /= 0.5
+            while rate > 2.0:
+                factors.append(2.0)
+                rate /= 2.0
+            factors.append(rate)
+            return ",".join(f"atempo={max(0.5, min(2.0, factor)):.6f}" for factor in factors)
+
+        with tempfile.TemporaryDirectory(prefix="reconstruction-fit-") as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            input_wav = tmp_path / "input.wav"
+            output_wav = tmp_path / "output.wav"
+            sf.write(str(input_wav), arr, int(sample_rate))
+            self._run_external_command(
+                [
+                    self._get_ffmpeg_cmd(),
+                    "-y",
+                    "-v",
+                    "error",
+                    "-i",
+                    str(input_wav),
+                    "-af",
+                    _build_atempo_chain(stretch_rate),
+                    "-ac",
+                    "1",
+                    "-ar",
+                    str(int(sample_rate)),
+                    "-c:a",
+                    "pcm_s16le",
+                    str(output_wav),
+                ],
+                "Failed to time-fit reconstruction audio with ffmpeg",
+                timeout=1800,
+            )
+            stretched, stretched_sr = sf.read(str(output_wav), dtype="float32", always_2d=False)
+            result = np.asarray(stretched, dtype=np.float32).reshape(-1)
+            if int(stretched_sr or 0) != int(sample_rate):
+                raise RuntimeError(f"ffmpeg time-fit changed sample rate from {sample_rate} to {stretched_sr}")
+            return result.astype(np.float32)
+
+    def _fit_waveform_duration(self, wav, sample_rate: int, target_seconds: float):
+        import numpy as np
+
+        target_seconds = max(0.01, float(target_seconds))
+        target_samples = max(1, int(round(target_seconds * sample_rate)))
+        if wav is None:
+            return np.zeros(target_samples, dtype=np.float32)
+        arr = np.asarray(wav, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return np.zeros(target_samples, dtype=np.float32)
+        current_seconds = arr.size / float(sample_rate)
+        if abs(current_seconds - target_seconds) <= 0.02:
+            if arr.size == target_samples:
+                return arr.astype(np.float32)
+            if arr.size > target_samples:
+                return arr[:target_samples].astype(np.float32)
+            out = np.zeros(target_samples, dtype=np.float32)
+            out[: arr.size] = arr
+            return out
+
+        stretch_rate = current_seconds / target_seconds if target_seconds > 0 else 1.0
+        try:
+            import librosa  # type: ignore
+            stretched = librosa.effects.time_stretch(arr.astype(np.float32), rate=max(0.5, min(2.0, stretch_rate)))
+        except Exception:
+            try:
+                stretched = self._fit_waveform_duration_with_ffmpeg(arr, int(sample_rate), stretch_rate)
+            except Exception:
+                if arr.size > target_samples:
+                    return arr[:target_samples].astype(np.float32)
+                out = np.zeros(target_samples, dtype=np.float32)
+                out[: arr.size] = arr
+                return out
+        if stretched.size > target_samples:
+            return stretched[:target_samples].astype(np.float32)
+        if stretched.size < target_samples:
+            out = np.zeros(target_samples, dtype=np.float32)
+            out[: stretched.size] = stretched
+            return out
+        return stretched.astype(np.float32)
+
+    def _validate_reconstruction_waveform(self, wav, sample_rate: int, target_seconds: float) -> str | None:
+        import numpy as np
+
+        arr = np.asarray(wav, dtype=np.float32).reshape(-1)
+        if arr.size == 0 or sample_rate <= 0:
+            return "no audio samples were generated"
+
+        current_seconds = arr.size / float(sample_rate)
+        peak = float(np.max(np.abs(arr))) if arr.size else 0.0
+        rms = float(np.sqrt(np.mean(arr ** 2))) if arr.size else 0.0
+        target_seconds = max(0.05, float(target_seconds))
+        # Qwen can legitimately overshoot the requested duration by a wide margin
+        # and still produce usable audio that can be time-fit back to the target.
+        # Only reject duration when it is wildly beyond what post-fit handling can
+        # reasonably salvage.
+        max_allowed_seconds = max(12.0, target_seconds + 8.0, target_seconds * 5.0)
+
+        if current_seconds > max_allowed_seconds:
+            return f"generated duration {current_seconds:.2f}s is far above target {target_seconds:.2f}s"
+        # Quiet renders can still have a non-trivial sample peak while sounding
+        # effectively blank overall. Reject those so tests/previews behave like
+        # the real reconstruction path instead of surfacing unusable audio.
+        if peak < 0.080 and rms < 0.0030:
+            return f"generated waveform energy is too low (peak={peak:.4f}, rms={rms:.4f})"
+        return None
+
+    def _synthesize_validated_reconstruction_segment(
+        self,
+        tts_model,
+        prompt,
+        text: str,
+        *,
+        model_name: str,
+        target_seconds: float,
+        fallback_prompt=None,
+        fallback_text: str | None = None,
+    ):
+        def _generate_and_validate(current_prompt, current_text: str):
+            wav, sample_rate = self._synthesize_reconstruction_segment(
+                tts_model,
+                current_prompt,
+                current_text,
+                model_name=model_name,
+                target_seconds=target_seconds,
+            )
+            validation_error = self._validate_reconstruction_waveform(wav, int(sample_rate), target_seconds)
+            if validation_error:
+                return None, int(sample_rate), validation_error
+
+            fitted = self._fit_waveform_duration(wav, int(sample_rate), target_seconds)
+            fitted_error = self._validate_reconstruction_waveform(fitted, int(sample_rate), target_seconds)
+            if fitted_error:
+                return None, int(sample_rate), f"{fitted_error} after duration fitting"
+
+            return fitted, int(sample_rate), None
+
+        fitted_wav, sample_rate, validation_error = _generate_and_validate(prompt, text)
+        used_fallback = False
+
+        if validation_error and fallback_prompt is not None:
+            fitted_wav, sample_rate, validation_error = _generate_and_validate(
+                fallback_prompt,
+                str(fallback_text if fallback_text is not None else text),
+            )
+            used_fallback = True
+
+        if validation_error or fitted_wav is None:
+            raise RuntimeError(validation_error or "reconstruction synthesis did not return usable audio")
+
+        return fitted_wav, int(sample_rate), used_fallback
+
+    def _write_audio_clip(self, source_path: Path, output_path: Path, start_time: float, end_time: float) -> None:
+        ffmpeg_cmd = self._get_ffmpeg_cmd()
+        duration = max(0.05, float(end_time) - float(start_time))
+        result = subprocess.run(
+            [
+                ffmpeg_cmd,
+                "-y",
+                "-v",
+                "error",
+                "-ss",
+                f"{max(0.0, float(start_time)):.3f}",
+                "-i",
+                str(source_path),
+                "-t",
+                f"{duration:.3f}",
+                "-ac",
+                "1",
+                "-ar",
+                "44100",
+                "-c:a",
+                "pcm_s16le",
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=1800,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "ffmpeg clip extraction failed").strip()
+            raise RuntimeError(detail[:1000])
+
+    def _extract_reconstruction_references(
+        self,
+        source_path: Path,
+        segments: list[TranscriptSegment],
+        work_dir: Path,
+        *,
+        video: Video | None = None,
+        state: dict | None = None,
+        progress_task: str | None = None,
+    ) -> dict[int, dict]:
+        references: dict[int, dict] = {}
+        groups: dict[int, list[TranscriptSegment]] = {}
+        for seg in segments:
+            speaker_id = getattr(seg, "speaker_id", None)
+            if speaker_id is None:
+                continue
+            if not str(getattr(seg, "text", "") or "").strip():
+                continue
+            groups.setdefault(int(speaker_id), []).append(seg)
+
+        state = state or {"speakers": {}}
+        total_groups = max(1, len(groups))
+        for idx, (speaker_id, speaker_segments) in enumerate(groups.items(), start=1):
+            if video is not None and progress_task:
+                self._set_workbench_task_progress(
+                    int(video.id),
+                    area="reconstruction",
+                    task=progress_task,
+                    status="running",
+                    stage="references",
+                    message=f"Preparing speaker references ({idx}/{total_groups})...",
+                    percent=32 + int((idx / total_groups) * 28),
+                    current=idx,
+                    total=total_groups,
+                )
+            if video is not None:
+                preferred = self._resolve_reconstruction_reference_for_speaker(
+                    video,
+                    int(speaker_id),
+                    speaker_segments,
+                    source_path,
+                    work_dir,
+                    state,
+                )
+                if preferred is not None:
+                    references[int(speaker_id)] = preferred
+                    continue
+            best = None
+            best_score = -1.0
+            for seg in speaker_segments:
+                duration = max(0.0, float(seg.end_time) - float(seg.start_time))
+                if duration < 2.5:
+                    continue
+                score = self._reference_duration_score(seg.start_time, seg.end_time, seg.text)
+                if score > best_score:
+                    best_score = score
+                    best = seg
+            if best is None and speaker_segments:
+                best = max(speaker_segments, key=lambda s: self._reference_duration_score(s.start_time, s.end_time, s.text))
+            if best is None:
+                continue
+            clip_path = work_dir / f"speaker_{speaker_id}_ref.wav"
+            ref_start = float(best.start_time)
+            ref_end = min(float(best.end_time), ref_start + 30.0)
+            self._write_audio_clip(source_path, clip_path, ref_start, ref_end)
+            references[speaker_id] = {
+                "path": clip_path,
+                "text": str(best.text or "").strip(),
+                "start": ref_start,
+                "end": ref_end,
+                "source": "auto_reference",
+            }
+        return references
+
+    def _build_reconstruction_workbench(self, video: Video, segments: list[TranscriptSegment], source_path: Path, *, progress_task: str | None = None) -> dict:
+        if progress_task:
+            self._set_workbench_task_progress(
+                int(video.id),
+                area="reconstruction",
+                task=progress_task,
+                status="running",
+                stage="speakers",
+                message="Loading speaker roster for the workbench...",
+                percent=8,
+            )
+        with Session(engine) as session:
+            speaker_name_map = {
+                int(row.id): str(row.name or f"Speaker {row.id}")
+                for row in session.exec(select(Speaker).where(Speaker.channel_id == video.channel_id)).all()
+            }
+
+        workbench_dir = self._reconstruction_workbench_dir(video)
+        grouped: dict[int, list[TranscriptSegment]] = {}
+        for seg in segments:
+            speaker_id = getattr(seg, "speaker_id", None)
+            if speaker_id is None:
+                continue
+            grouped.setdefault(int(speaker_id), []).append(seg)
+        if progress_task:
+            self._set_workbench_task_progress(
+                int(video.id),
+                area="reconstruction",
+                task=progress_task,
+                status="running",
+                stage="state",
+                message="Syncing workbench state from diarized segments...",
+                percent=18,
+                current=len(grouped),
+                total=len(grouped),
+            )
+        state = self._sync_reconstruction_workbench_state(video, grouped)
+        references = self._extract_reconstruction_references(
+            source_path,
+            segments,
+            workbench_dir,
+            video=video,
+            state=state,
+            progress_task=progress_task,
+        )
+
+        speakers: list[dict] = []
+        all_speakers_approved = True
+        total_speakers = max(1, len(grouped))
+        for idx, (speaker_id, speaker_segments) in enumerate(sorted(grouped.items(), key=lambda item: item[0]), start=1):
+            if progress_task:
+                self._set_workbench_task_progress(
+                    int(video.id),
+                    area="reconstruction",
+                    task=progress_task,
+                    status="running",
+                    stage="assemble",
+                    message=f"Preparing speaker cards ({idx}/{total_speakers})...",
+                    percent=62 + int((idx / total_speakers) * 30),
+                    current=idx,
+                    total=total_speakers,
+                )
+            ref = references.get(int(speaker_id))
+            ranked_segments = sorted(
+                speaker_segments,
+                key=lambda s: (-(float(s.end_time) - float(s.start_time)), float(s.start_time)),
+            )
+            speaker_state = state.get("speakers", {}).get(str(int(speaker_id)), {})
+            sample_state = speaker_state.get("samples", {}) if isinstance(speaker_state, dict) else {}
+            active_ids = [int(seg_id) for seg_id in speaker_state.get("active_sample_segment_ids", [])] if isinstance(speaker_state, dict) else []
+            selected_sample_segment_id = speaker_state.get("selected_sample_segment_id") if isinstance(speaker_state, dict) else None
+            approved = bool(speaker_state.get("approved", False)) if isinstance(speaker_state, dict) else False
+            all_speakers_approved = all_speakers_approved and approved
+            sample_rows = []
+            remaining_candidate_exists = False
+            for seg in ranked_segments:
+                seg_id = int(getattr(seg, "id", 0) or 0)
+                if seg_id <= 0:
+                    continue
+                seg_state = sample_state.get(str(seg_id), {}) if isinstance(sample_state, dict) else {}
+                if seg_id not in active_ids:
+                    if not bool(seg_state.get("rejected", False)):
+                        remaining_candidate_exists = True
+                    continue
+                clip_path = self._ensure_reconstruction_sample_clip(source_path, workbench_dir, int(speaker_id), seg)
+                cleaned_name = str(seg_state.get("cleaned_audio_filename") or "").strip() if isinstance(seg_state, dict) else ""
+                sample_rows.append({
+                    "segment_id": seg_id,
+                    "start_time": float(seg.start_time),
+                    "end_time": float(seg.end_time),
+                    "duration": max(0.0, float(seg.end_time) - float(seg.start_time)),
+                    "text": str(getattr(seg, "text", "") or "").strip(),
+                    "audio_filename": clip_path.name,
+                    "cleaned_audio_filename": cleaned_name or None,
+                    "rejected": bool(seg_state.get("rejected", False)) if isinstance(seg_state, dict) else False,
+                    "selected": seg_id == selected_sample_segment_id,
+                })
+
+            test_audio = self._reconstruction_speaker_test_path(workbench_dir, int(speaker_id))
+            speakers.append({
+                "speaker_id": int(speaker_id),
+                "speaker_name": speaker_name_map.get(int(speaker_id), f"Speaker {speaker_id}"),
+                "segment_count": len(speaker_segments),
+                "approved": approved,
+                "selected_sample_segment_id": int(selected_sample_segment_id) if selected_sample_segment_id is not None else None,
+                "reference_text": str(ref.get("text") or "").strip() if ref else None,
+                "reference_start_time": float(ref.get("start")) if ref and ref.get("start") is not None else None,
+                "reference_end_time": float(ref.get("end")) if ref and ref.get("end") is not None else None,
+                "reference_audio_filename": ref["path"].name if ref and ref.get("path") else None,
+                "samples": sample_rows,
+                "latest_test_audio_filename": test_audio.name if test_audio.exists() else None,
+                "latest_test_text": str(speaker_state.get("latest_test_text") or "").strip() if isinstance(speaker_state, dict) else None,
+                "latest_test_mode": str(speaker_state.get("latest_test_mode") or "").strip() if isinstance(speaker_state, dict) else None,
+                "can_add_sample": bool(remaining_candidate_exists),
+            })
+
+        if progress_task:
+            self._set_workbench_task_progress(
+                int(video.id),
+                area="reconstruction",
+                task=progress_task,
+                status="completed",
+                stage="complete",
+                message="Reconstruction workbench is ready.",
+                percent=100,
+                current=len(speakers),
+                total=len(speakers),
+            )
+        return {
+            "mode": self._get_reconstruction_mode(video),
+            "instruction_template": self._get_reconstruction_instruction_template(video),
+            "performance_supported": True,
+            "speaker_count": len(speakers),
+            "all_speakers_approved": bool(speakers) and all_speakers_approved,
+            "speakers": speakers,
+        }
+
+    def _build_performance_reconstruction_prompt(self, tts_model, clean_prompt, performance_audio_path: Path, ref_text: str):
+        prompt_items = tts_model.create_voice_clone_prompt(
+            ref_audio=str(performance_audio_path),
+            ref_text=str(ref_text or "").strip(),
+            x_vector_only_mode=False,
+        )
+        if not prompt_items:
+            raise RuntimeError("Qwen3-TTS did not return a performance prompt item.")
+        performance_prompt = prompt_items[0]
+        prompt_cls = type(performance_prompt)
+        return prompt_cls(
+            ref_code=performance_prompt.ref_code,
+            ref_spk_embedding=clean_prompt.ref_spk_embedding,
+            x_vector_only_mode=False,
+            icl_mode=True,
+            ref_text=performance_prompt.ref_text,
+        )
+
+    def _build_reconstruction_generation_text(self, text: str, *, performance_mode: bool, instruction_template: str) -> str:
+        base_text = str(text or "").strip()
+        if not performance_mode:
+            return base_text
+        instruction = str(instruction_template or "").strip()
+        if not instruction:
+            instruction = self._reconstruction_default_instruction_template()
+        return f"<instruction>{instruction}</instruction>\n{base_text}"
+
+    def _prepare_reconstruction_batch_prompts(
+        self,
+        tts_model,
+        batch_items: list[dict],
+        *,
+        clean_prompts_by_speaker: dict[int, object],
+        performance_source_path: Path | None,
+        performance_mode: bool,
+        work_dir: Path,
+    ) -> tuple[list[object], list[str]]:
+        prompts: list[object] = []
+        texts: list[str] = []
+        for item in batch_items:
+            texts.append(str(item["generation_text"]))
+            prompts.append(clean_prompts_by_speaker[int(item["speaker_id"])])
+
+        if not performance_mode or performance_source_path is None:
+            return prompts, texts
+
+        for idx, item in enumerate(batch_items):
+            performance_clip = work_dir / f"segment_{int(item['segment_id'])}_perf.wav"
+            try:
+                self._write_audio_clip(
+                    performance_source_path,
+                    performance_clip,
+                    float(item["start_time"]),
+                    float(item["end_time"]),
+                )
+                prompts[idx] = self._build_performance_reconstruction_prompt(
+                    tts_model,
+                    clean_prompts_by_speaker[int(item["speaker_id"])],
+                    performance_clip,
+                    str(item["text"]),
+                )
+            except Exception:
+                prompts[idx] = clean_prompts_by_speaker[int(item["speaker_id"])]
+            finally:
+                try:
+                    performance_clip.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        return prompts, texts
+
+    def generate_reconstruction_speaker_test(
+        self,
+        video_id: int,
+        *,
+        speaker_id: int,
+        text: str | None = None,
+        segment_id: int | None = None,
+        performance_mode: bool = False,
+        progress_task: str = "speaker_test",
+    ) -> dict:
+        import soundfile as sf  # type: ignore
+
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task=progress_task,
+            status="running",
+            stage="prepare",
+            message="Preparing speaker reference and test text...",
+            percent=6,
+        )
+
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            if (video.media_source_type or "youtube") != "upload":
+                raise ValueError("Conversation reconstruction is currently available for uploaded manual media only.")
+            segments = session.exec(
+                select(TranscriptSegment).where(TranscriptSegment.video_id == video_id).order_by(TranscriptSegment.start_time)
+            ).all()
+            if not segments:
+                raise ValueError("Transcript segments are required before testing reconstruction voices.")
+            source_path = self.get_audio_path(video, purpose="processing")
+            performance_source_path = self.get_original_manual_media_path(video) or source_path
+            workbench = self._build_reconstruction_workbench(video, segments, source_path)
+            state = self._load_reconstruction_workbench_state(video)
+
+        speaker_entry = next((row for row in workbench["speakers"] if int(row["speaker_id"]) == int(speaker_id)), None)
+        if not speaker_entry:
+            raise ValueError("Speaker reference could not be prepared for this speaker.")
+
+        selected_segment = None
+        if segment_id is not None:
+            selected_segment = next((seg for seg in segments if int(getattr(seg, "id", 0) or 0) == int(segment_id)), None)
+        if selected_segment is None:
+            selected_segment = next((seg for seg in segments if int(getattr(seg, "speaker_id", 0) or 0) == int(speaker_id)), None)
+        if selected_segment is None:
+            raise ValueError("No segment could be found for this speaker.")
+
+        target_text = str(text or getattr(selected_segment, "text", "") or "").strip()
+        if not target_text:
+            raise ValueError("A non-empty test line is required.")
+
+        workbench_dir = self._reconstruction_workbench_dir(video)
+        ref_filename = str(speaker_entry.get("reference_audio_filename") or "").strip()
+        if not ref_filename:
+            raise ValueError("Speaker reference audio is missing.")
+        ref_path = workbench_dir / ref_filename
+        if not ref_path.exists():
+            raise ValueError("Speaker reference audio file is missing.")
+
+        model_name = (os.getenv("RECONSTRUCTION_TTS_MODEL") or "Qwen/Qwen3-TTS-12Hz-0.6B-Base").strip()
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task=progress_task,
+            status="running",
+            stage="model",
+            message="Loading the reconstruction TTS model into memory. The first test after backend start can take a while.",
+            percent=26,
+        )
+        tts_model, _, reused_cached_model = self._get_reconstruction_tts_model(model_name)
+        if reused_cached_model:
+            self._set_workbench_task_progress(
+                int(video_id),
+                area="reconstruction",
+                task=progress_task,
+                status="running",
+                stage="model",
+                message="Reusing the loaded reconstruction TTS model...",
+                percent=32,
+            )
+
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task=progress_task,
+            status="running",
+            stage="reference_prompt",
+            message="Encoding the clean speaker reference...",
+            percent=40,
+        )
+        clean_prompt = tts_model.create_voice_clone_prompt(
+            ref_audio=str(ref_path),
+            ref_text=None,
+            x_vector_only_mode=True,
+        )[0]
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task=progress_task,
+            status="running",
+            stage="prompt",
+            message="Building speaker prompt from the reference audio...",
+            percent=52,
+        )
+
+        use_performance = bool(performance_mode)
+        if use_performance:
+            performance_clip = workbench_dir / f"speaker_{int(speaker_id)}.performance.test.ref.wav"
+            try:
+                self._set_workbench_task_progress(
+                    int(video_id),
+                    area="reconstruction",
+                    task=progress_task,
+                    status="running",
+                    stage="performance_prompt",
+                    message="Encoding the performance reference clip...",
+                    percent=60,
+                )
+                self._write_audio_clip(
+                    performance_source_path,
+                    performance_clip,
+                    float(selected_segment.start_time),
+                    float(selected_segment.end_time),
+                )
+                prompt = self._build_performance_reconstruction_prompt(
+                    tts_model,
+                    clean_prompt,
+                    performance_clip,
+                    str(getattr(selected_segment, "text", "") or "").strip(),
+                )
+            except Exception:
+                prompt = clean_prompt
+                use_performance = False
+            finally:
+                try:
+                    performance_clip.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        else:
+            prompt = clean_prompt
+
+        source_segment_seconds = max(0.35, float(selected_segment.end_time) - float(selected_segment.start_time))
+        target_seconds = source_segment_seconds if use_performance else max(1.2, min(8.0, source_segment_seconds))
+        generation_text = self._build_reconstruction_generation_text(
+            target_text,
+            performance_mode=use_performance,
+            instruction_template=self._get_reconstruction_instruction_template(video),
+        )
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task=progress_task,
+            status="running",
+            stage="synthesis",
+            message="Synthesizing the voice test clip...",
+            percent=74,
+        )
+        wav, sample_rate, used_fallback = self._synthesize_validated_reconstruction_segment(
+            tts_model,
+            prompt,
+            generation_text,
+            model_name=model_name,
+            target_seconds=target_seconds,
+            fallback_prompt=clean_prompt if use_performance else None,
+            fallback_text=target_text,
+        )
+        if used_fallback:
+            use_performance = False
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task=progress_task,
+            status="running",
+            stage="validate",
+            message="Validating the generated test audio...",
+            percent=90,
+        )
+        output_path = workbench_dir / f"speaker_{int(speaker_id)}.test.wav"
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task=progress_task,
+            status="running",
+            stage="write",
+            message="Saving the generated test audio to the workbench...",
+            percent=96,
+        )
+        sf.write(str(output_path), wav, int(sample_rate))
+        self._release_reconstruction_cuda_cache()
+        speaker_state = state.setdefault("speakers", {}).setdefault(str(int(speaker_id)), {})
+        speaker_state["latest_test_audio_filename"] = output_path.name
+        speaker_state["latest_test_text"] = target_text
+        speaker_state["latest_test_mode"] = "performance" if use_performance else "basic"
+        self._save_reconstruction_workbench_state(video, state)
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task=progress_task,
+            status="completed",
+            stage="complete",
+            message="Voice test is ready.",
+            percent=100,
+        )
+        return {
+            "speaker_id": int(speaker_id),
+            "mode": "performance" if use_performance else "basic",
+            "segment_id": int(getattr(selected_segment, "id", 0) or 0),
+            "text": target_text,
+            "audio_filename": output_path.name,
+            "detail": (
+                "Performance reference used from the original segment."
+                if use_performance
+                else "Performance prompt was unstable, so the test fell back to the clean reference clip."
+                if used_fallback
+                else "Speaker timbre test generated from the clean reference clip."
+            ),
+        }
+
+    def update_reconstruction_sample_state(
+        self,
+        video_id: int,
+        *,
+        speaker_id: int,
+        segment_id: int,
+        rejected: bool | None = None,
+        selected: bool | None = None,
+        clear_cleaned: bool | None = None,
+    ) -> dict:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            segments = session.exec(
+                select(TranscriptSegment).where(TranscriptSegment.video_id == video_id).order_by(TranscriptSegment.start_time)
+            ).all()
+            grouped: dict[int, list[TranscriptSegment]] = {}
+            for seg in segments:
+                seg_speaker = getattr(seg, "speaker_id", None)
+                if seg_speaker is not None:
+                    grouped.setdefault(int(seg_speaker), []).append(seg)
+            if int(speaker_id) not in grouped:
+                raise ValueError("Speaker not found in reconstruction workbench.")
+            self._sync_reconstruction_workbench_state(video, grouped)
+            state = self._load_reconstruction_workbench_state(video)
+            speaker_state = state.setdefault("speakers", {}).setdefault(str(int(speaker_id)), {})
+            active_ids = [int(seg_id) for seg_id in speaker_state.get("active_sample_segment_ids", [])]
+            if int(segment_id) not in active_ids and selected:
+                active_ids.append(int(segment_id))
+            sample_state = self._reconstruction_sample_state(state, int(speaker_id), int(segment_id))
+            if rejected is not None:
+                sample_state["rejected"] = bool(rejected)
+                if bool(rejected):
+                    active_ids = [seg_id for seg_id in active_ids if seg_id != int(segment_id)]
+                    if int(speaker_state.get("selected_sample_segment_id") or 0) == int(segment_id):
+                        speaker_state["selected_sample_segment_id"] = next((seg_id for seg_id in active_ids if not bool(self._reconstruction_sample_state(state, int(speaker_id), seg_id).get("rejected"))), None)
+                        speaker_state["approved"] = False
+            if selected:
+                sample_state["rejected"] = False
+                speaker_state["selected_sample_segment_id"] = int(segment_id)
+                if int(segment_id) not in active_ids:
+                    active_ids.append(int(segment_id))
+                speaker_state["approved"] = False
+            if clear_cleaned:
+                cleaned_name = str(sample_state.get("cleaned_audio_filename") or "").strip()
+                if cleaned_name:
+                    cleaned_path = self._reconstruction_workbench_dir(video) / Path(cleaned_name).name
+                    try:
+                        cleaned_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                sample_state.pop("cleaned_audio_filename", None)
+                speaker_state["approved"] = False
+            speaker_state["active_sample_segment_ids"] = active_ids[:8]
+            self._save_reconstruction_workbench_state(video, state)
+            return state
+
+    def add_reconstruction_performance_sample(self, video_id: int, *, speaker_id: int) -> dict:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            segments = session.exec(
+                select(TranscriptSegment).where(TranscriptSegment.video_id == video_id).order_by(TranscriptSegment.start_time)
+            ).all()
+            grouped: dict[int, list[TranscriptSegment]] = {}
+            for seg in segments:
+                seg_speaker = getattr(seg, "speaker_id", None)
+                if seg_speaker is not None:
+                    grouped.setdefault(int(seg_speaker), []).append(seg)
+            speaker_segments = grouped.get(int(speaker_id))
+            if not speaker_segments:
+                raise ValueError("Speaker not found in reconstruction workbench.")
+            state = self._sync_reconstruction_workbench_state(video, grouped)
+            speaker_state = state.setdefault("speakers", {}).setdefault(str(int(speaker_id)), {})
+            active_ids = [int(seg_id) for seg_id in speaker_state.get("active_sample_segment_ids", [])]
+            ranked = sorted(
+                speaker_segments,
+                key=lambda s: (-(float(s.end_time) - float(s.start_time)), float(s.start_time)),
+            )
+            for seg in ranked:
+                seg_id = int(getattr(seg, "id", 0) or 0)
+                if seg_id <= 0 or seg_id in active_ids:
+                    continue
+                seg_state = self._reconstruction_sample_state(state, int(speaker_id), seg_id)
+                if bool(seg_state.get("rejected")):
+                    continue
+                active_ids.append(seg_id)
+                speaker_state["active_sample_segment_ids"] = active_ids[:8]
+                self._save_reconstruction_workbench_state(video, state)
+                return state
+            raise ValueError("No additional performance sample candidates are available for this speaker.")
+
+    def set_reconstruction_speaker_approval(self, video_id: int, *, speaker_id: int, approved: bool) -> dict:
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            state = self._load_reconstruction_workbench_state(video)
+            speaker_state = state.setdefault("speakers", {}).setdefault(str(int(speaker_id)), {})
+            speaker_state["approved"] = bool(approved)
+            self._save_reconstruction_workbench_state(video, state)
+            return state
+
+    def cleanup_reconstruction_sample(self, video_id: int, *, speaker_id: int, segment_id: int) -> dict:
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task="sample_cleanup",
+            status="running",
+            stage="prepare",
+            message="Preparing the selected performance sample for cleanup...",
+            percent=8,
+        )
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            if (video.media_source_type or "youtube") != "upload":
+                raise ValueError("Sample cleanup is only available for uploaded manual media.")
+            source_path = self.get_audio_path(video, purpose="processing")
+            segments = session.exec(
+                select(TranscriptSegment).where(TranscriptSegment.video_id == video_id).order_by(TranscriptSegment.start_time)
+            ).all()
+            target_segment = next((seg for seg in segments if int(getattr(seg, "id", 0) or 0) == int(segment_id) and int(getattr(seg, "speaker_id", 0) or 0) == int(speaker_id)), None)
+            if target_segment is None:
+                raise ValueError("Performance sample not found.")
+            work_dir = self._reconstruction_workbench_dir(video)
+            input_clip = self._ensure_reconstruction_sample_clip(source_path, work_dir, int(speaker_id), target_segment)
+            cleaned_clip = self._reconstruction_sample_cleaned_clip_path(work_dir, int(speaker_id), int(segment_id))
+            restored_wav = work_dir / f"speaker_{int(speaker_id)}_sample_{int(segment_id)}.voicefixer.restored.wav"
+            blended_wav = work_dir / f"speaker_{int(speaker_id)}_sample_{int(segment_id)}.voicefixer.blended.wav"
+            leveled_wav = work_dir / f"speaker_{int(speaker_id)}_sample_{int(segment_id)}.voicefixer.leveled.wav"
+            mode = max(0, min(2, int(getattr(video, "voicefixer_mode", 0) or 0)))
+            mix_ratio = max(0.0, min(1.0, float(getattr(video, "voicefixer_mix_ratio", 1.0) or 1.0)))
+            leveling_mode = str(getattr(video, "voicefixer_leveling_mode", "off") or "off").strip().lower()
+
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task="sample_cleanup",
+            status="running",
+            stage="load_model",
+            message="Loading VoiceFixer for sample cleanup...",
+            percent=22,
+        )
+        try:
+            from voicefixer import VoiceFixer  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"VoiceFixer is not available: {e}")
+
+        try:
+            restorer = VoiceFixer()
+            use_cuda = str(self.device or "") == "cuda"
+            self._set_workbench_task_progress(
+                int(video_id),
+                area="reconstruction",
+                task="sample_cleanup",
+                status="running",
+                stage="restore",
+                message="Restoring the selected sample audio...",
+                percent=48,
+            )
+            restorer.restore(
+                input=str(input_clip),
+                output=str(restored_wav),
+                cuda=use_cuda,
+                mode=mode,
+            )
+            current_path = restored_wav
+            if mix_ratio < 0.999:
+                restored_weight = max(0.0, min(1.0, mix_ratio))
+                original_weight = max(0.0, 1.0 - restored_weight)
+                self._set_workbench_task_progress(
+                    int(video_id),
+                    area="reconstruction",
+                    task="sample_cleanup",
+                    status="running",
+                    stage="blend",
+                    message="Blending the cleaned sample with the original audio...",
+                    percent=68,
+                )
+                self._run_external_command(
+                    [
+                        self._get_ffmpeg_cmd(),
+                        "-y",
+                        "-v",
+                        "error",
+                        "-i",
+                        str(restored_wav),
+                        "-i",
+                        str(input_clip),
+                        "-filter_complex",
+                        f"amix=inputs=2:weights='{restored_weight:.4f} {original_weight:.4f}':normalize=0",
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "44100",
+                        "-c:a",
+                        "pcm_s16le",
+                        str(blended_wav),
+                    ],
+                    "Failed to blend cleaned performance sample",
+                )
+                current_path = blended_wav
+            leveling_filter = self._voicefixer_leveling_filter(leveling_mode)
+            if leveling_filter:
+                self._set_workbench_task_progress(
+                    int(video_id),
+                    area="reconstruction",
+                    task="sample_cleanup",
+                    status="running",
+                    stage="level",
+                    message="Applying voice leveling to the cleaned sample...",
+                    percent=82,
+                )
+                self._run_external_command(
+                    [
+                        self._get_ffmpeg_cmd(),
+                        "-y",
+                        "-v",
+                        "error",
+                        "-i",
+                        str(current_path),
+                        "-af",
+                        leveling_filter,
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "44100",
+                        "-c:a",
+                        "pcm_s16le",
+                        str(leveled_wav),
+                    ],
+                    "Failed to level cleaned performance sample",
+                )
+                current_path = leveled_wav
+            self._set_workbench_task_progress(
+                int(video_id),
+                area="reconstruction",
+                task="sample_cleanup",
+                status="running",
+                stage="save",
+                message="Saving the cleaned sample back into the workbench...",
+                percent=94,
+            )
+            shutil.copyfile(current_path, cleaned_clip)
+
+            with Session(engine) as session:
+                video = session.get(Video, video_id)
+                if not video:
+                    raise ValueError("Video not found")
+                state = self._load_reconstruction_workbench_state(video)
+                sample_state = self._reconstruction_sample_state(state, int(speaker_id), int(segment_id))
+                sample_state["cleaned_audio_filename"] = cleaned_clip.name
+                sample_state["rejected"] = False
+                self._save_reconstruction_workbench_state(video, state)
+                self._set_workbench_task_progress(
+                    int(video_id),
+                    area="reconstruction",
+                    task="sample_cleanup",
+                    status="completed",
+                    stage="complete",
+                    message="Sample cleanup finished.",
+                    percent=100,
+                )
+                return state
+        finally:
+            for temp_path in (restored_wav, blended_wav, leveled_wav):
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def preview_reconstruction_segment(
+        self,
+        video_id: int,
+        *,
+        segment_id: int,
+        performance_mode: bool | None = None,
+    ) -> dict:
+        import soundfile as sf  # type: ignore
+
+        with Session(engine) as session:
+            video = session.get(Video, video_id)
+            if not video:
+                raise ValueError("Video not found")
+            target_segment = session.get(TranscriptSegment, int(segment_id))
+            if not target_segment or int(getattr(target_segment, "video_id", 0) or 0) != int(video_id):
+                raise ValueError("Transcript segment not found.")
+        speaker_id = getattr(target_segment, "speaker_id", None)
+        if speaker_id is None:
+            raise ValueError("The selected segment does not have an assigned speaker.")
+        resolved_performance = self._get_reconstruction_mode(video) == "performance" if performance_mode is None else bool(performance_mode)
+        result = self.generate_reconstruction_speaker_test(
+            video_id,
+            speaker_id=int(speaker_id),
+            text=str(getattr(target_segment, "text", "") or "").strip(),
+            segment_id=int(segment_id),
+            performance_mode=resolved_performance,
+            progress_task="preview_segment",
+        )
+        work_dir = self._reconstruction_workbench_dir(video)
+        source_test_path = work_dir / str(result["audio_filename"])
+        preview_path = self._reconstruction_preview_path(work_dir, int(segment_id))
+        if source_test_path.exists():
+            self._set_workbench_task_progress(
+                int(video_id),
+                area="reconstruction",
+                task="preview_segment",
+                status="running",
+                stage="finalize",
+                message="Finalizing the segment preview audio...",
+                percent=97,
+            )
+            shutil.copyfile(source_test_path, preview_path)
+        self._set_workbench_task_progress(
+            int(video_id),
+            area="reconstruction",
+            task="preview_segment",
+            status="completed",
+            stage="complete",
+            message="Segment preview is ready.",
+            percent=100,
+        )
+        return {
+            "segment_id": int(segment_id),
+            "speaker_id": int(speaker_id),
+            "mode": str(result.get("mode") or ("performance" if resolved_performance else "basic")),
+            "text": str(result.get("text") or ""),
+            "audio_filename": preview_path.name,
+            "detail": str(result.get("detail") or ""),
+        }
+
+    def _load_original_audio_segment(self, source_path: Path, start_time: float, end_time: float):
+        import soundfile as sf  # type: ignore
+
+        temp_path = source_path.parent / f"fallback_{int(start_time * 1000)}_{int(end_time * 1000)}.wav"
+        try:
+            self._write_audio_clip(source_path, temp_path, start_time, end_time)
+            wav, sr = sf.read(str(temp_path), dtype="float32")
+            if getattr(wav, "ndim", 1) > 1:
+                wav = wav.mean(axis=1)
+            return wav, int(sr)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def _reconstruction_token_rate_hz(self, model_name: str) -> int:
+        name = str(model_name or "").lower()
+        if "25hz" in name:
+            return 25
+        return 12
+
+    def _reconstruction_sampling_enabled(self) -> bool:
+        do_sample_env = (os.getenv("RECONSTRUCTION_DO_SAMPLE") or "false").strip().lower()
+        return do_sample_env in {"1", "true", "yes", "on"}
+
+    def _reconstruction_batch_size(self, use_cuda: bool) -> int:
+        default_size = "6" if use_cuda else "2"
+        try:
+            return max(1, min(12, int((os.getenv("RECONSTRUCTION_BATCH_SIZE") or default_size).strip() or default_size)))
+        except Exception:
+            return 6 if use_cuda else 2
+
+    def _reconstruction_batch_token_budget(self, use_cuda: bool) -> int:
+        default_budget = "900" if use_cuda else "320"
+        try:
+            budget = int((os.getenv("RECONSTRUCTION_BATCH_TOKEN_BUDGET") or default_budget).strip() or default_budget)
+        except Exception:
+            budget = 900 if use_cuda else 320
+        budget = max(96, min(4096, budget))
+        if not use_cuda:
+            return budget
+        try:
+            import torch  # type: ignore
+
+            if str(self.device or "") == "cuda" and torch.cuda.is_available():
+                free_bytes, _ = torch.cuda.mem_get_info()
+                free_mb = float(free_bytes) / (1024.0 * 1024.0)
+                if free_mb < 6000:
+                    budget = min(budget, 220)
+                elif free_mb < 9000:
+                    budget = min(budget, 360)
+                elif free_mb < 12000:
+                    budget = min(budget, 520)
+        except Exception:
+            pass
+        return budget
+
+    def _reconstruction_batch_duration_budget(self, use_cuda: bool) -> float:
+        default_budget = "9.0" if use_cuda else "3.5"
+        try:
+            budget = float((os.getenv("RECONSTRUCTION_BATCH_DURATION_BUDGET_SECONDS") or default_budget).strip() or default_budget)
+        except Exception:
+            budget = 9.0 if use_cuda else 3.5
+        return max(0.5, min(60.0, budget))
+
+    def _estimate_reconstruction_item_cost(self, model_name: str, target_seconds: float, text: str) -> int:
+        base = self._estimate_reconstruction_max_new_tokens(model_name, target_seconds, text)
+        words = len([token for token in str(text or "").split() if token])
+        return int(base + max(0, words * 2))
+
+    def _release_reconstruction_cuda_cache(self) -> None:
+        if str(self.device or "") != "cuda":
+            return
+        try:
+            import torch  # type: ignore
+
+            if not torch.cuda.is_available():
+                return
+            gc.collect()
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                try:
+                    torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _should_reconstruct_with_tts(self, text: str, target_seconds: float) -> bool:
+        text = str(text or "").strip()
+        if not text:
+            return False
+        words = len([token for token in text.split() if token])
+        if target_seconds <= 0.22:
+            return False
+        if words <= 1 and target_seconds <= 0.45:
+            return False
+        if words <= 2 and target_seconds <= 0.35:
+            return False
+        return True
+
+    def _should_force_original_reconstruction_segment(self, text: str, target_seconds: float) -> bool:
+        text = str(text or "").strip()
+        words = len([token for token in text.split() if token])
+        chars = len(text)
+        try:
+            max_seconds = float((os.getenv("RECONSTRUCTION_FALLBACK_SEGMENT_SECONDS") or "14").strip() or "14")
+        except Exception:
+            max_seconds = 14.0
+        try:
+            max_words = int((os.getenv("RECONSTRUCTION_FALLBACK_SEGMENT_WORDS") or "72").strip() or "72")
+        except Exception:
+            max_words = 72
+        try:
+            max_chars = int((os.getenv("RECONSTRUCTION_FALLBACK_SEGMENT_CHARS") or "440").strip() or "440")
+        except Exception:
+            max_chars = 440
+        return float(target_seconds) >= max_seconds or words >= max_words or chars >= max_chars
+
+    def _should_isolate_reconstruction_segment(self, text: str, target_seconds: float) -> bool:
+        text = str(text or "").strip()
+        words = len([token for token in text.split() if token])
+        chars = len(text)
+        try:
+            isolate_seconds = float((os.getenv("RECONSTRUCTION_ISOLATE_SEGMENT_SECONDS") or "7.5").strip() or "7.5")
+        except Exception:
+            isolate_seconds = 7.5
+        try:
+            isolate_words = int((os.getenv("RECONSTRUCTION_ISOLATE_SEGMENT_WORDS") or "34").strip() or "34")
+        except Exception:
+            isolate_words = 34
+        try:
+            isolate_chars = int((os.getenv("RECONSTRUCTION_ISOLATE_SEGMENT_CHARS") or "220").strip() or "220")
+        except Exception:
+            isolate_chars = 220
+        return float(target_seconds) >= isolate_seconds or words >= isolate_words or chars >= isolate_chars
+
+    def _configure_reconstruction_model_runtime(self, tts_model) -> None:
+        sampling_enabled = self._reconstruction_sampling_enabled()
+
+        try:
+            defaults = dict(getattr(tts_model, "generate_defaults", {}) or {})
+            defaults["do_sample"] = sampling_enabled
+            defaults["subtalker_dosample"] = sampling_enabled
+            if sampling_enabled:
+                defaults.setdefault("top_k", 24)
+                defaults.setdefault("top_p", 0.92)
+                defaults.setdefault("temperature", 0.7)
+                defaults.setdefault("subtalker_top_k", 24)
+                defaults.setdefault("subtalker_top_p", 0.92)
+                defaults.setdefault("subtalker_temperature", 0.7)
+            else:
+                defaults["top_k"] = None
+                defaults["top_p"] = None
+                defaults["temperature"] = None
+                defaults["subtalker_top_k"] = None
+                defaults["subtalker_top_p"] = None
+                defaults["subtalker_temperature"] = None
+            tts_model.generate_defaults = defaults
+        except Exception:
+            pass
+
+        try:
+            generation_config = getattr(getattr(tts_model, "model", None), "generation_config", None)
+            if generation_config is not None:
+                generation_config.do_sample = sampling_enabled
+                if not sampling_enabled:
+                    for attr in ("top_k", "top_p", "temperature"):
+                        if hasattr(generation_config, attr):
+                            setattr(generation_config, attr, None)
+        except Exception:
+            pass
+
+    def _get_reconstruction_tts_model(self, model_name: str):
+        import torch  # type: ignore
+        from qwen_tts import Qwen3TTSModel  # type: ignore
+
+        self._ensure_device()
+        use_cuda = str(self.device or "") == "cuda" and torch.cuda.is_available() and not self._cuda_recovery_pending
+        dtype = torch.bfloat16 if use_cuda else torch.float32
+        device_label = "cuda:0" if use_cuda else "cpu"
+        cache_key = (str(model_name or "").strip(), device_label, str(dtype))
+
+        with self._reconstruction_tts_model_guard:
+            if self._reconstruction_tts_model is not None and self._reconstruction_tts_model_cache_key == cache_key:
+                self._configure_reconstruction_model_runtime(self._reconstruction_tts_model)
+                return self._reconstruction_tts_model, use_cuda, True
+
+            self._reconstruction_tts_model = None
+            self._reconstruction_tts_model_cache_key = None
+            gc.collect()
+
+            kwargs = {
+                "device_map": device_label,
+                "dtype": dtype,
+            }
+            if use_cuda:
+                kwargs["attn_implementation"] = "flash_attention_2"
+            try:
+                tts_model = Qwen3TTSModel.from_pretrained(model_name, **kwargs)
+            except Exception:
+                kwargs.pop("attn_implementation", None)
+                tts_model = Qwen3TTSModel.from_pretrained(model_name, **kwargs)
+            self._configure_reconstruction_model_runtime(tts_model)
+            self._reconstruction_tts_model = tts_model
+            self._reconstruction_tts_model_cache_key = cache_key
+            return tts_model, use_cuda, False
+
+    def _estimate_reconstruction_max_new_tokens(self, model_name: str, target_seconds: float, text: str) -> int:
+        rate_hz = self._reconstruction_token_rate_hz(model_name)
+        words = len([token for token in str(text or "").split() if token])
+        chars = len(str(text or "").strip())
+        duration_budget = int(math.ceil(max(0.20, float(target_seconds)) * rate_hz * 2.25))
+        text_budget = int(math.ceil(words * 5.0 + max(0, chars - (words * 4)) * 0.15))
+        token_budget = max(24, duration_budget + text_budget + 12)
+        return max(24, min(512, token_budget))
+
+    def _reconstruction_generation_kwargs(self, model_name: str, target_seconds: float, text: str) -> dict:
+        do_sample = self._reconstruction_sampling_enabled()
+        kwargs = {
+            "max_new_tokens": self._estimate_reconstruction_max_new_tokens(model_name, target_seconds, text),
+            "non_streaming_mode": True,
+            "do_sample": do_sample,
+            "repetition_penalty": 1.02,
+        }
+        if do_sample:
+            kwargs.update({
+                "top_k": 24,
+                "top_p": 0.92,
+                "temperature": 0.7,
+                "subtalker_dosample": True,
+                "subtalker_top_k": 24,
+                "subtalker_top_p": 0.92,
+                "subtalker_temperature": 0.7,
+            })
+        else:
+            kwargs.update({
+                "subtalker_dosample": False,
+            })
+        return kwargs
+
+    def _synthesize_reconstruction_batch(self, tts_model, prompts: list, texts: list[str], target_durations: list[float], model_name: str):
+        if not texts:
+            return [], 44100
+        kwargs = self._reconstruction_generation_kwargs(
+            model_name,
+            max(target_durations or [0.25]),
+            " ".join(texts[:4]),
+        )
+        kwargs["max_new_tokens"] = max(
+            self._estimate_reconstruction_max_new_tokens(model_name, duration, text)
+            for duration, text in zip(target_durations, texts)
+        )
+        wavs, sample_rate = tts_model.generate_voice_clone(
+            text=texts,
+            language=["Auto"] * len(texts),
+            voice_clone_prompt=prompts,
+            **kwargs,
+        )
+        if not wavs:
+            raise RuntimeError("Qwen3-TTS returned no audio for batch synthesis.")
+        return wavs, int(sample_rate)
+
+    def _synthesize_reconstruction_segment(self, tts_model, prompt, text: str, *, model_name: str, target_seconds: float):
+        wavs, sample_rate = self._synthesize_reconstruction_batch(
+            tts_model,
+            [prompt],
+            [text],
+            [target_seconds],
+            model_name,
+        )
+        return wavs[0], int(sample_rate)
+
+    def _assemble_reconstructed_audio(self, sample_rate: int, total_duration: float, placements: list[dict]):
+        import numpy as np
+
+        total_samples = max(1, int(round(max(0.01, total_duration) * sample_rate)))
+        canvas = np.zeros(total_samples, dtype=np.float32)
+        fade_samples = max(1, int(sample_rate * 0.05))
+
+        for item in placements:
+            wav = np.asarray(item["wav"], dtype=np.float32).reshape(-1)
+            start_idx = max(0, int(round(float(item["start_time"]) * sample_rate)))
+            end_idx = min(total_samples, start_idx + wav.size)
+            if end_idx <= start_idx:
+                continue
+            wav = wav[: end_idx - start_idx]
+            overlap = max(0, min(fade_samples, canvas[start_idx:end_idx].size, wav.size))
+            if overlap > 0:
+                fade_in = np.linspace(0.0, 1.0, overlap, dtype=np.float32)
+                fade_out = 1.0 - fade_in
+                canvas[start_idx:start_idx + overlap] = (
+                    canvas[start_idx:start_idx + overlap] * fade_out + wav[:overlap] * fade_in
+                )
+                canvas[start_idx + overlap:end_idx] = wav[overlap:]
+            else:
+                canvas[start_idx:end_idx] = wav
+
+        peak = float(np.max(np.abs(canvas))) if canvas.size else 0.0
+        if peak > 0.98:
+            canvas = canvas / peak * 0.97
+        return canvas
+
     def _update_channel_sync_progress(
         self,
         channel_id: int,
@@ -5252,6 +10953,127 @@ class IngestionService:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(normalized_url, download=False)
         return info if isinstance(info, dict) else None
+
+    def _youtube_data_api_key(self) -> str:
+        return str(os.getenv("YOUTUBE_DATA_API_KEY") or "").strip()
+
+    def _youtube_data_api_request(
+        self,
+        path: str,
+        *,
+        query: dict | None = None,
+        timeout: int = 30,
+    ) -> dict:
+        api_key = self._youtube_data_api_key()
+        if not api_key:
+            raise RuntimeError("YouTube Data API key is not configured.")
+        params = {k: v for k, v in (query or {}).items() if v is not None}
+        params["key"] = api_key
+        url = f"{YOUTUBE_DATA_API_BASE_URL}{path}?{urllib.parse.urlencode(params, doseq=True)}"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                payload = resp.read()
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail = ""
+            raise RuntimeError(f"YouTube Data API request failed: HTTP {e.code} {detail[:400]}".strip())
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except Exception as e:
+            raise RuntimeError(f"Invalid YouTube Data API response: {e}")
+
+    @staticmethod
+    def _parse_youtube_iso8601_duration_seconds(value: str | None) -> int | None:
+        text = str(value or "").strip().upper()
+        if not text:
+            return None
+        match = re.fullmatch(
+            r"P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?",
+            text,
+        )
+        if not match:
+            return None
+        days = int(match.group("days") or 0)
+        hours = int(match.group("hours") or 0)
+        minutes = int(match.group("minutes") or 0)
+        seconds = int(match.group("seconds") or 0)
+        total = days * 86400 + hours * 3600 + minutes * 60 + seconds
+        return total if total > 0 else 0
+
+    @staticmethod
+    def _parse_youtube_api_published_at(value: str | None) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _best_youtube_api_thumbnail(snippet: dict | None) -> str | None:
+        thumbs = (snippet or {}).get("thumbnails") or {}
+        for key in ("maxres", "standard", "high", "medium", "default"):
+            entry = thumbs.get(key)
+            if isinstance(entry, dict):
+                url = str(entry.get("url") or "").strip()
+                if url:
+                    return url
+        return None
+
+    def _fetch_youtube_data_api_video_metadata_batch(self, youtube_ids: list[str]) -> dict[str, dict]:
+        ids = []
+        seen = set()
+        for raw_id in youtube_ids or []:
+            youtube_id = str(raw_id or "").strip()
+            if not youtube_id or youtube_id in seen:
+                continue
+            seen.add(youtube_id)
+            ids.append(youtube_id)
+        if not ids or not self._youtube_data_api_key():
+            return {}
+
+        metadata_by_id: dict[str, dict] = {}
+        for start in range(0, len(ids), 50):
+            chunk = ids[start:start + 50]
+            data = self._youtube_data_api_request(
+                "/videos",
+                query={
+                    "part": "snippet,contentDetails,statistics",
+                    "id": ",".join(chunk),
+                    "maxResults": min(50, len(chunk)),
+                },
+                timeout=45,
+            )
+            items = data.get("items") or []
+            for item in items:
+                video_id = str(item.get("id") or "").strip()
+                if not video_id:
+                    continue
+                snippet = item.get("snippet") or {}
+                stats = item.get("statistics") or {}
+                content_details = item.get("contentDetails") or {}
+                view_count = None
+                raw_view_count = stats.get("viewCount")
+                if raw_view_count not in (None, ""):
+                    try:
+                        view_count = int(raw_view_count)
+                    except Exception:
+                        view_count = None
+                metadata_by_id[video_id] = {
+                    "id": video_id,
+                    "title": str(snippet.get("title") or "").strip() or None,
+                    "description": snippet.get("description"),
+                    "published_at": self._parse_youtube_api_published_at(snippet.get("publishedAt")),
+                    "duration": self._parse_youtube_iso8601_duration_seconds(content_details.get("duration")),
+                    "view_count": view_count,
+                    "thumbnail": self._best_youtube_api_thumbnail(snippet),
+                }
+        return metadata_by_id
 
     def _classify_tiktok_refresh_error(self, exc: Exception) -> str:
         lowered = str(exc or "").strip().lower()
@@ -5499,6 +11321,7 @@ class IngestionService:
                     description=info.get("description"),
                     published_at=self._extract_published_at_from_info(info),
                     duration=info.get("duration"),
+                    view_count=info.get("view_count"),
                     thumbnail_url=self._best_thumbnail_url(info),
                     status="pending",
                 )
@@ -5518,6 +11341,9 @@ class IngestionService:
                     changed = True
                 if not existing_video.duration and info.get("duration"):
                     existing_video.duration = info.get("duration")
+                    changed = True
+                if info.get("view_count") is not None and existing_video.view_count != info.get("view_count"):
+                    existing_video.view_count = info.get("view_count")
                     changed = True
                 thumb = self._best_thumbnail_url(info)
                 if thumb and not existing_video.thumbnail_url:
@@ -5708,6 +11534,26 @@ class IngestionService:
                 )
 
             log(f"Total unique entries collected: {len(all_entries)}")
+            api_metadata_by_id: dict[str, dict] = {}
+            if all_entries and self._youtube_data_api_key():
+                try:
+                    self._update_channel_sync_progress(
+                        channel_id,
+                        status="refreshing",
+                        detail=f"Enriching {len(all_entries)} videos with YouTube API metadata...",
+                        progress=24,
+                        completed_items=0,
+                        total_items=len(all_entries),
+                    )
+                    api_metadata_by_id = self._fetch_youtube_data_api_video_metadata_batch(
+                        [str(entry.get("id") or "").strip() for entry in all_entries]
+                    )
+                    log(
+                        f"YouTube API metadata enrichment returned {len(api_metadata_by_id)}/{len(all_entries)} "
+                        f"videos for channel {channel.name}."
+                    )
+                except Exception as e:
+                    log(f"YouTube API metadata enrichment skipped for channel {channel.name}: {e}")
             self._update_channel_sync_progress(
                 channel_id,
                 status="refreshing",
@@ -5723,37 +11569,61 @@ class IngestionService:
                 if not yt_id:
                     continue
 
+                api_meta = api_metadata_by_id.get(str(yt_id))
+                pub_date = self._extract_published_at_from_info(api_meta or info)
+                thumbnail_url = (api_meta or {}).get("thumbnail") or self._best_thumbnail_url(info)
+                title = (api_meta or {}).get("title") or info.get('title') or 'Unknown Title'
+                description = (api_meta or {}).get("description") or info.get('description')
+                duration = (api_meta or {}).get("duration")
+                if duration is None:
+                    duration = info.get('duration')
+                view_count = (api_meta or {}).get("view_count")
+                if view_count is None:
+                    view_count = info.get('view_count')
+
                 existing_video = session.exec(select(Video).where(Video.youtube_id == yt_id)).first()
                 if not existing_video:
-                    pub_date = self._extract_published_at_from_info(info)
-
-                    # Get best thumbnail
-                    thumbnails = info.get('thumbnails', [])
-                    thumbnail_url = None
-                    if thumbnails:
-                        for t in reversed(thumbnails):
-                            if t.get('url'):
-                                thumbnail_url = t['url']
-                                break
-
                     video = Video(
                         youtube_id=yt_id,
                         channel_id=channel.id,
-                        title=info.get('title', 'Unknown Title'),
-                        description=info.get('description'),
+                        title=title,
+                        description=description,
                         published_at=pub_date,
-                        duration=info.get('duration'),
+                        duration=duration,
+                        view_count=view_count,
                         thumbnail_url=thumbnail_url,
                         status="pending"
                     )
                     session.add(video)
                     session.flush()
-                    try:
-                        self.populate_placeholder_transcript(session, video)
-                    except Exception as e:
-                        log_verbose(f"  Placeholder transcript skipped for {yt_id}: {e}")
+                    # Surface newly discovered videos to the UI immediately
+                    # instead of waiting for the full channel scan to finish.
+                    session.commit()
                     new_video_count += 1
                     log(f"  + New: {info.get('title', 'Unknown')[:60]}")
+                else:
+                    changed = False
+                    normalized_title = str(title or '').strip()
+                    if normalized_title and existing_video.title != normalized_title:
+                        existing_video.title = normalized_title
+                        changed = True
+                    if description and not existing_video.description:
+                        existing_video.description = description
+                        changed = True
+                    if duration and not existing_video.duration:
+                        existing_video.duration = duration
+                        changed = True
+                    if view_count is not None and existing_video.view_count != view_count:
+                        existing_video.view_count = view_count
+                        changed = True
+                    if thumbnail_url and not existing_video.thumbnail_url:
+                        existing_video.thumbnail_url = thumbnail_url
+                        changed = True
+                    if pub_date and not existing_video.published_at:
+                        existing_video.published_at = pub_date
+                        changed = True
+                    if changed:
+                        session.add(existing_video)
                 if idx == 1 or idx == len(all_entries) or idx % 25 == 0:
                     self._update_channel_sync_progress(
                         channel_id,
@@ -5768,6 +11638,11 @@ class IngestionService:
                 log(f"WARNING: No video entries found for channel {channel.name}. YouTube may be blocking requests.")
 
             channel.last_updated = datetime.now()
+            channel.status = "active"
+            channel.sync_status_detail = "Initial import complete. Finishing metadata backfill..."
+            channel.sync_progress = 72
+            channel.sync_completed_items = len(all_entries)
+            channel.sync_total_items = len(all_entries)
             session.add(channel)
             session.commit()
             log(f"Channel scan complete. {len(all_entries)} total on YouTube, {new_video_count} new videos added.")
@@ -5786,6 +11661,7 @@ class IngestionService:
                     progress_start=72,
                     progress_end=88,
                     detail_prefix="Backfilling publication dates and metadata",
+                    status="active",
                 )
 
             # Then continue with a larger pass so the whole channel converges.
@@ -5805,6 +11681,7 @@ class IngestionService:
                     progress_start=88,
                     progress_end=98,
                     detail_prefix="Finishing metadata backfill",
+                    status="active",
                 )
 
             channel = session.get(Channel, channel_id)
@@ -5912,11 +11789,11 @@ class IngestionService:
         progress_start: int = 80,
         progress_end: int = 95,
         detail_prefix: str = "Backfilling publication dates and metadata",
+        status: str | None = None,
     ):
-        """Fetch published dates for videos that have NULL published_at.
-        Runs newest-first. If max_items is None, uses env CHANNEL_DATE_BACKFILL_MAX_ITEMS.
-        Use max_items <= 0 to process all missing items."""
+        """Backfill missing video metadata, including view counts, newest-first."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        from sqlalchemy import or_
 
         if max_items is None:
             try:
@@ -5937,7 +11814,16 @@ class IngestionService:
         with Session(engine) as session:
             query = (
                 select(Video)
-                .where(Video.channel_id == channel_id, Video.published_at.is_(None))
+                .where(
+                    Video.channel_id == channel_id,
+                    or_(
+                        Video.published_at.is_(None),
+                        Video.description.is_(None),
+                        Video.duration.is_(None),
+                        Video.thumbnail_url.is_(None),
+                        Video.view_count.is_(None),
+                    ),
+                )
                 .order_by(Video.id.desc())
             )
             if max_items and max_items > 0:
@@ -5948,12 +11834,14 @@ class IngestionService:
             log(f"Backfilling dates for {len(videos)} videos (channel {channel_id}, workers={workers})...")
             self._update_channel_sync_progress(
                 channel_id,
-                status="refreshing",
+                status=status,
                 detail=f"{detail_prefix} (fetching 0/{len(videos)})...",
                 progress=progress_start,
                 completed_items=0,
                 total_items=len(videos),
             )
+            channel = session.get(Channel, channel_id)
+            channel_source = (getattr(channel, "source_type", None) or "youtube").strip().lower()
             ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
             ydl_opts = self._apply_ytdlp_auth_opts(ydl_opts, purpose="backfill_dates")
             targets = [
@@ -5964,12 +11852,47 @@ class IngestionService:
                     "need_description": not bool(v.description),
                     "need_duration": not bool(v.duration),
                     "need_thumbnail": not bool(v.thumbnail_url),
+                    "need_placeholder_transcript": (
+                        self._placeholder_captions_enabled()
+                        and not bool(v.transcript_is_placeholder)
+                        and not bool(v.processed)
+                    ),
                 }
                 for v in videos
             ]
+            meta_by_id: dict[int, dict] = {}
+            api_hits = 0
+            if channel_source == "youtube" and self._youtube_data_api_key():
+                try:
+                    self._update_channel_sync_progress(
+                        channel_id,
+                        status=status,
+                        detail=f"{detail_prefix} (YouTube API 0/{len(videos)})...",
+                        progress=progress_start,
+                        completed_items=0,
+                        total_items=len(videos),
+                    )
+                    api_metadata_by_youtube_id = self._fetch_youtube_data_api_video_metadata_batch(
+                        [item["youtube_id"] for item in targets]
+                    )
+                    for item in targets:
+                        api_meta = api_metadata_by_youtube_id.get(item["youtube_id"])
+                        if not api_meta:
+                            continue
+                        seed_meta = dict(api_meta)
+                        seed_meta["placeholder_track"] = None
+                        meta_by_id[item["id"]] = seed_meta
+                        api_hits += 1
+                    log(
+                        f"YouTube API backfill metadata returned {api_hits}/{len(targets)} videos "
+                        f"for channel {channel_id}."
+                    )
+                except Exception as e:
+                    log(f"YouTube API backfill metadata fetch failed for channel {channel_id}: {e}")
 
             def _fetch_meta(item: dict):
                 vid = item["youtube_id"]
+                seed_meta = dict(meta_by_id.get(item["id"]) or {})
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(
@@ -5977,23 +11900,42 @@ class IngestionService:
                             download=False,
                         )
                     if not info:
+                        if seed_meta:
+                            return item["id"], seed_meta, None
                         return item["id"], None, "no_info"
-                    return item["id"], {
+                    seed_meta.update({
                         "upload_date": info.get("upload_date"),
                         "release_date": info.get("release_date"),
                         "release_timestamp": info.get("release_timestamp"),
                         "timestamp": info.get("timestamp"),
-                        "description": info.get("description"),
-                        "duration": info.get("duration"),
-                        "thumbnail": info.get("thumbnail"),
-                    }, None
+                        "description": info.get("description") or seed_meta.get("description"),
+                        "duration": info.get("duration") if info.get("duration") is not None else seed_meta.get("duration"),
+                        "view_count": info.get("view_count") if info.get("view_count") is not None else seed_meta.get("view_count"),
+                        "thumbnail": info.get("thumbnail") or seed_meta.get("thumbnail"),
+                        "placeholder_track": self._choose_caption_track(info) if item.get("need_placeholder_transcript") else seed_meta.get("placeholder_track"),
+                    })
+                    return item["id"], seed_meta, None
                 except Exception as e:
+                    if seed_meta:
+                        return item["id"], seed_meta, None
                     return item["id"], None, str(e)
 
-            meta_by_id = {}
             failures = 0
+            ytdlp_targets = [
+                item for item in targets
+                if item["id"] not in meta_by_id or item.get("need_placeholder_transcript")
+            ]
+            if ytdlp_targets:
+                self._update_channel_sync_progress(
+                    channel_id,
+                    status=status,
+                    detail=f"{detail_prefix} (yt-dlp fallback 0/{len(ytdlp_targets)})...",
+                    progress=progress_start + int(max(1, (progress_end - progress_start) * 0.1)),
+                    completed_items=0,
+                    total_items=len(targets),
+                )
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                future_to_target = {ex.submit(_fetch_meta, item): item for item in targets}
+                future_to_target = {ex.submit(_fetch_meta, item): item for item in ytdlp_targets}
                 for idx, fut in enumerate(as_completed(future_to_target), start=1):
                     item = future_to_target[fut]
                     try:
@@ -6005,18 +11947,18 @@ class IngestionService:
                     else:
                         failures += 1
                         log_verbose(f"  Backfill failed for {item['youtube_id']}: {err}")
-                    if idx == 1 or idx == len(targets) or idx % 25 == 0:
+                    if idx == 1 or idx == len(ytdlp_targets) or idx % 25 == 0:
                         fetch_progress = progress_start + int((idx / max(1, len(targets))) * max(1, (progress_end - progress_start) * 0.45))
                         self._update_channel_sync_progress(
                             channel_id,
-                            status="refreshing",
-                            detail=f"{detail_prefix} (fetching {idx}/{len(targets)})...",
+                            status=status,
+                            detail=f"{detail_prefix} (yt-dlp fallback {idx}/{len(ytdlp_targets)})...",
                             progress=fetch_progress,
-                            completed_items=idx,
+                            completed_items=min(len(targets), api_hits + idx),
                             total_items=len(targets),
                         )
                     if idx % 200 == 0:
-                        log(f"  Backfill fetch progress: {idx}/{len(targets)} videos checked...")
+                        log(f"  Backfill yt-dlp fallback progress: {idx}/{len(ytdlp_targets)} videos checked...")
 
             filled = 0
             touched = 0
@@ -6041,9 +11983,18 @@ class IngestionService:
                 if item["need_duration"] and meta.get("duration"):
                     video.duration = meta["duration"]
                     changed = True
+                if meta.get("view_count") is not None and video.view_count != meta.get("view_count"):
+                    video.view_count = meta["view_count"]
+                    changed = True
                 if item["need_thumbnail"] and meta.get("thumbnail"):
                     video.thumbnail_url = meta["thumbnail"]
                     changed = True
+                if item["need_placeholder_transcript"] and meta.get("placeholder_track"):
+                    try:
+                        if self._populate_placeholder_transcript_from_track(session, video, meta.get("placeholder_track")):
+                            changed = True
+                    except Exception as e:
+                        log_verbose(f"  Placeholder transcript backfill skipped for {video.youtube_id}: {e}")
 
                 if changed:
                     session.add(video)
@@ -6055,7 +12006,7 @@ class IngestionService:
                     write_span = max(1, progress_end - write_base)
                     self._update_channel_sync_progress(
                         channel_id,
-                        status="refreshing",
+                        status=status,
                         detail=f"{detail_prefix} (writing {idx}/{len(targets)})...",
                         progress=write_base + int((idx / max(1, len(targets))) * write_span),
                         completed_items=idx,
@@ -6066,7 +12017,7 @@ class IngestionService:
             session.commit()
             self._update_channel_sync_progress(
                 channel_id,
-                status="refreshing",
+                status=status,
                 detail=f"{detail_prefix} complete.",
                 progress=progress_end,
                 completed_items=len(targets),
@@ -6074,7 +12025,7 @@ class IngestionService:
             )
             log(
                 f"Backfill complete. Filled dates for {filled}/{len(videos)} videos. "
-                f"Metadata fetch failures: {failures}."
+                f"YouTube API hits: {api_hits}. Metadata fetch failures: {failures}."
             )
 
     def sanitize_filename(self, name: str) -> str:
@@ -6097,12 +12048,23 @@ class IngestionService:
                     return candidate
         return None
 
-    def get_audio_path(self, video: Video) -> Path:
+    def get_audio_path(self, video: Video, purpose: Literal["processing", "playback"] = "processing") -> Path:
         """Get standard audio path for a video.
         Returns the existing audio file if found (any format), otherwise
         returns the default .m4a path for new downloads."""
         if (video.media_source_type or "youtube") == "upload":
-            manual_path = self.get_manual_media_absolute_path(video.manual_media_path)
+            if purpose == "playback" and bool(getattr(video, "reconstruction_use_for_playback", False)):
+                rel = str(getattr(video, "reconstruction_audio_path", "") or "").strip()
+                if rel:
+                    reconstruction_path = self.get_manual_media_absolute_path(rel)
+                    if reconstruction_path is not None and reconstruction_path.exists():
+                        return reconstruction_path
+            cleaned_path = self.get_voicefixer_cleaned_absolute_path(video)
+            apply_scope = self._voicefixer_apply_scope(video)
+            use_cleaned_for_purpose = apply_scope == "both" or apply_scope == purpose
+            if use_cleaned_for_purpose and cleaned_path is not None and cleaned_path.exists():
+                return cleaned_path
+            manual_path = self.get_original_manual_media_path(video)
             if manual_path is not None:
                 return manual_path
 
@@ -6717,31 +12679,37 @@ class IngestionService:
         # Keep within sane bounds.
         return max(0.0, min(value, 30.0))
 
+    def _get_provider_default_model(self, provider: str) -> str:
+        normalized = clone_svc._normalize_provider(provider) or "ollama"
+        if normalized == "nvidia_nim":
+            return (os.getenv("NVIDIA_NIM_MODEL") or "moonshotai/kimi-k2.5").strip()
+        if normalized == "openai":
+            return (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+        if normalized == "anthropic":
+            return (os.getenv("ANTHROPIC_MODEL") or "claude-3-5-sonnet-latest").strip()
+        if normalized == "gemini":
+            return (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+        if normalized == "groq":
+            return (os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile").strip()
+        if normalized == "openrouter":
+            return (os.getenv("OPENROUTER_MODEL") or "openai/gpt-4o-mini").strip()
+        if normalized == "xai":
+            return (os.getenv("XAI_MODEL") or "grok-2").strip()
+        return (os.getenv("OLLAMA_MODEL") or "mistral").strip()
+
+    def resolve_clone_llm_target(
+        self,
+        *,
+        provider_override: str | None = None,
+        model_override: str | None = None,
+    ) -> tuple[str, str, str]:
+        provider = clone_svc._normalize_provider(provider_override) or self._get_llm_provider()
+        model = str(model_override or "").strip() or self._get_provider_default_model(provider)
+        return provider, model, f"{provider}:{model}"
+
     def _get_configured_llm_model_name(self) -> str:
-        provider = self._get_llm_provider()
-        if provider == "nvidia_nim":
-            model = (os.getenv("NVIDIA_NIM_MODEL") or "moonshotai/kimi-k2.5").strip()
-            return f"nvidia_nim:{model or 'moonshotai/kimi-k2.5'}"
-        if provider == "openai":
-            model = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
-            return f"openai:{model or 'gpt-4o-mini'}"
-        if provider == "anthropic":
-            model = (os.getenv("ANTHROPIC_MODEL") or "claude-3-5-sonnet-latest").strip()
-            return f"anthropic:{model or 'claude-3-5-sonnet-latest'}"
-        if provider == "gemini":
-            model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
-            return f"gemini:{model or 'gemini-2.5-flash'}"
-        if provider == "groq":
-            model = (os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile").strip()
-            return f"groq:{model or 'llama-3.3-70b-versatile'}"
-        if provider == "openrouter":
-            model = (os.getenv("OPENROUTER_MODEL") or "openai/gpt-4o-mini").strip()
-            return f"openrouter:{model or 'openai/gpt-4o-mini'}"
-        if provider == "xai":
-            model = (os.getenv("XAI_MODEL") or "grok-2").strip()
-            return f"xai:{model or 'grok-2'}"
-        model = (os.getenv("OLLAMA_MODEL") or "mistral").strip()
-        return f"ollama:{model or 'mistral'}"
+        _provider, _model, target_name = self.resolve_clone_llm_target()
+        return target_name
 
     def _extract_openai_chat_text(self, raw: str) -> str:
         try:
@@ -6842,6 +12810,7 @@ class IngestionService:
         self,
         prompt: str,
         *,
+        model_override: str | None = None,
         temperature: float = 0.2,
         num_predict: int = 180,
         timeout_seconds: int = 90,
@@ -6851,7 +12820,7 @@ class IngestionService:
 
         api_key = (os.getenv("ANTHROPIC_API_KEY") or "").strip()
         base_url = (os.getenv("ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
-        model = (os.getenv("ANTHROPIC_MODEL") or "claude-3-5-sonnet-latest").strip()
+        model = str(model_override or "").strip() or (os.getenv("ANTHROPIC_MODEL") or "claude-3-5-sonnet-latest").strip()
 
         if not api_key:
             raise RuntimeError("Anthropic API key is not configured. Set ANTHROPIC_API_KEY in Settings.")
@@ -6910,6 +12879,7 @@ class IngestionService:
         self,
         prompt: str,
         *,
+        model_override: str | None = None,
         temperature: float = 0.2,
         num_predict: int = 180,
         timeout_seconds: int = 90,
@@ -6920,7 +12890,7 @@ class IngestionService:
 
         api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
         base_url = (os.getenv("GEMINI_BASE_URL") or "https://generativelanguage.googleapis.com").rstrip("/")
-        model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+        model = str(model_override or "").strip() or (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
 
         if not api_key:
             raise RuntimeError("Gemini API key is not configured. Set GEMINI_API_KEY in Settings.")
@@ -6978,6 +12948,7 @@ class IngestionService:
         self,
         prompt: str,
         *,
+        model_override: str | None = None,
         temperature: float = 0.2,
         num_predict: int = 180,
         timeout_seconds: int = 90,
@@ -6990,7 +12961,7 @@ class IngestionService:
             raise RuntimeError("NVIDIA NIM API key is not configured. Set NVIDIA_NIM_API_KEY in Settings.")
 
         base_url = (os.getenv("NVIDIA_NIM_BASE_URL") or "https://integrate.api.nvidia.com").rstrip("/")
-        model = (os.getenv("NVIDIA_NIM_MODEL") or "moonshotai/kimi-k2.5").strip()
+        model = str(model_override or "").strip() or (os.getenv("NVIDIA_NIM_MODEL") or "moonshotai/kimi-k2.5").strip()
         if not model:
             raise RuntimeError("NVIDIA_NIM_MODEL is not configured.")
 
@@ -7118,17 +13089,20 @@ class IngestionService:
         self,
         prompt: str,
         *,
+        provider_override: str | None = None,
+        model_override: str | None = None,
         temperature: float = 0.2,
         num_predict: int = 180,
         timeout_seconds: int = 90,
     ) -> str:
         """Call the configured LLM provider and return raw generated text."""
-        provider = self._get_llm_provider()
+        provider = clone_svc._normalize_provider(provider_override) or self._get_llm_provider()
         if provider == "nvidia_nim":
             if not self._is_llm_enabled():
                 raise RuntimeError("LLM summaries are disabled. Enable LLM in Settings first.")
             return self._nvidia_nim_generate_text(
                 prompt,
+                model_override=model_override,
                 temperature=temperature,
                 num_predict=num_predict,
                 timeout_seconds=timeout_seconds,
@@ -7141,7 +13115,7 @@ class IngestionService:
                 provider_name="OpenAI",
                 base_url=(os.getenv("OPENAI_BASE_URL") or "https://api.openai.com").rstrip("/"),
                 api_key=(os.getenv("OPENAI_API_KEY") or "").strip(),
-                model=(os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip(),
+                model=str(model_override or "").strip() or (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip(),
                 prompt=prompt,
                 temperature=temperature,
                 num_predict=num_predict,
@@ -7153,6 +13127,7 @@ class IngestionService:
                 raise RuntimeError("LLM summaries are disabled. Enable LLM in Settings first.")
             return self._anthropic_generate_text(
                 prompt,
+                model_override=model_override,
                 temperature=temperature,
                 num_predict=num_predict,
                 timeout_seconds=timeout_seconds,
@@ -7163,6 +13138,7 @@ class IngestionService:
                 raise RuntimeError("LLM summaries are disabled. Enable LLM in Settings first.")
             return self._gemini_generate_text(
                 prompt,
+                model_override=model_override,
                 temperature=temperature,
                 num_predict=num_predict,
                 timeout_seconds=timeout_seconds,
@@ -7175,7 +13151,7 @@ class IngestionService:
                 provider_name="Groq",
                 base_url=(os.getenv("GROQ_BASE_URL") or "https://api.groq.com/openai").rstrip("/"),
                 api_key=(os.getenv("GROQ_API_KEY") or "").strip(),
-                model=(os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile").strip(),
+                model=str(model_override or "").strip() or (os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile").strip(),
                 prompt=prompt,
                 temperature=temperature,
                 num_predict=num_predict,
@@ -7189,7 +13165,7 @@ class IngestionService:
                 provider_name="OpenRouter",
                 base_url=(os.getenv("OPENROUTER_BASE_URL") or "https://openrouter.ai/api").rstrip("/"),
                 api_key=(os.getenv("OPENROUTER_API_KEY") or "").strip(),
-                model=(os.getenv("OPENROUTER_MODEL") or "openai/gpt-4o-mini").strip(),
+                model=str(model_override or "").strip() or (os.getenv("OPENROUTER_MODEL") or "openai/gpt-4o-mini").strip(),
                 prompt=prompt,
                 temperature=temperature,
                 num_predict=num_predict,
@@ -7207,7 +13183,7 @@ class IngestionService:
                 provider_name="xAI",
                 base_url=(os.getenv("XAI_BASE_URL") or "https://api.x.ai").rstrip("/"),
                 api_key=(os.getenv("XAI_API_KEY") or "").strip(),
-                model=(os.getenv("XAI_MODEL") or "grok-2").strip(),
+                model=str(model_override or "").strip() or (os.getenv("XAI_MODEL") or "grok-2").strip(),
                 prompt=prompt,
                 temperature=temperature,
                 num_predict=num_predict,
@@ -7228,7 +13204,7 @@ class IngestionService:
             raise RuntimeError("LLM summaries are disabled. Enable LLM in Settings first.")
 
         base_url = (os.getenv("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
-        model = (os.getenv("OLLAMA_MODEL") or "mistral").strip()
+        model = str(model_override or "").strip() or (os.getenv("OLLAMA_MODEL") or "mistral").strip()
         if not model:
             raise RuntimeError("OLLAMA_MODEL is not configured.")
 
@@ -7286,6 +13262,25 @@ class IngestionService:
         if not text:
             raise RuntimeError("Ollama returned an empty response.")
         return text
+
+    def generate_clone_text(
+        self,
+        prompt: str,
+        *,
+        provider_override: str | None = None,
+        model_override: str | None = None,
+        temperature: float = 0.2,
+        num_predict: int = 180,
+        timeout_seconds: int = 90,
+    ) -> str:
+        return self._ollama_generate_text(
+            prompt,
+            provider_override=provider_override,
+            model_override=model_override,
+            temperature=temperature,
+            num_predict=num_predict,
+            timeout_seconds=timeout_seconds,
+        )
 
     def _strip_llm_reasoning_artifacts(self, text: str) -> str:
         """Remove common reasoning/thinking wrappers/preambles from LLM output."""
@@ -8152,12 +14147,12 @@ class IngestionService:
 
     def download_audio(self, video: Video, job_id: int = None) -> Path:
         if (video.media_source_type or "youtube") == "upload":
-            manual_path = self.get_manual_media_absolute_path(video.manual_media_path)
-            if not manual_path or not manual_path.exists():
+            selected_path = self.get_audio_path(video)
+            if not selected_path or not selected_path.exists():
                 raise FileNotFoundError(f"Uploaded media file is missing for video {video.id}")
             if job_id:
                 self._update_job_progress(job_id, 100)
-            return manual_path
+            return selected_path
 
         # Determine paths
         new_output_path = self.get_audio_path(video)
@@ -8212,6 +14207,8 @@ class IngestionService:
                     if job:
                         if job.status == 'paused':
                             raise JobPausedException("Job paused by user")
+                        if job.status == 'cancelled':
+                            raise JobCancelledException("Job cancelled by user")
                         job.progress = pct
                         s.add(job)
                         s.commit()
@@ -8330,10 +14327,10 @@ class IngestionService:
             q = np.asarray(embedding, dtype=np.float32).reshape(-1)
         except Exception:
             return None, None, float("inf")
-        if q.size == 0:
+        if q.size == 0 or not np.all(np.isfinite(q)):
             return None, None, float("inf")
         q_norm = float(np.linalg.norm(q))
-        if q_norm <= 1e-12:
+        if not np.isfinite(q_norm) or q_norm <= 1e-12:
             return None, None, float("inf")
         q = q / q_norm
 
@@ -8349,6 +14346,12 @@ class IngestionService:
         sims = matrix @ q
         if sims.size == 0:
             return None, None, float("inf")
+        finite_mask = np.isfinite(sims)
+        if not np.any(finite_mask):
+            return None, None, float("inf")
+        if not np.all(finite_mask):
+            sims = sims.copy()
+            sims[~finite_mask] = -np.inf
         best_idx = int(np.argmax(sims))
         best_dist = float(1.0 - float(sims[best_idx]))
         best_profile_id = int(profile_ids[best_idx])
@@ -8573,17 +14576,32 @@ class IngestionService:
                         time.sleep(1)
                         continue
 
-                claimed = self._claim_next_queued_job(PROCESS_JOB_TYPES)
+                claimed = self._claim_next_queued_job(PROCESS_JOB_TYPES | VOICEFIXER_JOB_TYPES | RECONSTRUCTION_JOB_TYPES | TRANSCRIPT_REPAIR_JOB_TYPES)
                 if not claimed:
                     time.sleep(2)
                     continue
                 job_id = claimed["id"]
                 video_id = claimed["video_id"]
+                job_type = str(claimed.get("job_type") or "")
+                payload = self._load_job_payload(claimed.get("payload_json"))
                 log_verbose(f"Processing transcription-stage job {job_id} for video {video_id}")
                 baseline_cuda_free_b = 0
 
                 # 2. Process
                 try:
+                    if job_type == "voicefixer_cleanup":
+                        self._handle_voicefixer_job(job_id, video_id, payload)
+                        self._mark_job_success(job_id)
+                        continue
+                    if job_type == "conversation_reconstruct":
+                        self._handle_reconstruction_job(job_id, video_id, payload)
+                        self._mark_job_success(job_id)
+                        continue
+                    if job_type == "transcript_repair":
+                        self._handle_transcript_repair_job(job_id, video_id, payload)
+                        self._mark_job_success(job_id)
+                        continue
+
                     self._ensure_device()
                     if self.device == "cuda":
                         baseline_cuda_free_b = int(self._cuda_memory_snapshot().get("free") or 0)
@@ -8591,12 +14609,14 @@ class IngestionService:
                     segments, _ = self._process_transcribe_phase(video_detached, audio_path, job_id)
                     if execution_mode == "sequential":
                         self._process_diarize_phase(video_detached, audio_path, segments, job_id)
+                        self._record_transcript_optimization_completion(job_id, video_id, payload)
                         self._mark_job_success(job_id)
                         with Session(engine) as session:
                             job = session.get(Job, job_id)
                             if job:
                                 self._cleanup_redo_backup_for_job(job.payload_json)
                         log(f"Pipeline complete for {video_detached.title}.")
+                        self._trigger_semantic_index(video_id)
                     else:
                         diarize_job_id = self._queue_diarize_followup(video_id, job_id)
                         self._mark_process_job_waiting_for_diarize(job_id, diarize_job_id)
@@ -8714,6 +14734,7 @@ class IngestionService:
                     audio_path = self._ensure_audio_ready_for_video(video, job_id=None)
                     segments, _, _ = self._load_raw_transcript_checkpoint(video, audio_path, job_id=job_id)
                     self._process_diarize_phase(video, audio_path, segments, job_id)
+                    self._record_transcript_optimization_completion(job_id, video_id, payload)
                     if parent_job_id:
                         self._finalize_process_job_from_child(parent_job_id, job_id, "completed")
                         with Session(engine) as session:
@@ -8722,6 +14743,7 @@ class IngestionService:
                                 self._cleanup_redo_backup_for_job(parent.payload_json)
                     self._mark_job_success(job_id)
                     log(f"Diarization complete for {video.title}.")
+                    self._trigger_semantic_index(video_id)
                 except JobPausedException:
                     log(f"Diarize job {job_id} paused by user")
                 except Exception as e:
@@ -9137,6 +15159,12 @@ class IngestionService:
             
             # Phase 3: Diarize
             self._process_diarize_phase(video_detached, audio_path, segments, job_id)
+            payload = {}
+            if job_id:
+                with Session(engine) as session:
+                    job = session.get(Job, job_id)
+                    payload = self._load_job_payload(job.payload_json if job else None)
+                self._record_transcript_optimization_completion(job_id, video_id, payload)
 
             # Phase 4: enqueue follow-up funny-moment analysis in its own queue so
             # transcript/diarization throughput is not blocked by LLM/acoustic tasks.
@@ -10028,10 +16056,35 @@ class IngestionService:
         log(f"Processing: {video.title}")
         log("Transcribing...")
 
-        # Resolve requested engine early so we can persist useful metadata even
-        # when we reuse an existing raw transcript and skip decoder inference.
-        selected_engine = self._select_transcription_engine()
-        self._upsert_job_payload_fields(job_id, {"transcription_engine_requested": selected_engine})
+        # Resolve requested engine plus language-aware routing early so we can
+        # persist useful metadata even when we reuse an existing raw transcript.
+        route = self._resolve_transcription_route(video, audio_path, job_id)
+        selected_engine = str(route.get("engine") or self._select_transcription_engine()).strip().lower()
+        route_language = self._normalize_language_code(route.get("language"))
+        self._upsert_job_payload_fields(
+            job_id,
+            {
+                "transcription_engine_requested": route.get("requested_engine"),
+                "transcription_engine_routed": selected_engine,
+                "transcription_route_language": route_language,
+                "transcription_route_language_confidence": route.get("language_confidence"),
+                "transcription_route_language_source": route.get("language_source"),
+                "transcription_route_language_reason": route.get("language_reason"),
+                "transcription_route_multilingual": bool(route.get("multilingual_route_applied")),
+                "transcription_route_whisper_model": route.get("whisper_model_override"),
+                "transcription_route_operational_applied": bool(route.get("operational_route_applied")),
+                "transcription_route_operational_reason": route.get("operational_route_reason"),
+            },
+        )
+        force_retranscription = False
+        if job_id:
+            try:
+                with Session(engine) as session:
+                    job = session.get(Job, job_id)
+                    payload = self._load_job_payload(job.payload_json if job else None)
+                    force_retranscription = bool(payload.get("force_retranscription"))
+            except Exception:
+                force_retranscription = False
 
         # 2. Check for completed raw transcript (checkpoint)
         safe_title = self.sanitize_filename(video.title)
@@ -10122,7 +16175,7 @@ class IngestionService:
 
         min_word_coverage = float(os.getenv("TRANSCRIPTION_MIN_WORD_COVERAGE", "0.90"))
         
-        if raw_transcript_path.exists():
+        if raw_transcript_path.exists() and not force_retranscription:
             try:
                 log(f"Found existing raw transcript at {raw_transcript_path}. Skipping transcription (diarization only).")
                 with open(raw_transcript_path, "r", encoding="utf-8") as f:
@@ -10171,10 +16224,23 @@ class IngestionService:
                     ).strip().lower()
                     if engine_from_raw not in {"parakeet", "whisper"}:
                         engine_from_raw = selected_engine if selected_engine in {"parakeet", "whisper"} else ""
-                    payload_fields = {"transcription_reused_existing": True}
+                    payload_fields = {
+                        "transcription_reused_existing": True,
+                        "transcription_engine_routed": selected_engine,
+                    }
                     if engine_from_raw in {"parakeet", "whisper"}:
                         payload_fields["transcription_engine_used"] = engine_from_raw
                     self._upsert_job_payload_fields(job_id, payload_fields)
+
+                    raw_language = self._normalize_language_code(data.get("transcript_language"))
+                    final_language = raw_language or route_language
+                    if final_language:
+                        with Session(engine) as session:
+                            v = session.get(Video, video.id)
+                            if v:
+                                v.transcript_language = final_language
+                                session.add(v)
+                                session.commit()
 
                     # Ensure progress is 100
                     self._update_job_progress(job_id, 100)
@@ -10184,6 +16250,8 @@ class IngestionService:
             except Exception as e:
                 log(f"Failed to load existing raw transcript: {e}. Will re-transcribe.")
                 existing_segments = []
+        elif raw_transcript_path.exists() and force_retranscription:
+            log(f"Ignoring existing raw transcript at {raw_transcript_path} because force_retranscription is enabled.")
 
         # 3. Check for PARTIAL resumption (temp files)
         partial_data = self._load_partial_transcript(video.id)
@@ -10227,6 +16295,7 @@ class IngestionService:
         # 4. Choose transcription engine and run transcription.
         prefer_parakeet = selected_engine == "parakeet"
         transcribe_engine_used = "whisper"
+        whisper_info = None
 
         # Keep Parakeet transcription from oversubscribing VRAM on long-running workers:
         # always release other GPU-heavy ASR/diarization models before Parakeet transcribe.
@@ -10341,6 +16410,14 @@ class IngestionService:
                 allow_whisper_fallback = (
                     os.getenv("PARAKEET_ALLOW_WHISPER_FALLBACK", "true").strip().lower() == "true"
                 )
+                error_text = str(e).strip()
+                low_timestamp_coverage = "Parakeet returned low word timestamp coverage" in error_text
+                if low_timestamp_coverage and not allow_whisper_fallback:
+                    log(
+                        "Parakeet returned unusable timestamp output; overriding disabled Whisper fallback "
+                        "to preserve transcription progress."
+                    )
+                    allow_whisper_fallback = True
                 if allow_whisper_fallback:
                     log(f"Parakeet unavailable/failed: {e}. Falling back to Whisper.")
                 else:
@@ -10364,6 +16441,7 @@ class IngestionService:
                         "transcription_engine_fallback_reason": str(e)[:500],
                         "transcription_engine_fallback_detail": fallback_reason,
                         "parakeet_allow_whisper_fallback": bool(allow_whisper_fallback),
+                        "parakeet_soft_fallback_override": bool(low_timestamp_coverage),
                     },
                 )
                 if not allow_whisper_fallback:
@@ -10390,13 +16468,31 @@ class IngestionService:
         
         if not prefer_parakeet:
             self._upsert_job_payload_fields(job_id, {"transcription_engine_used": "whisper"})
-            self._load_whisper_model(job_id=job_id, force_float32=False)
-
+            operational_reason = str(route.get("operational_route_reason") or "").strip()
+            if bool(route.get("operational_route_applied")) and operational_reason:
+                self._update_job_status_detail(job_id, operational_reason[:240])
+            whisper_model_override = str(route.get("whisper_model_override") or "").strip() or None
+            self._load_whisper_model(
+                job_id=job_id,
+                force_float32=False,
+                model_size_override=whisper_model_override,
+            )
+            whisper_backend = self._whisper_backend or "faster_whisper"
+            self._upsert_job_payload_fields(
+                job_id,
+                {
+                    "whisper_backend_used": whisper_backend,
+                },
+            )
+            if whisper_backend != "faster_whisper":
+                use_batched = False
             transcribe_params = {
                 "beam_size": beam_size,
                 "vad_filter": vad_filter,
                 "word_timestamps": True,
             }
+            if route_language:
+                transcribe_params["language"] = route_language
             if vad_filter:
                 transcribe_params["vad_parameters"] = {
                     "min_silence_duration_ms": 500,
@@ -10406,7 +16502,7 @@ class IngestionService:
             # On some GPU architectures (e.g. Blackwell), cuBLAS FP16 kernels may fail
             # at inference time even if the model loaded successfully.
             def _run_transcribe(whisper_model, transcribe_path_value, transcribe_params_value, use_batched_value, device):
-                if use_batched_value and device == "cuda":
+                if use_batched_value and device == "cuda" and (self._whisper_backend or "faster_whisper") == "faster_whisper":
                     try:
                         from faster_whisper import BatchedInferencePipeline
                         batched_model = BatchedInferencePipeline(model=whisper_model)
@@ -10431,17 +16527,31 @@ class IngestionService:
             whisper_runtime_device = self._whisper_device or self.device
             try:
                 segments_generator, info = _run_transcribe_with_stage_start(
-                    self.whisper_model, transcribe_path, transcribe_params, use_batched, whisper_runtime_device
+                    self.whisper_model,
+                    transcribe_path,
+                    transcribe_params,
+                    use_batched,
+                    whisper_runtime_device,
                 )
+                whisper_info = info
             except RuntimeError as e:
                 if "CUBLAS" in str(e).upper():
-                    log("cuBLAS error during transcription â€” reloading model with float32...")
+                    log("cuBLAS error during transcription - reloading model with float32...")
                     self._update_job_status_detail(job_id, "Reloading model (GPU compatibility fallback)...")
-                    self._load_whisper_model(job_id=job_id, force_float32=True)
+                    self._load_whisper_model(
+                        job_id=job_id,
+                        force_float32=True,
+                        model_size_override=whisper_model_override,
+                    )
                     whisper_runtime_device = self._whisper_device or self.device
                     segments_generator, info = _run_transcribe_with_stage_start(
-                        self.whisper_model, transcribe_path, transcribe_params, use_batched, whisper_runtime_device
+                        self.whisper_model,
+                        transcribe_path,
+                        transcribe_params,
+                        use_batched,
+                        whisper_runtime_device,
                     )
+                    whisper_info = info
                 else:
                     raise
 
@@ -10465,12 +16575,16 @@ class IngestionService:
                 seg_iter = iter(segments_generator)
             except RuntimeError as e:
                 if "CUBLAS" in str(e).upper():
-                    log("cuBLAS error starting transcription generator â€” reloading with float32...")
+                    log("cuBLAS error starting transcription generator - reloading with float32...")
                     self._update_job_status_detail(job_id, "Reloading model (GPU compatibility fallback)...")
                     self._load_whisper_model(job_id=job_id, force_float32=True)
                     whisper_runtime_device = self._whisper_device or self.device
                     segments_generator, info = _run_transcribe_with_stage_start(
-                        self.whisper_model, transcribe_path, transcribe_params, use_batched, whisper_runtime_device
+                        self.whisper_model,
+                        transcribe_path,
+                        transcribe_params,
+                        use_batched,
+                        whisper_runtime_device,
                     )
                     seg_iter = iter(segments_generator)
                 else:
@@ -10501,12 +16615,11 @@ class IngestionService:
                             start=segment.start + start_time_offset,
                             end=segment.end + start_time_offset,
                             text=segment.text,
-                            words=shifted_words
+                            words=shifted_words,
                         )
 
                     segments.append(segment)
 
-                    # Progress update
                     if job_id and total_duration > 0:
                         transcription_pct = min(segment.end / total_duration, 1.0)
                         job_pct = int(transcription_pct * 100)
@@ -10527,7 +16640,6 @@ class IngestionService:
                             last_progress_update = job_pct
                             last_detail_update = now
 
-                    # Log every segment for real-time feedback (verbose only)
                     timestamp = self._format_timestamp(segment.start)
                     log_verbose(f"[{timestamp}] {segment.text.strip()[:50]}...")
 
@@ -10535,13 +16647,22 @@ class IngestionService:
                         self._save_partial_transcript(video.id, segments, total_duration)
             except RuntimeError as e:
                 if "CUBLAS" in str(e).upper():
-                    log("cuBLAS error during transcription iteration â€” reloading model with float32...")
+                    log("cuBLAS error during transcription iteration - reloading model with float32...")
                     self._update_job_status_detail(job_id, "Reloading model (GPU compatibility fallback)...")
                     if segments:
                         self._save_partial_transcript(video.id, segments, total_duration)
-                    self._load_whisper_model(job_id=job_id, force_float32=True)
+                    self._load_whisper_model(
+                        job_id=job_id,
+                        force_float32=True,
+                        model_size_override=whisper_model_override,
+                    )
                     log("Model reloaded with compute_type=float32. Resuming from checkpoint...")
-                    return self._process_transcribe_phase(video, audio_path, job_id, force_non_batched=force_non_batched)
+                    return self._process_transcribe_phase(
+                        video,
+                        audio_path,
+                        job_id,
+                        force_non_batched=force_non_batched,
+                    )
                 raise
         else:
             duration_info = duration_info if "duration_info" in locals() else (video.duration or 0)
@@ -10554,7 +16675,11 @@ class IngestionService:
              total_duration = duration_info
 
         coverage = _word_coverage(segments)
-        if transcribe_engine_used == "whisper" and use_batched and coverage < min_word_coverage:
+        if (
+            transcribe_engine_used == "whisper"
+            and use_batched
+            and coverage < min_word_coverage
+        ):
             log(
                 f"Low word timestamp coverage after batched transcription ({coverage:.1%}, "
                 f"target >= {min_word_coverage:.0%}). Re-running non-batched for accuracy."
@@ -10585,9 +16710,20 @@ class IngestionService:
             if out_dir.exists():
                 safe_title = self.sanitize_filename(video.title)
                 raw_path = out_dir / f"{safe_title}_transcript_raw.json"
+                final_language = route_language or self._normalize_language_code(
+                    getattr(whisper_info, "language", None) if whisper_info is not None else None
+                )
                 raw_data = {
                     "video_id": video.id,
                     "transcription_engine_used": transcribe_engine_used,
+                    "transcription_engine_requested": route.get("requested_engine"),
+                    "transcription_engine_routed": selected_engine,
+                    "transcript_language": final_language,
+                    "transcription_route_language_confidence": route.get("language_confidence"),
+                    "transcription_route_language_source": route.get("language_source"),
+                    "transcription_route_language_reason": route.get("language_reason"),
+                    "transcription_route_multilingual": bool(route.get("multilingual_route_applied")),
+                    "transcription_route_whisper_model": route.get("whisper_model_override"),
                     "segments": [
                         {
                             "start": s.start,
@@ -10604,6 +16740,17 @@ class IngestionService:
         except Exception as e:
             log(f"Failed to save raw transcript checkpoint: {e}")
 
+        final_language = route_language or self._normalize_language_code(
+            getattr(whisper_info, "language", None) if whisper_info is not None else None
+        )
+        with Session(engine) as session:
+            v = session.get(Video, video.id)
+            if v:
+                if final_language:
+                    v.transcript_language = final_language
+                    session.add(v)
+                    session.commit()
+
         if transcribe_engine_used == "parakeet" and self._should_unload_parakeet_after_transcribe(job_id=job_id):
             self._release_parakeet_model("post_transcribe_low_vram", job_id=job_id)
             
@@ -10613,6 +16760,7 @@ class IngestionService:
         """Phase 3: Diarization and Speaker Identification"""
         from pyannote.core import Annotation, Segment
         from bisect import bisect_right
+        job_payload = {}
         
         # 1. Update Status
         with Session(engine) as session:
@@ -10630,6 +16778,16 @@ class IngestionService:
             session.commit()
 
         self._record_job_stage_start(job_id, "diarize")
+        if job_id:
+            try:
+                with Session(engine) as session:
+                    job = session.get(Job, job_id)
+                    if job:
+                        job_payload = self._load_job_payload(getattr(job, "payload_json", None))
+            except Exception as e:
+                log_verbose(f"Could not load diarization job payload for overrides: {e}")
+        optimization_target = str(job_payload.get("optimization_target") or "").strip().lower()
+        should_apply_text_cleanup = optimization_target not in {"diarization_rebuild", "diarization_benchmark"}
             
         log("Diarizing...")
         if self.device == "cuda" and self.whisper_model is not None:
@@ -10682,16 +16840,18 @@ class IngestionService:
             audio_input = self._load_audio_for_pyannote(str(audio_path))
 
             # Configure diarization sensitivity from settings
-            sensitivity = os.getenv("DIARIZATION_SENSITIVITY", "balanced")
+            sensitivity = str(job_payload.get("diarization_sensitivity_override") or os.getenv("DIARIZATION_SENSITIVITY", "balanced") or "balanced").strip().lower()
+            if sensitivity not in {"aggressive", "balanced", "conservative"}:
+                sensitivity = "balanced"
             if sensitivity == "aggressive":
-                # More sensitive to speaker changes â€” splits more aggressively
-                self.diarization_pipeline.segmentation.min_duration_off = 0.1
+                # Keep more boundaries by only filling extremely short pauses.
+                self.diarization_pipeline.segmentation.min_duration_off = 0.0
             elif sensitivity == "conservative":
-                # Less sensitive â€” merges more, fewer but longer segments
+                # Merge across longer pauses to reduce speaker fragmentation.
                 self.diarization_pipeline.segmentation.min_duration_off = 1.0
             else:
-                # "balanced" uses pyannote default
-                self.diarization_pipeline.segmentation.min_duration_off = 0.0
+                # Balanced keeps some short-pause smoothing without over-merging.
+                self.diarization_pipeline.segmentation.min_duration_off = 0.35
 
             try:
                 diarization_output = self._run_diarization_with_adaptive_batch(audio_input, job_id=job_id)
@@ -10705,7 +16865,14 @@ class IngestionService:
                     if self.embedding_model:
                         self.embedding_model = self.embedding_model.float()
                         self.embedding_inference = None  # will be recreated
-                        from pyannote.audio import Inference as _Inf
+                        import warnings
+
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r".*torchcodec is not installed correctly so built-in audio decoding will fail.*",
+                            )
+                            from pyannote.audio import Inference as _Inf
                         self.embedding_inference = _Inf(self.embedding_model, window="whole")
                         self.embedding_inference.to(torch.device(self.device))
                     diarization_output = self._run_diarization_with_adaptive_batch(audio_input, job_id=job_id)
@@ -10756,6 +16923,11 @@ class IngestionService:
                         TranscriptSegment.video_id == video_attached.id
                     )
                 )
+                session.exec(
+                    sa_delete(FunnyMoment).where(
+                        FunnyMoment.video_id == video_attached.id
+                    )
+                )
                 session.commit()
             except Exception as e:
                 session.rollback()
@@ -10763,6 +16935,14 @@ class IngestionService:
 
             local_speaker_map = {}
             log_verbose("Identifying speakers from diarization segments...")
+            try:
+                match_threshold = float(
+                    job_payload.get("speaker_match_threshold_override")
+                    if job_payload.get("speaker_match_threshold_override") is not None
+                    else os.getenv("SPEAKER_MATCH_THRESHOLD", "0.35")
+                )
+            except Exception:
+                match_threshold = 0.35
 
             def _embedding_sample_metadata(py_seg):
                 """Best-effort provenance for a speaker embedding source clip."""
@@ -10794,6 +16974,42 @@ class IngestionService:
                     "sample_end_time": end,
                     "sample_text": sample_text,
                 }
+
+            def _persist_additional_speaker_profiles(
+                speaker_id: int,
+                sample_embeddings,
+                primary_segment,
+            ):
+                extra_limit = max(0, int(os.getenv("SPEAKER_PROFILE_PERSIST_RAW_SAMPLES", "2")))
+                if extra_limit <= 0:
+                    return
+
+                persisted = 0
+                for seg, raw_embedding in sample_embeddings:
+                    if persisted >= extra_limit:
+                        break
+                    if seg == primary_segment:
+                        continue
+                    extra_meta = _embedding_sample_metadata(seg)
+                    extra_row = SpeakerEmbedding(
+                        speaker_id=speaker_id,
+                        embedding_blob=pickle.dumps(raw_embedding),
+                        source_video_id=video_attached.id,
+                        sample_start_time=extra_meta["sample_start_time"],
+                        sample_end_time=extra_meta["sample_end_time"],
+                        sample_text=extra_meta["sample_text"],
+                        created_at=datetime.now()
+                    )
+                    session.add(extra_row)
+                    session.commit()
+                    session.refresh(extra_row)
+                    self._append_speaker_match_cache(
+                        video_attached.channel_id,
+                        extra_row.id,
+                        speaker_id,
+                        raw_embedding,
+                    )
+                    persisted += 1
             
             # Pre-process speakers
             diarization_labels = list(diarization.labels())
@@ -10804,22 +17020,32 @@ class IngestionService:
                     # Keep some visible progress movement during long diarization post-processing
                     self._update_job_progress(job_id, min(70, 45 + int((idx / total_labels) * 25)))
                 timeline = diarization.label_timeline(label)
-                if not timeline: continue
-                    
-                longest_segment = max(timeline, key=lambda s: s.duration)
-                if longest_segment.duration < 0.5:
-                    log_verbose(f"  Warning: Speaker {label} longest segment is only {longest_segment.duration:.2f}s")
+                if not timeline:
+                    continue
 
-                log_verbose(f"  Analyzing speaker {label} (Longest segment: {longest_segment.duration:.2f}s)")
+                timeline_segments = list(timeline)
+                profile_embedding, primary_segment, sample_embeddings = self._build_speaker_embedding_profile(
+                    audio_input,
+                    timeline_segments,
+                )
+                if primary_segment is None or profile_embedding is None:
+                    log_verbose(f"  Warning: Speaker {label} did not produce a usable embedding profile")
+                    continue
 
-                emb = self.get_speaker_embedding(audio_input, longest_segment)
-                sample_meta = _embedding_sample_metadata(longest_segment)
-                
-                if emb is not None:
+                if primary_segment.duration < 0.5:
+                    log_verbose(f"  Warning: Speaker {label} primary segment is only {primary_segment.duration:.2f}s")
+
+                log_verbose(
+                    f"  Analyzing speaker {label} "
+                    f"(samples: {len(sample_embeddings)}, primary segment: {primary_segment.duration:.2f}s)"
+                )
+
+                sample_meta = _embedding_sample_metadata(primary_segment)
+
+                if profile_embedding is not None:
                     try:
-                        match_threshold = float(os.getenv("SPEAKER_MATCH_THRESHOLD", "0.5"))
                         found_speaker, matched_profile, matched_score = self.identify_speaker(
-                            session, video_attached.channel_id, emb, threshold=match_threshold
+                            session, video_attached.channel_id, profile_embedding, threshold=match_threshold
                         )
                     except Exception as e:
                         log(f"Identify error: {e}")
@@ -10841,7 +17067,7 @@ class IngestionService:
                         # Enrich: add this new embedding to improve future matching
                         new_emb_row = SpeakerEmbedding(
                             speaker_id=found_speaker.id,
-                            embedding_blob=pickle.dumps(emb),
+                            embedding_blob=pickle.dumps(profile_embedding),
                             source_video_id=video_attached.id,
                             sample_start_time=sample_meta["sample_start_time"],
                             sample_end_time=sample_meta["sample_end_time"],
@@ -10855,7 +17081,12 @@ class IngestionService:
                             video_attached.channel_id,
                             new_emb_row.id,
                             found_speaker.id,
-                            emb,
+                            profile_embedding,
+                        )
+                        _persist_additional_speaker_profiles(
+                            found_speaker.id,
+                            sample_embeddings,
+                            primary_segment,
                         )
                     else:
                         existing_count = session.exec(
@@ -10866,7 +17097,7 @@ class IngestionService:
                         new_spk = Speaker(
                             channel_id=video_attached.channel_id,
                             name=new_name,
-                            embedding_blob=pickle.dumps(emb),
+                            embedding_blob=pickle.dumps(profile_embedding),
                             created_at=datetime.now()
                         )
                         session.add(new_spk)
@@ -10875,7 +17106,7 @@ class IngestionService:
                         # Also store in the multi-embedding table
                         seed_emb = SpeakerEmbedding(
                             speaker_id=new_spk.id,
-                            embedding_blob=pickle.dumps(emb),
+                            embedding_blob=pickle.dumps(profile_embedding),
                             source_video_id=video_attached.id,
                             sample_start_time=sample_meta["sample_start_time"],
                             sample_end_time=sample_meta["sample_end_time"],
@@ -10889,7 +17120,12 @@ class IngestionService:
                             video_attached.channel_id,
                             seed_emb.id,
                             new_spk.id,
-                            emb,
+                            profile_embedding,
+                        )
+                        _persist_additional_speaker_profiles(
+                            new_spk.id,
+                            sample_embeddings,
+                            primary_segment,
                         )
                         local_speaker_map[label] = {
                             "speaker": new_spk,
@@ -11063,6 +17299,16 @@ class IngestionService:
 
                 processed_segments += 1
 
+            if job_id:
+                self._update_job_status_detail(
+                    job_id,
+                    f"Writing transcript segments ({total_input_segments}/{total_input_segments})..."
+                )
+                self._update_job_progress(job_id, 95)
+
+            if job_id:
+                self._update_job_status_detail(job_id, "Consolidating transcript segments...")
+                self._update_job_progress(job_id, 96)
             consolidation = self._consolidate_transcript_segments(final_segments)
             final_segments = consolidation["segments"]
             if consolidation["merged_count"] > 0 or consolidation["reassigned_islands"] > 0:
@@ -11071,13 +17317,44 @@ class IngestionService:
                     f"{consolidation['merged_count']} merges, "
                     f"{consolidation['reassigned_islands']} reassigned short islands."
                 )
+            if should_apply_text_cleanup:
+                if job_id:
+                    self._update_job_status_detail(job_id, "Applying entity repair...")
+                    self._update_job_progress(job_id, 97)
+                entity_repair = self._apply_entity_repair_to_segments(session, video_attached, final_segments, persist_revisions=False)
+                if entity_repair["changed"]:
+                    log(
+                        f"Transcript entity repair for {video_attached.title}: "
+                        f"{entity_repair['replacement_count']} replacements across "
+                        f"{entity_repair['segments_changed']} segments."
+                    )
+                if job_id:
+                    self._update_job_status_detail(job_id, "Applying formatting cleanup...")
+                    self._update_job_progress(job_id, 97)
+                formatting_cleanup = self._apply_formatting_cleanup_to_segments(
+                    session,
+                    video_attached,
+                    final_segments,
+                    persist_revisions=False,
+                )
+                if formatting_cleanup["changed"]:
+                    log(
+                        f"Transcript formatting cleanup for {video_attached.title}: "
+                        f"{formatting_cleanup['segments_changed']} segments updated."
+                    )
+            elif job_id:
+                self._update_job_status_detail(job_id, "Skipping text cleanup for diarization rebuild...")
+                self._update_job_progress(job_id, 97)
+            if job_id:
+                self._update_job_status_detail(job_id, "Committing transcript rows...")
+                self._update_job_progress(job_id, 98)
             for db_seg in final_segments:
                 session.add(db_seg)
 
             session.commit()
             if job_id:
                 self._update_job_status_detail(job_id, "Saving transcript files...")
-                self._update_job_progress(job_id, 98)
+                self._update_job_progress(job_id, 99)
             
             # Save final files
             self._save_transcripts(session, video_attached, final_segments, audio_path)
@@ -11096,7 +17373,6 @@ class IngestionService:
             video_attached.status = "completed"
             video_attached.processed = True
             video_attached.transcript_source = "local_transcription"
-            video_attached.transcript_language = None
             video_attached.transcript_is_placeholder = False
             session.add(video_attached)
             session.commit()

@@ -113,7 +113,7 @@ export function Videos() {
             {loading ? <div className="flex items-center justify-center h-64 text-slate-400 animate-pulse">Loading videos...</div> : (
                 <div className="glass-panel rounded-xl overflow-hidden flex-1 flex flex-col">
                     <div className="overflow-auto flex-1">
-                        <table className="w-full relative">
+                        <table className="w-full min-w-[800px] relative">
                             <thead className="bg-slate-50 sticky top-0 z-10 shadow-sm">
                                 <tr className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">
                                     <th className="px-6 py-4 w-20">Thumb</th>

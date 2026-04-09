@@ -8,6 +8,9 @@ import { ArrowLeft, Loader2, Mic2, Calendar, Hash, Trash2, AudioLines, Film, Pen
 import { SpeakerModal } from '../components/SpeakerModal';
 
 const PROFILE_PREVIEW_STOP_EARLY_SECONDS = 0.35;
+const INITIAL_APPEARANCE_RENDER_COUNT = 50;
+const INITIAL_PROFILE_RENDER_COUNT = 50;
+const RENDER_COUNT_INCREMENT = 100;
 
 function formatDuration(seconds: number): string {
     const total = Math.max(0, Math.round(seconds));
@@ -21,11 +24,14 @@ function formatDuration(seconds: number): string {
 export function SpeakerDetailPage() {
     const { id } = useParams<{ id: string }>();
     const navigate = useNavigate();
+    const moveTargetPickerLimit = 100;
 
     const [speaker, setSpeaker] = useState<Speaker | null>(null);
     const [appearances, setAppearances] = useState<SpeakerEpisodeAppearance[]>([]);
     const [profiles, setProfiles] = useState<SpeakerVoiceProfile[]>([]);
     const [loading, setLoading] = useState(true);
+    const [loadingAppearances, setLoadingAppearances] = useState(false);
+    const [loadingProfiles, setLoadingProfiles] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [deletingProfileId, setDeletingProfileId] = useState<number | null>(null);
     const [editingSpeaker, setEditingSpeaker] = useState<Speaker | null>(null);
@@ -38,6 +44,11 @@ export function SpeakerDetailPage() {
     const [movingProfileSubmit, setMovingProfileSubmit] = useState(false);
     const [newMoveSpeakerName, setNewMoveSpeakerName] = useState('');
     const [reassigningProfileId, setReassigningProfileId] = useState<number | null>(null);
+    const [openingAvatarStudio, setOpeningAvatarStudio] = useState(false);
+    const [appearanceTotal, setAppearanceTotal] = useState(0);
+    const [profileTotal, setProfileTotal] = useState(0);
+    const [loadingMoreAppearances, setLoadingMoreAppearances] = useState(false);
+    const [loadingMoreProfiles, setLoadingMoreProfiles] = useState(false);
 
     const stopPreviewPlayback = () => {
         try {
@@ -54,22 +65,100 @@ export function SpeakerDetailPage() {
         setPreviewProfile(null);
     };
 
+    const readTotalCount = (value: unknown, fallback: number) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+    };
+
+    const fetchAppearances = async (opts?: { append?: boolean }) => {
+        if (!id) return;
+        const append = !!opts?.append;
+        if (append) setLoadingMoreAppearances(true);
+        else setLoadingAppearances(true);
+        try {
+            const offset = append ? appearances.length : 0;
+            const res = await api.get<SpeakerEpisodeAppearance[]>(`/speakers/${id}/appearances`, {
+                params: {
+                    offset,
+                    limit: append ? RENDER_COUNT_INCREMENT : INITIAL_APPEARANCE_RENDER_COUNT,
+                },
+            });
+            const items = Array.isArray(res.data) ? res.data : [];
+            const total = readTotalCount(res.headers?.['x-total-count'], append ? Math.max(appearances.length + items.length, appearanceTotal) : items.length);
+            setAppearanceTotal(total);
+            setAppearances((prev) => {
+                if (!append) return items;
+                const seen = new Set(prev.map((item) => item.video_id));
+                const next = [...prev];
+                for (const item of items) {
+                    if (!seen.has(item.video_id)) next.push(item);
+                }
+                return next;
+            });
+        } catch (e) {
+            console.error('Failed to load speaker appearances', e);
+            if (!append) setAppearances([]);
+        } finally {
+            setLoadingAppearances(false);
+            setLoadingMoreAppearances(false);
+        }
+    };
+
+    const fetchProfiles = async (opts?: { append?: boolean }) => {
+        if (!id) return;
+        const append = !!opts?.append;
+        if (append) setLoadingMoreProfiles(true);
+        else setLoadingProfiles(true);
+        try {
+            const offset = append ? profiles.length : 0;
+            const res = await api.get<SpeakerVoiceProfile[]>(`/speakers/${id}/profiles`, {
+                params: {
+                    offset,
+                    limit: append ? RENDER_COUNT_INCREMENT : INITIAL_PROFILE_RENDER_COUNT,
+                },
+            });
+            const items = Array.isArray(res.data) ? res.data : [];
+            const total = readTotalCount(res.headers?.['x-total-count'], append ? Math.max(profiles.length + items.length, profileTotal) : items.length);
+            setProfileTotal(total);
+            setProfiles((prev) => {
+                if (!append) return items;
+                const seen = new Set(prev.map((item) => item.id));
+                const next = [...prev];
+                for (const item of items) {
+                    if (!seen.has(item.id)) next.push(item);
+                }
+                return next;
+            });
+        } catch (e) {
+            console.error('Failed to load speaker profiles', e);
+            if (!append) setProfiles([]);
+        } finally {
+            setLoadingProfiles(false);
+            setLoadingMoreProfiles(false);
+        }
+    };
+
     const fetchData = async () => {
         if (!id) return;
         setLoading(true);
         setError(null);
+        setAppearances([]);
+        setProfiles([]);
+        setAppearanceTotal(0);
+        setProfileTotal(0);
         try {
-            const [speakerRes, appearancesRes, profilesRes] = await Promise.all([
-                api.get<Speaker>(`/speakers/${id}`),
-                api.get<SpeakerEpisodeAppearance[]>(`/speakers/${id}/appearances`),
-                api.get<SpeakerVoiceProfile[]>(`/speakers/${id}/profiles`),
-            ]);
+            const speakerRes = await api.get<Speaker>(`/speakers/${id}`);
             setSpeaker(speakerRes.data);
-            setAppearances(Array.isArray(appearancesRes.data) ? appearancesRes.data : []);
-            setProfiles(Array.isArray(profilesRes.data) ? profilesRes.data : []);
+            setLoading(false);
+
+            void fetchAppearances();
+            void fetchProfiles();
         } catch (e: any) {
             console.error('Failed to load speaker detail', e);
             setError(e?.response?.data?.detail || 'Failed to load speaker details');
+            setSpeaker(null);
+            setAppearances([]);
+            setProfiles([]);
         } finally {
             setLoading(false);
         }
@@ -91,6 +180,7 @@ export function SpeakerDetailPage() {
             const res = await api.delete(`/speakers/${speaker.id}/profiles/${profile.id}`);
             const remainingProfiles = Number(res.data?.remaining_profiles);
             setProfiles(prev => prev.filter(p => p.id !== profile.id));
+            setProfileTotal(current => Math.max(0, current - 1));
             setPreviewProfile(prev => prev?.id === profile.id ? null : prev);
             if (previewProfile?.id === profile.id) {
                 closeProfilePreview();
@@ -110,21 +200,47 @@ export function SpeakerDetailPage() {
         setMoveSearch('');
         setNewMoveSpeakerName('');
         setMoveTargets([]);
-        setLoadingMoveTargets(true);
-        try {
-            const res = await api.get<Speaker[]>('/speakers', {
-                params: { channel_id: speaker.channel_id, limit: 5000 }
-            });
-            const items = Array.isArray(res.data) ? res.data : [];
-            setMoveTargets(items.filter(s => s.id !== speaker.id));
-        } catch (e) {
-            console.error('Failed to load move targets', e);
-            alert('Failed to load speakers for move target selection');
-            setMovingProfile(null);
-        } finally {
-            setLoadingMoveTargets(false);
-        }
     };
+
+    useEffect(() => {
+        if (!movingProfile || !speaker) return;
+        let cancelled = false;
+        const timeoutId = window.setTimeout(() => {
+            const fetchMoveTargets = async () => {
+                setLoadingMoveTargets(true);
+                try {
+                    const trimmedSearch = moveSearch.trim();
+                    const res = await api.get<Speaker[]>('/speakers', {
+                        params: {
+                            channel_id: speaker.channel_id,
+                            limit: moveTargetPickerLimit,
+                            search: trimmedSearch || undefined,
+                        }
+                    });
+                    if (!cancelled) {
+                        const items = Array.isArray(res.data) ? res.data : [];
+                        setMoveTargets(items.filter(s => s.id !== speaker.id));
+                    }
+                } catch (e) {
+                    if (!cancelled) {
+                        console.error('Failed to load move targets', e);
+                        alert('Failed to load speakers for move target selection');
+                        setMovingProfile(null);
+                    }
+                } finally {
+                    if (!cancelled) {
+                        setLoadingMoveTargets(false);
+                    }
+                }
+            };
+            void fetchMoveTargets();
+        }, 200);
+
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timeoutId);
+        };
+    }, [movingProfile, moveSearch, speaker?.channel_id, speaker?.id]);
 
     const handleMoveProfileToExisting = async (targetSpeaker: Speaker) => {
         if (!speaker || !movingProfile) return;
@@ -193,6 +309,24 @@ export function SpeakerDetailPage() {
             alert(e?.response?.data?.detail || 'Failed to bulk reassign matched segments');
         } finally {
             setReassigningProfileId(null);
+        }
+    };
+
+    const handleOpenAvatarStudio = async () => {
+        if (!speaker) return;
+        setOpeningAvatarStudio(true);
+        try {
+            const res = await api.post(`/speakers/${speaker.id}/avatar`);
+            const avatarId = Number(res.data?.id);
+            if (!Number.isFinite(avatarId) || avatarId <= 0) {
+                throw new Error('Avatar id missing from response');
+            }
+            navigate(`/avatars/${avatarId}`);
+        } catch (e: any) {
+            console.error('Failed to open avatar studio', e);
+            alert(e?.response?.data?.detail || 'Failed to open avatar studio');
+        } finally {
+            setOpeningAvatarStudio(false);
         }
     };
 
@@ -322,15 +456,27 @@ export function SpeakerDetailPage() {
                     <div className="min-w-0 flex-1">
                         <div className="flex items-start justify-between gap-3">
                             <h1 className="text-2xl font-bold text-slate-800 truncate">{speaker.name}</h1>
-                            <button
-                                type="button"
-                                onClick={() => setEditingSpeaker(speaker)}
-                                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600"
-                                title="Edit speaker"
-                            >
-                                <Pencil size={13} />
-                                Edit
-                            </button>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => void handleOpenAvatarStudio()}
+                                    disabled={openingAvatarStudio}
+                                    className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 text-blue-700 disabled:opacity-50"
+                                    title="Open Avatar Studio"
+                                >
+                                    {openingAvatarStudio ? <Loader2 size={13} className="animate-spin" /> : <PlusCircle size={13} />}
+                                    Avatar Studio
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setEditingSpeaker(speaker)}
+                                    className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-600"
+                                    title="Edit speaker"
+                                >
+                                    <Pencil size={13} />
+                                    Edit
+                                </button>
+                            </div>
                         </div>
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                             <span className="px-2 py-1 rounded-full bg-slate-100 border border-slate-200">
@@ -357,7 +503,12 @@ export function SpeakerDetailPage() {
                         <h2 className="text-lg font-semibold">Episodes This Speaker Appears In</h2>
                     </div>
                     <div className="glass-panel rounded-xl border border-slate-200/60 overflow-hidden">
-                        {appearances.length === 0 ? (
+                        {loadingAppearances ? (
+                            <div className="p-6 flex items-center justify-center gap-2 text-sm text-slate-400">
+                                <Loader2 size={16} className="animate-spin" />
+                                Loading episode appearances...
+                            </div>
+                        ) : appearances.length === 0 ? (
                             <div className="p-6 text-center text-slate-400 text-sm">No episode appearances found.</div>
                         ) : (
                             <div className="max-h-[70vh] overflow-auto divide-y divide-slate-100">
@@ -402,6 +553,19 @@ export function SpeakerDetailPage() {
                                         </div>
                                     </div>
                                 ))}
+                                {appearances.length < appearanceTotal && (
+                                    <div className="p-4 flex items-center justify-center bg-slate-50">
+                                        <button
+                                            type="button"
+                                            onClick={() => void fetchAppearances({ append: true })}
+                                            disabled={loadingMoreAppearances}
+                                            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                        >
+                                            {loadingMoreAppearances && <Loader2 size={14} className="animate-spin" />}
+                                            Load more episodes ({appearanceTotal - appearances.length} remaining)
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>
@@ -498,7 +662,12 @@ export function SpeakerDetailPage() {
                                 )}
                             </div>
                         )}
-                        {profiles.length === 0 ? (
+                        {loadingProfiles ? (
+                            <div className="p-6 flex items-center justify-center gap-2 text-sm text-slate-400">
+                                <Loader2 size={16} className="animate-spin" />
+                                Loading voice profiles...
+                            </div>
+                        ) : profiles.length === 0 ? (
                             <div className="p-6 text-center text-slate-400 text-sm">No voice profiles found.</div>
                         ) : (
                             <div className="max-h-[70vh] overflow-auto divide-y divide-slate-100">
@@ -609,6 +778,19 @@ export function SpeakerDetailPage() {
                                         </div>
                                     </div>
                                 ))}
+                                {profiles.length < profileTotal && (
+                                    <div className="p-4 flex items-center justify-center bg-slate-50">
+                                        <button
+                                            type="button"
+                                            onClick={() => void fetchProfiles({ append: true })}
+                                            disabled={loadingMoreProfiles}
+                                            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+                                        >
+                                            {loadingMoreProfiles && <Loader2 size={14} className="animate-spin" />}
+                                            Load more profiles ({profileTotal - profiles.length} remaining)
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>

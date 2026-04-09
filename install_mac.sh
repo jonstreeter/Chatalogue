@@ -182,6 +182,32 @@ else
   echo "  [OK] $(ffmpeg -version 2>/dev/null | head -1)"
 fi
 
+echo "[Prerequisites] Checking SoX..."
+if ! command -v sox >/dev/null 2>&1; then
+  echo "  [!] SoX is NOT installed (required for conversation reconstruction)."
+  if [ "$HAS_BREW" = "1" ]; then
+    echo
+    if ask_yes_no "Would you like to install SoX via Homebrew?"; then
+      echo "  Installing SoX..."
+      brew install sox
+      if command -v sox >/dev/null 2>&1; then
+        echo "  [OK] SoX installed successfully."
+      else
+        echo "  [WARN] SoX install completed but 'sox' is not in PATH."
+        echo "         Conversation reconstruction may not work until PATH is refreshed."
+      fi
+    else
+      echo "  [WARN] SoX not installed. Conversation reconstruction will be unavailable."
+      echo "         Download from: https://formulae.brew.sh/formula/sox"
+    fi
+  else
+    echo "  [WARN] SoX not installed. Conversation reconstruction will be unavailable."
+    echo "         Download from: https://formulae.brew.sh/formula/sox"
+  fi
+else
+  echo "  [OK] $(sox --version 2>/dev/null | head -1)"
+fi
+
 echo
 if [ "$PREREQS_OK" -ne 1 ]; then
   echo "[ERROR] One or more required prerequisites are missing."

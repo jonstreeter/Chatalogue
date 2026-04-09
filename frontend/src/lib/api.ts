@@ -2,6 +2,7 @@ import axios from 'axios';
 
 const SHARE_TOKEN_STORAGE_KEY = 'chatalogue_share_token';
 const SHARE_PASSWORD_STORAGE_KEY = 'chatalogue_share_password';
+const SHARE_API_BASE_STORAGE_KEY = 'chatalogue_share_api_base';
 
 function normalizeLoopbackHost(url: string): string {
     return url.replace('://localhost:', '://127.0.0.1:');
@@ -16,11 +17,15 @@ function persistShareContextFromUrl(): void {
     if (typeof window === 'undefined') return;
     const token = getSearchParam('share_token');
     const password = getSearchParam('share_password');
+    const apiBase = getSearchParam('api_base');
     if (token) {
         window.sessionStorage.setItem(SHARE_TOKEN_STORAGE_KEY, token);
     }
     if (password) {
         window.sessionStorage.setItem(SHARE_PASSWORD_STORAGE_KEY, password);
+    }
+    if (apiBase) {
+        window.sessionStorage.setItem(SHARE_API_BASE_STORAGE_KEY, normalizeLoopbackHost(apiBase));
     }
 }
 
@@ -28,6 +33,14 @@ function resolveApiBaseUrl(): string {
     const queryUrl = getSearchParam('api_base');
     if (queryUrl) {
         return normalizeLoopbackHost(queryUrl);
+    }
+
+    if (typeof window !== 'undefined') {
+        const storedToken = window.sessionStorage.getItem(SHARE_TOKEN_STORAGE_KEY)?.trim() || '';
+        const storedApiBase = window.sessionStorage.getItem(SHARE_API_BASE_STORAGE_KEY)?.trim() || '';
+        if (storedToken && storedApiBase) {
+            return normalizeLoopbackHost(storedApiBase);
+        }
     }
 
     const envUrl = (import.meta.env.VITE_API_URL || '').trim();
@@ -44,13 +57,23 @@ function resolveApiBaseUrl(): string {
     return 'http://127.0.0.1:8011';
 }
 
-export const API_BASE_URL = resolveApiBaseUrl();
-
 persistShareContextFromUrl();
+
+export function getApiBaseUrl(): string {
+    persistShareContextFromUrl();
+    return resolveApiBaseUrl();
+}
+
+export const API_BASE_URL = getApiBaseUrl();
 
 export function getShareToken(): string {
     if (typeof window === 'undefined') return '';
     return window.sessionStorage.getItem(SHARE_TOKEN_STORAGE_KEY)?.trim() || '';
+}
+
+export function getShareApiBase(): string {
+    if (typeof window === 'undefined') return '';
+    return window.sessionStorage.getItem(SHARE_API_BASE_STORAGE_KEY)?.trim() || '';
 }
 
 export function getSharePassword(): string {
@@ -72,14 +95,14 @@ export function toApiUrl(pathOrUrl?: string | null): string {
     const value = (pathOrUrl || '').trim();
     if (!value) return '';
     if (/^https?:\/\//i.test(value)) return normalizeLoopbackHost(value);
-    return `${API_BASE_URL}${value.startsWith('/') ? '' : '/'}${value}`;
+    const baseUrl = getApiBaseUrl();
+    return `${baseUrl}${value.startsWith('/') ? '' : '/'}${value}`;
 }
 
-const api = axios.create({
-    baseURL: API_BASE_URL,
-});
+const api = axios.create();
 
 api.interceptors.request.use((config) => {
+    config.baseURL = getApiBaseUrl();
     const token = getShareToken();
     const password = getSharePassword();
     if (token) {

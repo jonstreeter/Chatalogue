@@ -57,6 +57,15 @@ IF ERRORLEVEL 1 (
     echo [WARN] Nightly cu128 update failed. Falling back to stable torch pins...
     "%PIP_CMD%" install --upgrade --quiet -r "%BACKEND_DIR%\requirements-macos.txt"
 )
+echo    Validating torch stack...
+"%VENV_PYTHON%" "%BACKEND_DIR%\tools\check_torch_stack.py"
+IF ERRORLEVEL 1 (
+    echo [ERROR] Torch validation failed.
+    echo         An NVIDIA GPU was detected, but this venv cannot use CUDA.
+    echo         Updating further would leave transcription running on CPU.
+    pause
+    exit /b 1
+)
 echo    Torch stack up to date.
 
 echo.
@@ -67,6 +76,18 @@ echo    Shared backend dependencies up to date.
 echo.
 echo [4/7] Updating pyannote stack...
 "%PIP_CMD%" install --upgrade --quiet pyannote.audio==4.0.4 --no-deps
+IF ERRORLEVEL 1 (
+    echo [ERROR] pyannote.audio update failed.
+    pause
+    exit /b 1
+)
+echo    Normalizing pyannote package metadata...
+"%VENV_PYTHON%" "%BACKEND_DIR%\tools\repair_pyannote_metadata.py"
+IF ERRORLEVEL 1 (
+    echo [ERROR] pyannote metadata normalization failed.
+    pause
+    exit /b 1
+)
 echo    Pyannote stack up to date.
 
 echo.

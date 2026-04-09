@@ -1,11 +1,11 @@
 
 import { NavLink, Outlet, useParams, useNavigate } from 'react-router-dom';
-import { Video, FileText, Users, Scissors, ArrowLeft, Trash2, Download, Loader2, Link2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Video, FileText, Users, Scissors, ArrowLeft, Trash2, Download, Loader2, Link2, CheckCircle2, AlertCircle, AudioLines, RotateCcw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import api from '../lib/api';
 import { DeleteChannelModal } from '../components/DeleteChannelModal';
-import type { Channel } from '../types';
+import type { Channel, TranscriptRepairBulkQueueResponse, TranscriptDiarizationRebuildBulkQueueResponse, TranscriptRetranscriptionBulkQueueResponse } from '../types';
 
 const tabs = [
     { path: '', label: 'Videos', icon: Video },
@@ -23,6 +23,9 @@ export function ChannelDetail() {
     const [exporting, setExporting] = useState(false);
     const [showBatchPublishModal, setShowBatchPublishModal] = useState(false);
     const [consolidatingTranscripts, setConsolidatingTranscripts] = useState(false);
+    const [queueingTranscriptRepairs, setQueueingTranscriptRepairs] = useState(false);
+    const [queueingDiarizationRebuilds, setQueueingDiarizationRebuilds] = useState(false);
+    const [queueingFullRetranscriptions, setQueueingFullRetranscriptions] = useState(false);
 
     useEffect(() => {
         if (id) {
@@ -72,6 +75,48 @@ export function ChannelDetail() {
         }
     };
 
+    const handleQueueTranscriptRepairs = async () => {
+        if (!id) return;
+        if (!confirm('Queue low-risk transcript repairs for eligible processed episodes in this channel?')) return;
+        setQueueingTranscriptRepairs(true);
+        try {
+            const res = await api.post<TranscriptRepairBulkQueueResponse>(`/channels/${id}/transcript-repair/queue`, { limit: 250 });
+            alert(`Queued ${res.data.queued} low-risk repair job(s). Skipped ${res.data.skipped_active} active, ${res.data.skipped_no_segments} without transcripts, ${res.data.skipped_not_low_risk} not classified as low-risk repair.`);
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to queue low-risk transcript repairs');
+        } finally {
+            setQueueingTranscriptRepairs(false);
+        }
+    };
+
+    const handleQueueDiarizationRebuilds = async () => {
+        if (!id) return;
+        if (!confirm('Queue diarization rebuilds for eligible processed episodes in this channel?')) return;
+        setQueueingDiarizationRebuilds(true);
+        try {
+            const res = await api.post<TranscriptDiarizationRebuildBulkQueueResponse>(`/channels/${id}/transcript-diarization-rebuild/queue`, { limit: 250 });
+            alert(`Queued ${res.data.queued} diarization rebuild job(s). Skipped ${res.data.skipped_active} active, ${res.data.skipped_no_raw_transcript} without raw transcripts, ${res.data.skipped_not_diarization_rebuild} not classified for rebuild.`);
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to queue diarization rebuilds');
+        } finally {
+            setQueueingDiarizationRebuilds(false);
+        }
+    };
+
+    const handleQueueFullRetranscriptions = async () => {
+        if (!id) return;
+        if (!confirm('Queue full retranscriptions for eligible processed episodes in this channel? This forces a fresh ASR pass.')) return;
+        setQueueingFullRetranscriptions(true);
+        try {
+            const res = await api.post<TranscriptRetranscriptionBulkQueueResponse>(`/channels/${id}/transcript-retranscribe/queue`, { limit: 250 });
+            alert(`Queued ${res.data.queued} full retranscription job(s). Skipped ${res.data.skipped_active} active, ${res.data.skipped_unprocessed} unprocessed, ${res.data.skipped_muted} muted, ${res.data.skipped_not_full_retranscription} not classified for full retranscription.`);
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to queue full retranscriptions');
+        } finally {
+            setQueueingFullRetranscriptions(false);
+        }
+    };
+
     return (
         <div className="space-y-6">
             {/* Back navigation + channel context + actions */}
@@ -113,7 +158,7 @@ export function ChannelDetail() {
                 <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
                     <button
                         onClick={() => setShowBatchPublishModal(true)}
-                        className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-emerald-700 bg-white border border-emerald-200 rounded-lg hover:bg-emerald-50 transition-colors sm:col-span-1"
+                        className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors sm:col-span-1"
                         title="Dry-run and publish AI-generated YouTube descriptions for processed videos in this channel"
                     >
                         <Link2 size={14} />
@@ -122,11 +167,38 @@ export function ChannelDetail() {
                     <button
                         onClick={handleConsolidateTranscripts}
                         disabled={consolidatingTranscripts}
-                        className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-emerald-700 bg-white border border-emerald-200 rounded-lg hover:bg-emerald-50 transition-colors disabled:opacity-50 sm:col-span-1"
+                        className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50 sm:col-span-1"
                         title="Merge same-speaker transcript fragments across this channel without re-running ASR or diarization"
                     >
                         {consolidatingTranscripts ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
                         Consolidate Transcripts
+                    </button>
+                    <button
+                        onClick={handleQueueTranscriptRepairs}
+                        disabled={queueingTranscriptRepairs}
+                        className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-emerald-700 bg-white border border-emerald-200 rounded-lg hover:bg-emerald-50 transition-colors disabled:opacity-50 sm:col-span-1"
+                        title="Queue evaluator-approved low-risk transcript repairs across this channel"
+                    >
+                        {queueingTranscriptRepairs ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                        Queue Repairs
+                    </button>
+                    <button
+                        onClick={handleQueueDiarizationRebuilds}
+                        disabled={queueingDiarizationRebuilds}
+                        className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-blue-700 bg-white border border-blue-200 rounded-lg hover:bg-blue-50 transition-colors disabled:opacity-50 sm:col-span-1"
+                        title="Queue evaluator-approved diarization rebuilds across this channel"
+                    >
+                        {queueingDiarizationRebuilds ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
+                        Queue Rebuilds
+                    </button>
+                    <button
+                        onClick={handleQueueFullRetranscriptions}
+                        disabled={queueingFullRetranscriptions}
+                        className="col-span-2 inline-flex min-h-10 items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-amber-700 bg-white border border-amber-200 rounded-lg hover:bg-amber-50 transition-colors disabled:opacity-50 sm:col-span-1"
+                        title="Queue evaluator-approved full retranscriptions across this channel"
+                    >
+                        {queueingFullRetranscriptions ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                        Queue Retranscribe
                     </button>
                     <button
                         onClick={handleExport}

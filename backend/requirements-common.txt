@@ -15,11 +15,15 @@ python-multipart==0.0.22
 setuptools==80.10.2
 
 # Shared ML / transcription
+accelerate==1.11.0
 faster-whisper==1.2.1
+insanely-fast-whisper==0.0.15
 ctranslate2==4.7.1
 av==16.1.0
 huggingface-hub==0.36.2
 onnxruntime==1.23.2
 soundfile==0.13.1
 sympy==1.14.0
+sentence-transformers==4.1.0
 tokenizers==0.22.2
+transformers==4.57.1

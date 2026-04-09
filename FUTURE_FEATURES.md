@@ -56,3 +56,20 @@
 - Users input prompts like "cut filler words, repetitions, and off-topic parts; keep only the most important arguments."
 - An integrated LLM proposes condensed segments with precise timestamps.
 - Output: JSON/EDL or ready-to-run FFmpeg concat/trim commands for lossless local rendering.
+
+## 10. AI Episode Cloning
+- Add an AI-assisted episode analysis workflow that evaluates a source episode from a channel and produces a new original script based on the same core concept.
+- Let the user direct the target rewrite style so the output can be adapted to different formats, tones, and presentation styles instead of being locked to a single template.
+- Use semantic search across the rest of the channel's video library to pull in related themes, arguments, examples, and historical context from other episodes.
+- Blend those semantically related references into the rewrite so the output is more original, more synthesized, and less dependent on a single source episode.
+- Show channel and episode yield metrics including total views, popularity ranking, and views over time so users can identify the highest-performing candidates for cloning.
+- Define guardrails for originality, attribution, and policy compliance before enabling script generation at scale.
+
+## 11. AI Episode Localization & Dubbing
+- Add a localization workflow that translates an episode transcript into a target language while preserving meaning, tone, and speaker intent.
+- Let the user review and edit the translated transcript before any dubbing or synthesis step is finalized.
+- Support speaker-preserving voice cloning or mapped synthetic voices so each diarized speaker can be dubbed with a consistent target-language voice.
+- Generate dubbed audio aligned back onto the original episode timeline, with timing controls to handle translated speech that runs shorter or longer than the source.
+- Export alternate-language subtitle tracks, translated transcripts, and dubbed episode audio as separate assets.
+- Include pronunciation controls for names, technical terms, and channel-specific vocabulary to improve multilingual quality.
+- Define consent, provenance, and voice-use guardrails before enabling production dubbing workflows.

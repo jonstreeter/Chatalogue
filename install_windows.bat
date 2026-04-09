@@ -207,6 +207,44 @@ IF ERRORLEVEL 1 (
   :ffmpeg_done
 )
 
+echo [Prerequisites] Checking SoX...
+where sox >nul 2>&1
+IF ERRORLEVEL 1 (
+  echo   [!] SoX is NOT installed (required for conversation reconstruction).
+  IF "!HAS_WINGET!"=="1" (
+    echo.
+    SET /P "INSTALL_SOX=      Would you like to install SoX automatically via winget? [Y/n]: "
+    IF /I "!INSTALL_SOX!"=="" SET "INSTALL_SOX=Y"
+    IF /I "!INSTALL_SOX!"=="Y" (
+      echo   Installing SoX...
+      winget install --id ChrisBagwell.SoX -e --source winget --accept-source-agreements --accept-package-agreements
+      FOR /F "tokens=2*" %%A IN ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') DO SET "SYS_PATH=%%B"
+      FOR /F "tokens=2*" %%A IN ('reg query "HKCU\Environment" /v Path 2^>nul') DO SET "USR_PATH=%%B"
+      SET "PATH=!SYS_PATH!;!USR_PATH!"
+      where sox >nul 2>&1
+      IF ERRORLEVEL 1 (
+        echo   [WARN] SoX was installed but is not yet in your PATH.
+        echo          Conversation reconstruction may not work until PATH is refreshed.
+      ) ELSE (
+        echo   [OK] SoX installed successfully.
+      )
+    ) ELSE (
+      echo   [WARN] SoX not installed. Conversation reconstruction will be unavailable.
+      echo          Download from: https://sourceforge.net/projects/sox/files/sox/
+    )
+  ) ELSE (
+    echo   [WARN] SoX not installed. Conversation reconstruction will be unavailable.
+    echo          Download from: https://sourceforge.net/projects/sox/files/sox/
+  )
+) ELSE (
+  FOR /F "tokens=1-3" %%A IN ('sox --version 2^>nul') DO (
+    IF /I "%%A"=="sox:" echo   [OK] SoX %%C
+    IF /I "%%A"=="SoX" echo   [OK] SoX %%B
+    goto :sox_done
+  )
+  :sox_done
+)
+
 echo.
 IF "!PREREQS_OK!"=="0" (
   echo [ERROR] One or more required prerequisites are missing.
@@ -290,12 +328,33 @@ IF ERRORLEVEL 1 (
   echo [WARN] Nightly cu128 install failed. Falling back to stable torch pins...
   "%PIP_CMD%" install -r "%BACKEND_DIR%\requirements-macos.txt"
 )
+echo     Validating torch stack...
+"%VENV_PYTHON%" "%BACKEND_DIR%\tools\check_torch_stack.py"
+IF ERRORLEVEL 1 (
+  echo [ERROR] Torch validation failed.
+  echo         An NVIDIA GPU was detected, but this venv cannot use CUDA.
+  echo         Continuing would force transcription onto CPU and make jobs much slower.
+  ENDLOCAL
+  EXIT /B 1
+)
 
 echo [4/8] Installing core backend dependencies...
 "%PIP_CMD%" install -r "%BACKEND_DIR%\requirements.txt"
 
 echo [5/8] Installing pyannote stack...
 "%PIP_CMD%" install pyannote.audio==4.0.4 --no-deps
+IF ERRORLEVEL 1 (
+  echo [ERROR] Failed to install pyannote.audio.
+  ENDLOCAL
+  EXIT /B 1
+)
+echo     Normalizing pyannote package metadata...
+"%VENV_PYTHON%" "%BACKEND_DIR%\tools\repair_pyannote_metadata.py"
+IF ERRORLEVEL 1 (
+  echo [ERROR] pyannote metadata normalization failed.
+  ENDLOCAL
+  EXIT /B 1
+)
 
 IF /I "%INSTALL_PARAKEET%"=="1" (
   echo [6/8] Installing optional Parakeet dependencies...

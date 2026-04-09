@@ -78,3 +78,9 @@ backend/bin/*.dll
 backend/debug_output*.txt
 backend/jfk_test.ogg
 backend/*.db
+checkpoints/
+REference Resources/
+frontend/tmp_*.png
+frontend/build-errors.txt
+frontend/clear-errors.txt
+tmp_segments_*.json

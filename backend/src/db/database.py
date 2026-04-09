@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Field, Relationship
-from sqlalchemy import inspect, text, event
+from sqlalchemy import inspect, text, event, Column, BigInteger
 from typing import Optional, List, Any
 from datetime import datetime
 from pathlib import Path
@@ -253,6 +253,57 @@ class SpeakerEmbedding(SQLModel, table=True):
     def embedding(self, value):
         self.embedding_blob = pickle.dumps(value)
 
+class Avatar(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    channel_id: int = Field(foreign_key="channel.id", index=True)
+    speaker_id: int = Field(foreign_key="speaker.id", index=True)
+    name: str
+    status: str = Field(default="draft")
+    description: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class AvatarPersonalityProfile(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    avatar_id: int = Field(foreign_key="avatar.id", index=True, unique=True)
+    status: str = Field(default="draft")
+    system_prompt: Optional[str] = None
+    base_model_id: Optional[str] = None
+    dataset_status: str = Field(default="not_started")
+    dataset_path: Optional[str] = None
+    dataset_example_count: int = Field(default=0)
+    approved_example_count: int = Field(default=0)
+    source_turn_count: int = Field(default=0)
+    lora_adapter_path: Optional[str] = None
+    last_built_at: Optional[datetime] = None
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class AvatarAppearanceProfile(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    avatar_id: int = Field(foreign_key="avatar.id", index=True, unique=True)
+    status: str = Field(default="draft")
+    primary_image_path: Optional[str] = None
+    approved_image_count: int = Field(default=0)
+    source_image_count: int = Field(default=0)
+    appearance_lora_path: Optional[str] = None
+    last_built_at: Optional[datetime] = None
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class AvatarVoiceProfile(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    avatar_id: int = Field(foreign_key="avatar.id", index=True, unique=True)
+    status: str = Field(default="draft")
+    provider: Optional[str] = None
+    primary_reference_path: Optional[str] = None
+    approved_clip_count: int = Field(default=0)
+    source_clip_count: int = Field(default=0)
+    embedding_path: Optional[str] = None
+    last_built_at: Optional[datetime] = None
+    updated_at: datetime = Field(default_factory=datetime.now)
+
 class Video(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     youtube_id: str = Field(index=True, unique=True)
@@ -262,10 +313,26 @@ class Video(SQLModel, table=True):
     source_url: Optional[str] = None
     media_kind: Optional[str] = None
     manual_media_path: Optional[str] = None
+    voicefixer_cleaned_path: Optional[str] = None
+    voicefixer_use_cleaned: bool = Field(default=False)
+    voicefixer_apply_scope: str = Field(default="none")
+    voicefixer_mode: int = Field(default=0)
+    voicefixer_mix_ratio: float = Field(default=1.0)
+    voicefixer_leveling_mode: str = Field(default="off")
+    voicefixer_status: Optional[str] = None
+    voicefixer_error: Optional[str] = None
+    reconstruction_audio_path: Optional[str] = None
+    reconstruction_use_for_playback: bool = Field(default=False)
+    reconstruction_mode: str = Field(default="basic")
+    reconstruction_instruction_template: Optional[str] = None
+    reconstruction_status: Optional[str] = None
+    reconstruction_error: Optional[str] = None
+    reconstruction_model: Optional[str] = None
     published_at: Optional[datetime] = None  # May be null if not available from flat extraction
     description: Optional[str] = None  # Video description for search
     thumbnail_url: Optional[str] = None
     duration: Optional[int] = None
+    view_count: Optional[int] = Field(default=None, sa_column=Column(BigInteger, nullable=True))
     processed: bool = Field(default=False)
     muted: bool = Field(default=False)  # If true, skip transcription
     access_restricted: bool = Field(default=False)
@@ -319,6 +386,23 @@ class TranscriptSegment(SQLModel, table=True):
     video: Optional[Video] = Relationship(back_populates="segments")
     speaker: Optional[Speaker] = Relationship(back_populates="segments")
 
+class TranscriptChunkEmbedding(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    channel_id: int = Field(foreign_key="channel.id", index=True)
+    video_id: int = Field(foreign_key="video.id", index=True)
+    speaker_id: Optional[int] = Field(default=None, foreign_key="speaker.id", index=True)
+    start_time: float
+    end_time: float
+    chunk_text: str
+    chunk_token_estimate: int = Field(default=0)
+    segment_ids_json: str = Field(default="[]")  # JSON array of segment IDs
+    embedding_model: str = Field(default="")
+    embedding_dim: int = Field(default=0)
+    embedding_bytes: Optional[bytes] = Field(default=None)  # float32 numpy array, BYTEA in pg
+    content_hash: str = Field(index=True)
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
 class TranscriptSegmentRevision(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     segment_id: int = Field(foreign_key="transcriptsegment.id", index=True)
@@ -327,6 +411,117 @@ class TranscriptSegmentRevision(SQLModel, table=True):
     new_text: str
     source: str = Field(default="manual_edit")
     created_at: datetime = Field(default_factory=datetime.now)
+
+
+class TranscriptRun(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    video_id: int = Field(foreign_key="video.id", index=True)
+    input_run_id: Optional[int] = Field(default=None, index=True)
+    mode: str = Field(default="baseline", index=True)
+    pipeline_version: str = Field(default="baseline-v1", index=True)
+    status: str = Field(default="completed", index=True)
+    quality_profile: Optional[str] = None
+    recommended_tier: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    metrics_before_json: Optional[str] = None
+    metrics_after_json: Optional[str] = None
+    artifact_refs_json: Optional[str] = None
+    rollback_state: Optional[str] = None
+    model_provenance_json: Optional[str] = None
+    note: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class TranscriptQualitySnapshot(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    video_id: int = Field(foreign_key="video.id", index=True)
+    run_id: Optional[int] = Field(default=None, foreign_key="transcriptrun.id", index=True)
+    source: str = Field(default="manual", index=True)
+    quality_profile: str = Field(default="unknown", index=True)
+    recommended_tier: str = Field(default="none", index=True)
+    score: float = Field(default=0.0)
+    metrics_json: str = Field(default="{}")
+    reasons_json: str = Field(default="[]")
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class TranscriptGoldWindow(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    video_id: int = Field(foreign_key="video.id", index=True)
+    label: str = Field(default="window")
+    quality_profile: Optional[str] = Field(default=None, index=True)
+    language: Optional[str] = None
+    start_time: float
+    end_time: float
+    reference_text: str
+    entities_json: Optional[str] = None
+    notes: Optional[str] = None
+    active: bool = Field(default=True, index=True)
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class TranscriptEvaluationResult(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    gold_window_id: int = Field(foreign_key="transcriptgoldwindow.id", index=True)
+    video_id: int = Field(foreign_key="video.id", index=True)
+    run_id: Optional[int] = Field(default=None, foreign_key="transcriptrun.id", index=True)
+    source: str = Field(default="manual", index=True)
+    candidate_text: str
+    reference_text: str
+    wer: float = Field(default=0.0)
+    cer: float = Field(default=0.0)
+    entity_accuracy: Optional[float] = None
+    matched_entity_count: int = Field(default=0)
+    total_entity_count: int = Field(default=0)
+    segment_count: int = Field(default=0)
+    unknown_speaker_rate: float = Field(default=0.0)
+    punctuation_density_delta: float = Field(default=0.0)
+    metrics_json: str = Field(default="{}")
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class TranscriptEvaluationReview(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    evaluation_result_id: int = Field(foreign_key="transcriptevaluationresult.id", index=True)
+    reviewer: Optional[str] = None
+    verdict: str = Field(default="same", index=True)
+    tags_json: str = Field(default="[]")
+    notes: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class TranscriptOptimizationCampaign(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    channel_id: Optional[int] = Field(default=None, foreign_key="channel.id", index=True)
+    scope: str = Field(default="global", index=True)
+    status: str = Field(default="draft", index=True)
+    tiers_json: str = Field(default="[]")
+    limit: int = Field(default=100)
+    force_non_eligible: bool = Field(default=False)
+    queued_jobs: int = Field(default=0)
+    skipped_active: int = Field(default=0)
+    skipped_no_segments: int = Field(default=0)
+    skipped_not_eligible: int = Field(default=0)
+    skipped_other: int = Field(default=0)
+    note: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class TranscriptOptimizationCampaignItem(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(foreign_key="transcriptoptimizationcampaign.id", index=True)
+    video_id: int = Field(foreign_key="video.id", index=True)
+    recommended_tier: str = Field(default="none", index=True)
+    action_tier: str = Field(default="none", index=True)
+    quality_score: float = Field(default=0.0)
+    reason: Optional[str] = None
+    status: str = Field(default="pending", index=True)
+    job_id: Optional[int] = Field(default=None, foreign_key="job.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
 
 class TranscriptSegmentRead(SQLModel):
     id: Optional[int] = None
@@ -484,6 +679,21 @@ def _column_migrations() -> list[tuple[str, str, str, str]]:
         ("video", "source_url", "TEXT", "TEXT"),
         ("video", "media_kind", "TEXT", "TEXT"),
         ("video", "manual_media_path", "TEXT", "TEXT"),
+        ("video", "voicefixer_cleaned_path", "TEXT", "TEXT"),
+        ("video", "voicefixer_use_cleaned", "BOOLEAN", "BOOLEAN"),
+        ("video", "voicefixer_apply_scope", "TEXT", "TEXT"),
+        ("video", "voicefixer_mode", "INTEGER", "INTEGER"),
+        ("video", "voicefixer_mix_ratio", "REAL", "DOUBLE PRECISION"),
+        ("video", "voicefixer_leveling_mode", "TEXT", "TEXT"),
+        ("video", "voicefixer_status", "TEXT", "TEXT"),
+        ("video", "voicefixer_error", "TEXT", "TEXT"),
+        ("video", "reconstruction_audio_path", "TEXT", "TEXT"),
+        ("video", "reconstruction_use_for_playback", "BOOLEAN", "BOOLEAN"),
+        ("video", "reconstruction_mode", "TEXT", "TEXT"),
+        ("video", "reconstruction_instruction_template", "TEXT", "TEXT"),
+        ("video", "reconstruction_status", "TEXT", "TEXT"),
+        ("video", "reconstruction_error", "TEXT", "TEXT"),
+        ("video", "reconstruction_model", "TEXT", "TEXT"),
         ("video", "humor_context_summary", "TEXT", "TEXT"),
         ("video", "humor_context_model", "TEXT", "TEXT"),
         ("video", "humor_context_generated_at", "TEXT", "TIMESTAMP"),
@@ -497,6 +707,7 @@ def _column_migrations() -> list[tuple[str, str, str, str]]:
         ("video", "transcript_source", "TEXT", "TEXT"),
         ("video", "transcript_language", "TEXT", "TEXT"),
         ("video", "transcript_is_placeholder", "BOOLEAN", "BOOLEAN"),
+        ("video", "view_count", "INTEGER", "BIGINT"),
         ("funnymoment", "humor_summary", "TEXT", "TEXT"),
         ("funnymoment", "humor_confidence", "TEXT", "TEXT"),
         ("funnymoment", "humor_model", "TEXT", "TEXT"),
@@ -522,6 +733,24 @@ def _ensure_missing_columns(conn: Any) -> None:
         print(f"Migration: added '{column}' column to '{table}' table")
 
 
+def _ensure_column_type_adjustments(conn: Any) -> None:
+    inspector = inspect(conn)
+    table_names = set(inspector.get_table_names())
+    if "video" not in table_names:
+        return
+
+    existing_columns = {c["name"]: c for c in inspector.get_columns("video")}
+    view_count = existing_columns.get("view_count")
+    if not view_count:
+        return
+
+    if IS_POSTGRES:
+        type_name = str(view_count.get("type") or "").upper()
+        if "BIGINT" not in type_name and "INT8" not in type_name:
+            conn.execute(text('ALTER TABLE "video" ALTER COLUMN "view_count" TYPE BIGINT'))
+            print("Migration: widened 'video.view_count' to BIGINT")
+
+
 def _seed_speaker_embeddings(conn: Any) -> None:
     conn.execute(
         text(
@@ -540,6 +769,12 @@ def _ensure_indexes(conn: Any) -> None:
     index_statements = [
         "CREATE INDEX IF NOT EXISTS idx_speaker_channel_id ON speaker(channel_id)",
         "CREATE INDEX IF NOT EXISTS idx_speakerembedding_speaker_id ON speakerembedding(speaker_id)",
+        "CREATE INDEX IF NOT EXISTS idx_avatar_channel_id ON avatar(channel_id)",
+        "CREATE INDEX IF NOT EXISTS idx_avatar_speaker_id ON avatar(speaker_id)",
+        "CREATE INDEX IF NOT EXISTS idx_avatar_channel_speaker_created ON avatar(channel_id, speaker_id, created_at DESC, id DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_avatarpersonalityprofile_avatar_id ON avatarpersonalityprofile(avatar_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_avatarappearanceprofile_avatar_id ON avatarappearanceprofile(avatar_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_avatarvoiceprofile_avatar_id ON avatarvoiceprofile(avatar_id)",
         "CREATE INDEX IF NOT EXISTS idx_video_channel_id ON video(channel_id)",
         "CREATE INDEX IF NOT EXISTS idx_video_channel_published_id ON video(channel_id, published_at DESC, id DESC)",
         "CREATE INDEX IF NOT EXISTS idx_video_channel_processed_muted ON video(channel_id, processed, muted)",
@@ -553,9 +788,23 @@ def _ensure_indexes(conn: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_transcriptsegment_video_start_id ON transcriptsegment(video_id, start_time, id)",
         "CREATE INDEX IF NOT EXISTS idx_transcriptsegment_video_speaker ON transcriptsegment(video_id, speaker_id)",
         "CREATE INDEX IF NOT EXISTS idx_transcriptsegmentrevision_segment_id ON transcriptsegmentrevision(segment_id)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptgoldwindow_video_active ON transcriptgoldwindow(video_id, active, start_time)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptgoldwindow_profile ON transcriptgoldwindow(quality_profile, language)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptevaluationresult_window_created ON transcriptevaluationresult(gold_window_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptevaluationresult_video_run ON transcriptevaluationresult(video_id, run_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptevaluationreview_result_created ON transcriptevaluationreview(evaluation_result_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptoptimizationcampaign_scope_status ON transcriptoptimizationcampaign(scope, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptoptimizationcampaign_channel_status ON transcriptoptimizationcampaign(channel_id, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptoptimizationcampaignitem_campaign_status ON transcriptoptimizationcampaignitem(campaign_id, status, action_tier)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptoptimizationcampaignitem_video_status ON transcriptoptimizationcampaignitem(video_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_videodescriptionrevision_video_created ON videodescriptionrevision(video_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_clipexportartifact_clip_created ON clipexportartifact(clip_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_clipexportartifact_video_created ON clipexportartifact(video_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptchunkembedding_video_id ON transcriptchunkembedding(video_id)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptchunkembedding_channel_id ON transcriptchunkembedding(channel_id)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptchunkembedding_speaker_id ON transcriptchunkembedding(speaker_id)",
+        "CREATE INDEX IF NOT EXISTS idx_transcriptchunkembedding_content_hash ON transcriptchunkembedding(content_hash)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_transcriptchunkembedding_video_hash ON transcriptchunkembedding(video_id, content_hash)",
     ]
     for sql in index_statements:
         conn.execute(text(sql))
@@ -588,6 +837,14 @@ def _backfill_channel_defaults(conn: Any) -> None:
 
 def _backfill_video_defaults(conn: Any) -> None:
     conn.execute(text("UPDATE video SET media_source_type='youtube' WHERE media_source_type IS NULL OR TRIM(media_source_type) = ''"))
+    conn.execute(text("UPDATE video SET voicefixer_use_cleaned=FALSE WHERE voicefixer_use_cleaned IS NULL"))
+    conn.execute(text("UPDATE video SET voicefixer_apply_scope='both' WHERE voicefixer_apply_scope IS NULL AND voicefixer_use_cleaned=TRUE"))
+    conn.execute(text("UPDATE video SET voicefixer_apply_scope='none' WHERE voicefixer_apply_scope IS NULL OR TRIM(voicefixer_apply_scope) = ''"))
+    conn.execute(text("UPDATE video SET voicefixer_mode=0 WHERE voicefixer_mode IS NULL"))
+    conn.execute(text("UPDATE video SET voicefixer_mix_ratio=1.0 WHERE voicefixer_mix_ratio IS NULL"))
+    conn.execute(text("UPDATE video SET voicefixer_leveling_mode='off' WHERE voicefixer_leveling_mode IS NULL OR TRIM(voicefixer_leveling_mode) = ''"))
+    conn.execute(text("UPDATE video SET reconstruction_use_for_playback=FALSE WHERE reconstruction_use_for_playback IS NULL"))
+    conn.execute(text("UPDATE video SET reconstruction_mode='basic' WHERE reconstruction_mode IS NULL OR TRIM(reconstruction_mode) = ''"))
     conn.execute(text("UPDATE video SET transcript_is_placeholder=FALSE WHERE transcript_is_placeholder IS NULL"))
     conn.execute(text("UPDATE video SET access_restricted=FALSE WHERE access_restricted IS NULL"))
 
@@ -599,10 +856,19 @@ def _reset_postgres_sequences(conn: Any) -> None:
         "channel",
         "speaker",
         "speakerembedding",
+        "avatar",
+        "avatarpersonalityprofile",
+        "avatarappearanceprofile",
+        "avatarvoiceprofile",
         "video",
         "job",
         "transcriptsegment",
         "transcriptsegmentrevision",
+        "transcriptgoldwindow",
+        "transcriptevaluationresult",
+        "transcriptevaluationreview",
+        "transcriptoptimizationcampaign",
+        "transcriptoptimizationcampaignitem",
         "clip",
         "clipexportartifact",
         "funnymoment",
@@ -637,9 +903,18 @@ def _migrate_sqlite_to_postgres_if_needed() -> None:
         "video",
         "speaker",
         "speakerembedding",
+        "avatar",
+        "avatarpersonalityprofile",
+        "avatarappearanceprofile",
+        "avatarvoiceprofile",
         "job",
         "transcriptsegment",
         "transcriptsegmentrevision",
+        "transcriptgoldwindow",
+        "transcriptevaluationresult",
+        "transcriptevaluationreview",
+        "transcriptoptimizationcampaign",
+        "transcriptoptimizationcampaignitem",
         "clip",
         "clipexportartifact",
         "funnymoment",
@@ -730,6 +1005,7 @@ def create_db_and_tables():
                 pass
 
         _ensure_missing_columns(conn)
+        _ensure_column_type_adjustments(conn)
         _seed_speaker_embeddings(conn)
         _ensure_indexes(conn)
         _backfill_clip_defaults(conn)

@@ -396,6 +396,9 @@ def ensure_embedded_postgres() -> None:
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
     ready_timeout = int((os.getenv("EMBEDDED_PG_READY_TIMEOUT_SECONDS") or "120").strip())
+    start_timeout = int(
+        (os.getenv("EMBEDDED_PG_START_TIMEOUT_SECONDS") or str(max(180, ready_timeout))).strip()
+    )
 
     if _is_port_open(host, port):
         try:
@@ -434,13 +437,13 @@ def ensure_embedded_postgres() -> None:
                 str(log_path),
                 "-w",
                 "-t",
-                "90",
+                str(start_timeout),
                 "-o",
                 f"-h {host} -p {port}",
                 "start",
             ]
             try:
-                _run(start_cmd, timeout_seconds=150, detach_child=True)
+                _run(start_cmd, timeout_seconds=max(start_timeout + 60, 180), detach_child=True)
             except Exception as start_error:
                 # If original port remains unusable, move embedded postgres to the
                 # next available local port for this process.
@@ -462,12 +465,12 @@ def ensure_embedded_postgres() -> None:
                         str(log_path),
                         "-w",
                         "-t",
-                        "90",
+                        str(start_timeout),
                         "-o",
                         f"-h {host} -p {port}",
                         "start",
                     ]
-                    _run(start_cmd, timeout_seconds=150, detach_child=True)
+                    _run(start_cmd, timeout_seconds=max(start_timeout + 60, 180), detach_child=True)
                 else:
                     pg_log_tail = ""
                     try:
@@ -525,12 +528,12 @@ def ensure_embedded_postgres() -> None:
         str(log_path),
         "-w",
         "-t",
-        "60",
+        str(start_timeout),
         "-o",
         f"-h {host} -p {port}",
         "start",
     ]
-    _run(start_cmd, timeout_seconds=120, detach_child=True)
+    _run(start_cmd, timeout_seconds=max(start_timeout + 60, 180), detach_child=True)
 
     if not _wait_for_port(host, port, timeout_seconds=30):
         raise EmbeddedPostgresError(f"Embedded PostgreSQL did not open {host}:{port} in time.")

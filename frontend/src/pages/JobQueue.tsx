@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
 import { API_BASE_URL, toApiUrl } from '../lib/api';
-import type { Job } from '../types';
-import { Pause, Play, Trash2, Clock, CheckCircle2, DownloadCloud, FileText, Users, Video as VideoIcon, RefreshCw, ArrowUp, Smile, Bot, Scissors, Cpu, AlertCircle, Copy, Check } from 'lucide-react';
+import type { Job, Channel, TranscriptEvaluationSummary, TranscriptDiarizationConfigBenchmark, TranscriptOptimizationCampaign, TranscriptOptimizationCampaignItem, TranscriptOptimizationCampaignExecuteResponse, TranscriptOptimizationCampaignDeleteResponse } from '../types';
+import { Pause, Play, Trash2, Clock, CheckCircle2, DownloadCloud, FileText, Users, Video as VideoIcon, RefreshCw, ArrowUp, Smile, Bot, Scissors, Cpu, AlertCircle, Copy, Check, AudioLines, Loader2, Plus, CircleHelp } from 'lucide-react';
 import axios from 'axios';
 import { usePollingFetch } from '../hooks/usePollingFetch';
 
@@ -35,9 +35,16 @@ const queueIcon: Record<QueueName, React.ElementType> = {
     other: Clock,
 };
 
+const optimizationTierHelp: Record<string, string> = {
+    low_risk_repair: 'Repairs existing transcript rows in place. Best for fragmentation, tiny unknown speaker islands, conservative entity cleanup, and formatting cleanup.',
+    diarization_rebuild: 'Reuses the raw transcript but rebuilds speaker segmentation and speaker assignment. Best when the words are mostly fine but speaker labels are unstable.',
+    full_retranscription: 'Forces a fresh transcription pass before diarization. Use this when the underlying ASR is weak, multilingual routing was wrong, or the transcript is broadly unreliable.',
+    manual_review: 'Flags the episode for human inspection because the current evaluator does not see a safe automatic repair path.',
+};
+
 const getQueueNameForJob = (job: Job): QueueName => {
     const jt = (job.job_type || '').toLowerCase();
-    if (jt === 'process' || jt === 'diarize') return 'pipeline';
+    if (jt === 'process' || jt === 'diarize' || jt === 'voicefixer_cleanup' || jt === 'conversation_reconstruct') return 'pipeline';
     if (jt === 'funny_detect' || jt === 'funny_explain') return 'funny';
     if (jt === 'youtube_metadata') return 'youtube';
     if (jt === 'clip_export_mp4' || jt === 'clip_export_captions') return 'clip';
@@ -53,6 +60,8 @@ const getJobTypeLabel = (jobType: string): string => {
     if (jt === 'youtube_metadata') return 'Summary/Chapters';
     if (jt === 'clip_export_mp4') return 'Clip MP4';
     if (jt === 'clip_export_captions') return 'Clip Captions';
+    if (jt === 'voicefixer_cleanup') return 'VoiceFixer';
+    if (jt === 'conversation_reconstruct') return 'Reconstruct';
     return jobType || 'Job';
 };
 
@@ -88,10 +97,30 @@ export function JobQueue() {
     const [loading, setLoading] = useState(true);
     const [workerStatus, setWorkerStatus] = useState<'online' | 'offline' | 'stalled'>('offline');
     const [jobsFetchError, setJobsFetchError] = useState<string | null>(null);
+    const [upperTab, setUpperTab] = useState<'queue' | 'optimization'>('queue');
+    const [optimizationTab, setOptimizationTab] = useState<'campaigns' | 'benchmarks'>('campaigns');
     const [lowerTab, setLowerTab] = useState<'transcribe' | 'diarize' | 'history'>('transcribe');
     const [pipelineFocus, setPipelineFocus] = useState<PipelineFocus | null>(null);
     const [sortBy, setSortBy] = useState<'created_at' | 'duration' | 'name'>('created_at');
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+    const [transcriptEvalSummary, setTranscriptEvalSummary] = useState<TranscriptEvaluationSummary | null>(null);
+    const [diarizationBenchmarkSummary, setDiarizationBenchmarkSummary] = useState<TranscriptDiarizationConfigBenchmark[]>([]);
+    const [campaigns, setCampaigns] = useState<TranscriptOptimizationCampaign[]>([]);
+    const [selectedCampaignId, setSelectedCampaignId] = useState<number | null>(null);
+    const [campaignItems, setCampaignItems] = useState<TranscriptOptimizationCampaignItem[]>([]);
+    const [channels, setChannels] = useState<Channel[]>([]);
+    const [campaignChannelIdDraft, setCampaignChannelIdDraft] = useState('all');
+    const [campaignLimitDraft, setCampaignLimitDraft] = useState('100');
+    const [campaignForceNonEligible, setCampaignForceNonEligible] = useState(false);
+    const [campaignTierDrafts, setCampaignTierDrafts] = useState<Record<string, boolean>>({
+        low_risk_repair: true,
+        diarization_rebuild: true,
+        full_retranscription: true,
+        manual_review: false,
+    });
+    const [creatingCampaign, setCreatingCampaign] = useState(false);
+    const [executingCampaignId, setExecutingCampaignId] = useState<number | null>(null);
+    const [deletingCampaignId, setDeletingCampaignId] = useState<number | null>(null);
     const mountedRef = useRef(false);
 
     const byDescCreated = (a: Job, b: Job) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
@@ -123,17 +152,16 @@ export function JobQueue() {
         onError: (e) => { console.error('Failed to fetch queue summary:', e); setQueueSummary(null); },
     });
 
-    const fetchHistoryJobs = usePollingFetch<[{ data: Job[] }, { data: Job[] }, { data: Job[] }, { data: Job[] }]>({
+    const fetchHistoryJobs = usePollingFetch<[{ data: Job[] }, { data: Job[] }, { data: Job[] }]>({
         mountedRef,
         request: (signal) => Promise.all([
-            api.get<Job[]>('/jobs', { params: { status: 'completed', job_type: 'process,diarize', limit: HISTORY_FETCH_LIMIT }, signal }),
-            api.get<Job[]>('/jobs', { params: { status: 'failed', job_type: 'process,diarize', limit: HISTORY_FETCH_LIMIT }, signal }),
+            api.get<Job[]>('/jobs', { params: { status: 'completed,failed,cancelled', job_type: 'process,diarize,voicefixer_cleanup,conversation_reconstruct', limit: HISTORY_FETCH_LIMIT }, signal }),
             api.get<Job[]>('/jobs', { params: { status: 'waiting_diarize', job_type: 'process', limit: HISTORY_FETCH_LIMIT }, signal }),
             api.get<Job[]>('/jobs', { params: { status: 'completed', job_type: 'funny_detect,funny_explain', limit: HISTORY_FETCH_LIMIT }, signal }),
-        ]).then(([completed, failed, waitingDiarize, funny]) => ({
-            data: [completed, failed, waitingDiarize, funny] as [{ data: Job[] }, { data: Job[] }, { data: Job[] }, { data: Job[] }],
+        ]).then(([pipelineTerminal, waitingDiarize, funny]) => ({
+            data: [pipelineTerminal, waitingDiarize, funny] as [{ data: Job[] }, { data: Job[] }, { data: Job[] }],
         })),
-        onSuccess: ([completedRes, failedRes, waitingDiarizeRes, funnyCompletedRes]) => {
+        onSuccess: ([pipelineTerminalRes, waitingDiarizeRes, funnyCompletedRes]) => {
             const filterChildDiarize = (jobs: any[]) => {
                 return (Array.isArray(jobs) ? jobs : []).filter(job => {
                     if ((job.job_type || '').toLowerCase() === 'diarize') {
@@ -150,8 +178,7 @@ export function JobQueue() {
 
             const processMerged = [
                 ...filterChildDiarize(waitingDiarizeRes.data),
-                ...filterChildDiarize(completedRes.data),
-                ...filterChildDiarize(failedRes.data),
+                ...filterChildDiarize(pipelineTerminalRes.data),
             ].sort(byDescCreated);
             const funnyMerged = (Array.isArray(funnyCompletedRes.data) ? funnyCompletedRes.data : []).sort(byDescCreated);
             setHistoryRows(processMerged);
@@ -174,6 +201,54 @@ export function JobQueue() {
         onError: () => setWorkerStatus('offline'),
     });
 
+    const fetchTranscriptEvalSummary = usePollingFetch<TranscriptEvaluationSummary>({
+        mountedRef,
+        request: (signal) => api.get('/transcript-evaluation/summary', { signal }),
+        onSuccess: (data) => setTranscriptEvalSummary(data || null),
+        onError: (e) => {
+            console.error('Failed to fetch transcript evaluation summary:', e);
+            setTranscriptEvalSummary(null);
+        },
+    });
+
+    const fetchDiarizationBenchmarkSummary = usePollingFetch<TranscriptDiarizationConfigBenchmark[]>({
+        mountedRef,
+        request: (signal) => api.get('/transcript-evaluation/diarization-config-summary', { signal }),
+        onSuccess: (data) => setDiarizationBenchmarkSummary(Array.isArray(data) ? data : []),
+        onError: (e) => {
+            console.error('Failed to fetch diarization benchmark summary:', e);
+            setDiarizationBenchmarkSummary([]);
+        },
+    });
+
+    const fetchCampaigns = usePollingFetch<TranscriptOptimizationCampaign[]>({
+        mountedRef,
+        request: (signal) => api.get('/transcript-optimization-campaigns', { params: { limit: 20 }, signal }),
+        onSuccess: (data) => {
+            const rows = Array.isArray(data) ? data : [];
+            setCampaigns(rows);
+            setSelectedCampaignId((current) => {
+                if (current && rows.some((item) => item.id === current)) return current;
+                return rows[0]?.id ?? null;
+            });
+        },
+        onError: (e) => {
+            console.error('Failed to fetch transcript optimization campaigns:', e);
+            setCampaigns([]);
+            setSelectedCampaignId(null);
+        },
+    });
+
+    const fetchChannels = usePollingFetch<Channel[]>({
+        mountedRef,
+        request: (signal) => api.get('/channels', { signal }),
+        onSuccess: (data) => setChannels(Array.isArray(data) ? data : []),
+        onError: (e) => {
+            console.error('Failed to fetch channels:', e);
+            setChannels([]);
+        },
+    });
+
     useEffect(() => {
         mountedRef.current = true;
         return () => {
@@ -187,12 +262,19 @@ export function JobQueue() {
         fetchQueueSummary(true);
         fetchPipelineFocus(true);
         checkWorkerStatus(true);
+        fetchTranscriptEvalSummary(true);
+        fetchDiarizationBenchmarkSummary(true);
+        fetchCampaigns(true);
+        fetchChannels(true);
 
         const jobInterval = setInterval(() => fetchJobs(), JOBS_POLL_MS);
         const historyInterval = setInterval(() => fetchHistoryJobs(), HISTORY_POLL_MS);
         const summaryInterval = setInterval(() => fetchQueueSummary(), SUMMARY_POLL_MS);
         const pipelineFocusInterval = setInterval(() => fetchPipelineFocus(), SUMMARY_POLL_MS);
         const workerInterval = setInterval(() => checkWorkerStatus(), WORKER_POLL_MS);
+        const transcriptSummaryInterval = setInterval(() => fetchTranscriptEvalSummary(), SUMMARY_POLL_MS * 2);
+        const diarizationSummaryInterval = setInterval(() => fetchDiarizationBenchmarkSummary(), SUMMARY_POLL_MS * 2);
+        const campaignInterval = setInterval(() => fetchCampaigns(), HISTORY_POLL_MS);
 
         return () => {
             clearInterval(jobInterval);
@@ -200,8 +282,11 @@ export function JobQueue() {
             clearInterval(summaryInterval);
             clearInterval(pipelineFocusInterval);
             clearInterval(workerInterval);
+            clearInterval(transcriptSummaryInterval);
+            clearInterval(diarizationSummaryInterval);
+            clearInterval(campaignInterval);
         };
-    }, [fetchJobs, fetchHistoryJobs, fetchQueueSummary, fetchPipelineFocus, checkWorkerStatus]);
+    }, [fetchJobs, fetchHistoryJobs, fetchQueueSummary, fetchPipelineFocus, checkWorkerStatus, fetchTranscriptEvalSummary, fetchDiarizationBenchmarkSummary, fetchCampaigns, fetchChannels]);
 
     // Effect to refetch jobs immediately when sort changes
     useEffect(() => {
@@ -209,6 +294,27 @@ export function JobQueue() {
             fetchJobs(true);
         }
     }, [sortBy, sortDir]);
+
+    useEffect(() => {
+        if (!selectedCampaignId) {
+            setCampaignItems([]);
+            return;
+        }
+        let cancelled = false;
+        api.get<TranscriptOptimizationCampaignItem[]>(`/transcript-optimization-campaigns/${selectedCampaignId}/items`)
+            .then((res) => {
+                if (!cancelled) {
+                    setCampaignItems(Array.isArray(res.data) ? res.data : []);
+                }
+            })
+            .catch((e) => {
+                console.error('Failed to fetch campaign items:', e);
+                if (!cancelled) {
+                    setCampaignItems([]);
+                }
+            });
+        return () => { cancelled = true; };
+    }, [selectedCampaignId]);
 
     const handlePause = async (jobId: number) => {
         try { await api.post(`/jobs/${jobId}/pause`); fetchJobs(true); fetchHistoryJobs(true); fetchQueueSummary(true); } catch (e) { console.error(e); }
@@ -253,7 +359,7 @@ export function JobQueue() {
     };
 
     const handleClearHistory = async () => {
-        if (!confirm('Clear completed, failed, and pending diarization jobs from history?')) return;
+        if (!confirm('Clear completed, failed, cancelled, and pending diarization jobs from history?')) return;
         try {
             await api.delete('/jobs/history');
             setHistoryRows([]);
@@ -262,6 +368,86 @@ export function JobQueue() {
             fetchHistoryJobs(true);
             fetchQueueSummary(true);
         } catch (e) { console.error(e); }
+    };
+
+    const handleCreateTranscriptCampaign = async () => {
+        const limit = Number(campaignLimitDraft);
+        if (!Number.isFinite(limit) || limit < 1 || limit > 1000) {
+            alert('Set a valid campaign limit between 1 and 1000.');
+            return;
+        }
+        const selectedTiers = Object.entries(campaignTierDrafts)
+            .filter(([, enabled]) => enabled)
+            .map(([tier]) => tier);
+        if (selectedTiers.length === 0) {
+            alert('Select at least one optimization tier for the campaign.');
+            return;
+        }
+        const channelId = campaignChannelIdDraft === 'all' ? null : Number(campaignChannelIdDraft);
+        setCreatingCampaign(true);
+        try {
+            const res = await api.post<TranscriptOptimizationCampaign>('/transcript-optimization-campaigns', {
+                channel_id: channelId,
+                limit,
+                tiers: selectedTiers,
+                force_non_eligible: campaignForceNonEligible,
+            });
+            setSelectedCampaignId(res.data.id);
+            await fetchCampaigns(true);
+        } catch (e) {
+            console.error('Failed to create transcript campaign:', e);
+            const detail = axios.isAxiosError(e)
+                ? String((e.response?.data as any)?.detail || e.message || 'Unknown error')
+                : 'Unknown error';
+            alert(`Failed to create transcript campaign: ${detail}`);
+        } finally {
+            setCreatingCampaign(false);
+        }
+    };
+
+    const handleExecuteTranscriptCampaign = async (campaignId: number) => {
+        setExecutingCampaignId(campaignId);
+        try {
+            const res = await api.post<TranscriptOptimizationCampaignExecuteResponse>(`/transcript-optimization-campaigns/${campaignId}/execute`);
+            alert(`Campaign queued ${res.data.queued_jobs} job${res.data.queued_jobs === 1 ? '' : 's'}.`);
+            await Promise.all([fetchCampaigns(true), fetchJobs(true), fetchHistoryJobs(true), fetchQueueSummary(true)]);
+            const itemsRes = await api.get<TranscriptOptimizationCampaignItem[]>(`/transcript-optimization-campaigns/${campaignId}/items`);
+            setCampaignItems(Array.isArray(itemsRes.data) ? itemsRes.data : []);
+        } catch (e) {
+            console.error('Failed to execute transcript campaign:', e);
+            const detail = axios.isAxiosError(e)
+                ? String((e.response?.data as any)?.detail || e.message || 'Unknown error')
+                : 'Unknown error';
+            alert(`Failed to execute campaign: ${detail}`);
+        } finally {
+            setExecutingCampaignId(null);
+        }
+    };
+
+    const handleDeleteTranscriptCampaign = async (campaignId: number) => {
+        const campaign = campaigns.find((item) => item.id === campaignId);
+        const label = campaign ? `campaign ${campaign.id}` : 'this campaign';
+        if (!window.confirm(`Delete ${label}? This removes the campaign record and backlog items, but keeps any jobs already queued.`)) {
+            return;
+        }
+        setDeletingCampaignId(campaignId);
+        try {
+            const res = await api.delete<TranscriptOptimizationCampaignDeleteResponse>(`/transcript-optimization-campaigns/${campaignId}`);
+            if (selectedCampaignId === campaignId) {
+                setSelectedCampaignId(null);
+                setCampaignItems([]);
+            }
+            await fetchCampaigns(true);
+            alert(`Deleted campaign ${res.data.campaign_id} and removed ${res.data.deleted_items} backlog item${res.data.deleted_items === 1 ? '' : 's'}.`);
+        } catch (e) {
+            console.error('Failed to delete transcript campaign:', e);
+            const detail = axios.isAxiosError(e)
+                ? String((e.response?.data as any)?.detail || e.message || 'Unknown error')
+                : 'Unknown error';
+            alert(`Failed to delete campaign: ${detail}`);
+        } finally {
+            setDeletingCampaignId(null);
+        }
     };
 
     const handleResubmit = async (jobId: number) => {
@@ -290,7 +476,6 @@ export function JobQueue() {
         return toApiUrl(job.video.thumbnail_url);
     };
 
-    const byAscCreated = (a: Job, b: Job) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
     const byDescStarted = (a: Job, b: Job) => {
         const aTime = new Date(a.started_at || a.created_at).getTime();
         const bTime = new Date(b.started_at || b.created_at).getTime();
@@ -340,6 +525,7 @@ export function JobQueue() {
         const s = (status || '').toLowerCase();
         if (s === 'completed') return 'bg-green-50 text-green-700 border-green-200';
         if (s === 'failed') return 'bg-red-50 text-red-700 border-red-200';
+        if (s === 'cancelled') return 'bg-slate-100 text-slate-700 border-slate-300';
         if (s === 'paused') return 'bg-amber-50 text-amber-700 border-amber-200';
         if (s === 'waiting_diarize') return 'bg-indigo-50 text-indigo-700 border-indigo-200';
         if (ACTIVE_STATUSES.includes(s)) return 'bg-blue-50 text-blue-700 border-blue-200';
@@ -354,6 +540,7 @@ const getStatusLabel = (status: string): string => {
         if (s === 'transcribing') return 'transcribing';
         if (s === 'diarizing') return 'diarizing';
         if (s === 'waiting_diarize') return 'transcribed';
+        if (s === 'cancelled') return 'cancelled';
         return s;
     };
 
@@ -376,6 +563,7 @@ const getStatusLabel = (status: string): string => {
             return null;
         };
         const engineUsed = normalizeEngine(payload.transcription_engine_used);
+        if (engineUsed === 'whisper') return 'whisper';
         if (engineUsed) return engineUsed;
         const engineRequested = normalizeEngine(payload.transcription_engine_requested);
         if (engineRequested) return engineRequested;
@@ -440,6 +628,8 @@ const getStatusLabel = (status: string): string => {
     );
 
     const activeJobs = jobs.filter(j => ACTIVE_STATUSES.includes(j.status)).sort(byDescStarted);
+    const queuedJobs = jobs.filter(j => j.status === 'queued');
+    const pausedJobs = jobs.filter(j => j.status === 'paused');
     const activeByQueue: Record<QueueName, Job[]> = {
         pipeline: [],
         funny: [],
@@ -448,7 +638,8 @@ const getStatusLabel = (status: string): string => {
         other: [],
     };
     activeJobs.forEach(j => activeByQueue[getQueueNameForJob(j)].push(j));
-    const currentJob = activeByQueue.pipeline[0] ?? null;
+    const pausedPipelineJobs = pausedJobs.filter(j => getQueueNameForJob(j) === 'pipeline').sort(byDescStarted);
+    const currentJob = activeByQueue.pipeline[0] ?? pausedPipelineJobs[0] ?? null;
     const activeByQueueExcludingCurrent: Record<QueueName, Job[]> = {
         pipeline: currentJob ? activeByQueue.pipeline.filter(j => j.id !== currentJob.id) : [...activeByQueue.pipeline],
         funny: [...activeByQueue.funny],
@@ -459,8 +650,6 @@ const getStatusLabel = (status: string): string => {
     const additionalActiveCount = queueOrder.reduce((sum, q) => sum + activeByQueueExcludingCurrent[q].length, 0);
     // Keep queued/paused jobs in backend order so the "Sort Queued" control
     // actually changes what the user sees in the pending queue.
-    const queuedJobs = jobs.filter(j => j.status === 'queued');
-    const pausedJobs = jobs.filter(j => j.status === 'paused');
     const historyJobs = historyRows;
 
     const toggleHistoryError = (jobId: number) => {
@@ -577,7 +766,11 @@ const getStatusLabel = (status: string): string => {
         other: { queued: [], paused: [], running: [] },
     };
     queuedJobs.forEach(j => pendingByQueue[getQueueNameForJob(j)].queued.push(j));
-    pausedJobs.forEach(j => pendingByQueue[getQueueNameForJob(j)].paused.push(j));
+    pausedJobs.forEach(j => {
+        const q = getQueueNameForJob(j);
+        if (q === 'pipeline' && currentJob && j.id === currentJob.id) return;
+        pendingByQueue[q].paused.push(j);
+    });
     activeJobs.forEach(j => {
         const q = getQueueNameForJob(j);
         if (q === 'pipeline' && currentJob && j.id === currentJob.id) return; // already shown in Current Job card
@@ -630,6 +823,8 @@ const getStatusLabel = (status: string): string => {
 
     const ActiveJobCard = ({ job }: { job: Job }) => {
         const thumb = getThumbnailUrl(job);
+        const jobType = (job.job_type || '').toLowerCase();
+        const isPausedJob = (job.status || '').toLowerCase() === 'paused';
         const transcriptionEngineUsed = getTranscriptionEngineUsed(job);
         const modelPolicy = getPipelineModelPolicy(job);
         const detail = (job.status_detail || '').toLowerCase();
@@ -667,7 +862,8 @@ const getStatusLabel = (status: string): string => {
             detail.includes('moving parakeet model to gpu') ||
             detail.includes('initializing parakeet decoder') ||
             detail.includes('initializing parakeet model on cpu') ||
-            detail.includes('reloading model');
+            detail.includes('reloading model') ||
+            detail.includes('loading reconstruction tts model');
         const inferredModelLoadActive =
             job.status === 'transcribing' &&
             stageStartedAt.transcribe == null &&
@@ -856,6 +1052,129 @@ const getStatusLabel = (status: string): string => {
             );
         };
 
+        const renderAuxiliaryProgressBar = (
+            label: string,
+            Icon: React.ElementType,
+            state: 'pending' | 'active' | 'completed',
+            percent: number,
+            activeLabel: string,
+        ) => {
+            const boundedPercent = Math.max(0, Math.min(100, percent));
+            const isIndeterminate = state === 'active' && boundedPercent <= 0;
+            return (
+                <div className="space-y-1.5">
+                    <div className="flex justify-between items-center text-xs text-slate-500 uppercase tracking-wide font-semibold">
+                        <div className="flex items-center gap-1.5">
+                            <Icon size={12} className={state === 'active' ? 'text-blue-500' : ''} />
+                            <span>{label}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {state === 'completed' && <CheckCircle2 size={14} className="text-green-500" />}
+                            {state === 'active' && (
+                                <span className="text-blue-600 animate-pulse">
+                                    {activeLabel}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                    <div className="h-2 bg-slate-100 rounded-full overflow-hidden relative">
+                        {isIndeterminate ? (
+                            <div className="absolute inset-0 bg-blue-500/20">
+                                <div className="h-full w-1/3 relative overflow-hidden bg-blue-500 animate-[shimmer_1.5s_infinite]">
+                                    <div className="absolute inset-0 bg-white/30 skew-x-12" />
+                                </div>
+                            </div>
+                        ) : (
+                            <div
+                                className={`h-full transition-all duration-500 ${state === 'completed' ? 'bg-green-500' : 'bg-blue-500'}`}
+                                style={{ width: `${state === 'completed' ? 100 : boundedPercent}%` }}
+                            />
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        const renderAuxiliaryStages = () => {
+            const rawProgress = Math.max(0, Math.min(100, Number(job.progress || 0)));
+
+            if (jobType === 'conversation_reconstruct') {
+                const referencesActive = detail.includes('extracting speaker references');
+                const modelLoadActive = detail.includes('loading reconstruction tts model');
+                const synthActive = detail.includes('reconstructing segment');
+                const assembleActive = detail.includes('writing reconstructed');
+
+                const referenceState: 'pending' | 'active' | 'completed' =
+                    rawProgress >= 15 || modelLoadActive || synthActive || assembleActive ? 'completed'
+                    : referencesActive ? 'active'
+                    : rawProgress > 0 ? 'active'
+                    : 'pending';
+                const modelState: 'pending' | 'active' | 'completed' =
+                    synthActive || assembleActive || rawProgress >= 25 ? 'completed'
+                    : modelLoadActive || (rawProgress >= 15 && rawProgress < 25) ? 'active'
+                    : 'pending';
+                const synthState: 'pending' | 'active' | 'completed' =
+                    assembleActive || rawProgress >= 94 ? 'completed'
+                    : synthActive || (rawProgress >= 20 && rawProgress < 94) ? 'active'
+                    : 'pending';
+                const assembleState: 'pending' | 'active' | 'completed' =
+                    job.status === 'completed' ? 'completed'
+                    : assembleActive || rawProgress >= 94 ? 'active'
+                    : 'pending';
+
+                const synthPercent = synthState === 'completed'
+                    ? 100
+                    : synthState === 'active'
+                        ? Math.max(5, ((rawProgress - 20) / 74) * 100)
+                        : 0;
+                const assemblePercent = assembleState === 'completed'
+                    ? 100
+                    : assembleState === 'active'
+                        ? Math.max(10, ((rawProgress - 94) / 6) * 100)
+                        : 0;
+
+                return (
+                    <div className="space-y-2.5">
+                        {renderAuxiliaryProgressBar('Extracting References', AudioLines, referenceState, referenceState === 'active' ? Math.max(10, (rawProgress / 15) * 100) : 0, 'Preparing clips...')}
+                        {renderAuxiliaryProgressBar('Model Loading', Cpu, modelState, modelState === 'active' ? Math.max(10, ((rawProgress - 15) / 10) * 100) : 0, 'Loading TTS model...')}
+                        {renderAuxiliaryProgressBar('Synthesizing', Bot, synthState, synthPercent, 'Generating speaker-cloned audio...')}
+                        {renderAuxiliaryProgressBar('Assembling Mix', DownloadCloud, assembleState, assemblePercent, 'Writing reconstructed WAV...')}
+                    </div>
+                );
+            }
+
+            if (jobType === 'voicefixer_cleanup') {
+                const prepareActive = detail.includes('preparing media');
+                const restoreActive = detail.includes('voicefixer restoration');
+                const blendActive = detail.includes('blending restored');
+                const levelActive = detail.includes('voice leveling');
+                const mergeActive = detail.includes('merging restored') || detail.includes('replacing');
+
+                const prepareState: 'pending' | 'active' | 'completed' =
+                    rawProgress >= 45 || restoreActive || blendActive || levelActive || mergeActive ? 'completed'
+                    : prepareActive || rawProgress > 0 ? 'active'
+                    : 'pending';
+                const restoreState: 'pending' | 'active' | 'completed' =
+                    rawProgress >= 62 || blendActive || levelActive || mergeActive ? 'completed'
+                    : restoreActive || (rawProgress >= 45 && rawProgress < 62) ? 'active'
+                    : 'pending';
+                const finishState: 'pending' | 'active' | 'completed' =
+                    job.status === 'completed' ? 'completed'
+                    : blendActive || levelActive || mergeActive || rawProgress >= 62 ? 'active'
+                    : 'pending';
+
+                return (
+                    <div className="space-y-2.5">
+                        {renderAuxiliaryProgressBar('Preparing Media', DownloadCloud, prepareState, prepareState === 'active' ? Math.max(10, (rawProgress / 45) * 100) : 0, 'Preparing audio...')}
+                        {renderAuxiliaryProgressBar('Restoring Audio', AudioLines, restoreState, restoreState === 'active' ? Math.max(10, ((rawProgress - 45) / 17) * 100) : 0, 'Running VoiceFixer...')}
+                        {renderAuxiliaryProgressBar('Finishing Output', Cpu, finishState, finishState === 'active' ? Math.max(10, ((rawProgress - 62) / 38) * 100) : 0, 'Blending / leveling / merging...')}
+                    </div>
+                );
+            }
+
+            return null;
+        };
+
         return (
             <div className="bg-white p-3.5 sm:p-4 rounded-xl border border-blue-100 shadow-sm flex flex-col lg:flex-row gap-4 items-start">
                 <div className="w-full lg:w-44 h-28 lg:h-24 bg-slate-100 rounded-lg overflow-hidden shrink-0 border border-slate-200 relative">
@@ -893,34 +1212,48 @@ const getStatusLabel = (status: string): string => {
                             </div>
                         </div>
                         <div className="flex gap-2 shrink-0">
-                            <button onClick={() => handlePause(job.id)} className="px-3 py-1.5 bg-amber-50 text-amber-700 rounded hover:bg-amber-100 flex items-center gap-1 transition-colors text-xs font-medium">
-                                <Pause size={14} /> Pause
-                            </button>
+                            {isPausedJob ? (
+                                <button onClick={() => handleResume(job.id)} className="px-3 py-1.5 bg-emerald-50 text-emerald-700 rounded hover:bg-emerald-100 flex items-center gap-1 transition-colors text-xs font-medium">
+                                    <Play size={14} /> Resume
+                                </button>
+                            ) : (
+                                <button onClick={() => handlePause(job.id)} className="px-3 py-1.5 bg-amber-50 text-amber-700 rounded hover:bg-amber-100 flex items-center gap-1 transition-colors text-xs font-medium">
+                                    <Pause size={14} /> Pause
+                                </button>
+                            )}
                             <button onClick={() => handleCancel(job.id)} className="px-3 py-1.5 bg-red-50 text-red-700 rounded hover:bg-red-100 flex items-center gap-1 transition-colors text-xs font-medium">
                                 <Trash2 size={14} /> Cancel
                             </button>
                         </div>
                     </div>
 
-                    <div className="space-y-2.5">
-                        {renderProgressBar('Downloading', 'download', DownloadCloud)}
-                        {showModelLoadStage && renderProgressBar('Model Loading', 'model_load', Cpu)}
-                        {renderProgressBar('Transcribing', 'transcribe', FileText)}
-                        {renderProgressBar('Diarizing', 'diarize', Users)}
-                    </div>
+                    {jobType === 'process' || jobType === 'diarize' ? (
+                        <div className="space-y-2.5">
+                            {renderProgressBar('Downloading', 'download', DownloadCloud)}
+                            {showModelLoadStage && renderProgressBar('Model Loading', 'model_load', Cpu)}
+                            {renderProgressBar('Transcribing', 'transcribe', FileText)}
+                            {renderProgressBar('Diarizing', 'diarize', Users)}
+                        </div>
+                    ) : (
+                        renderAuxiliaryStages()
+                    )}
 
                     {job.status_detail && (
                         <div className={`flex items-center gap-2 text-xs sm:text-sm px-3 py-2 rounded-lg border ${
-                            modelLoadDetailActive && stageStartedAt.transcribe == null
+                            isPausedJob
+                                ? 'text-amber-700 bg-amber-50 border-amber-200'
+                                : modelLoadDetailActive && stageStartedAt.transcribe == null
                                 ? 'text-slate-600 bg-slate-50 border-slate-200'
                                 : 'text-blue-600 bg-blue-50 border-blue-100'
                         }`}>
-                            <div className={`w-4 h-4 border-2 border-t-transparent rounded-full animate-spin ${
-                                modelLoadDetailActive && stageStartedAt.transcribe == null
+                            <div className={`w-4 h-4 border-2 border-t-transparent rounded-full ${isPausedJob ? '' : 'animate-spin'} ${
+                                isPausedJob
+                                    ? 'border-amber-400'
+                                    : modelLoadDetailActive && stageStartedAt.transcribe == null
                                     ? 'border-slate-400'
                                     : 'border-blue-400'
                             }`} />
-                            <span className="font-medium">{job.status_detail}</span>
+                            <span className="font-medium">{isPausedJob ? 'Paused by user' : job.status_detail}</span>
                         </div>
                     )}
                 </div>
@@ -1134,6 +1467,322 @@ const getStatusLabel = (status: string): string => {
                         })}
                     </section>
 
+                    <section className="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm">
+                        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                            <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+                                <button
+                                    onClick={() => setUpperTab('queue')}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                                        upperTab === 'queue'
+                                            ? 'bg-white text-slate-800 shadow-sm'
+                                            : 'text-slate-500 hover:text-slate-700'
+                                    }`}
+                                >
+                                    Queue Monitor
+                                </button>
+                                <button
+                                    onClick={() => setUpperTab('optimization')}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors inline-flex items-center gap-2 ${
+                                        upperTab === 'optimization'
+                                            ? 'bg-white text-slate-800 shadow-sm'
+                                            : 'text-slate-500 hover:text-slate-700'
+                                    }`}
+                                >
+                                    Optimization
+                                    <span className={`text-[11px] px-1.5 py-0.5 rounded-full border ${
+                                        upperTab === 'optimization'
+                                            ? 'bg-slate-50 text-slate-700 border-slate-200'
+                                            : 'bg-white text-slate-500 border-slate-200'
+                                    }`}>
+                                        {campaigns.length}
+                                    </span>
+                                </button>
+                            </div>
+                            <div className="text-xs text-slate-500">
+                                {upperTab === 'queue'
+                                    ? 'Focused on live queue state, active jobs, and pipeline history.'
+                                    : 'Benchmarking, transcript repair campaigns, and corpus-level optimization controls.'}
+                            </div>
+                        </div>
+                    </section>
+
+                    {upperTab === 'optimization' && (
+                    <section className="space-y-4">
+                        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                                <div>
+                                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Transcript Optimization</div>
+                                    <div className="mt-1 text-sm text-slate-600">Separated from the live queue so job monitoring stays readable while optimization planning remains available.</div>
+                                </div>
+                                <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+                                    <button
+                                        onClick={() => setOptimizationTab('campaigns')}
+                                        className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                                            optimizationTab === 'campaigns'
+                                                ? 'bg-white text-slate-800 shadow-sm'
+                                                : 'text-slate-500 hover:text-slate-700'
+                                        }`}
+                                    >
+                                        Campaigns
+                                    </button>
+                                    <button
+                                        onClick={() => setOptimizationTab('benchmarks')}
+                                        className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                                            optimizationTab === 'benchmarks'
+                                                ? 'bg-white text-slate-800 shadow-sm'
+                                                : 'text-slate-500 hover:text-slate-700'
+                                        }`}
+                                    >
+                                        Benchmarks
+                                    </button>
+                                </div>
+                            </div>
+                        </section>
+
+                    {optimizationTab === 'benchmarks' ? (
+                    <section className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+                        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                            <div className="flex items-start justify-between gap-3">
+                                <div>
+                                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Benchmark Corpus</div>
+                                    <div className="mt-1 text-sm text-slate-600">Corpus-level view of the transcript benchmark set and human review coverage.</div>
+                                </div>
+                                <button
+                                    onClick={() => {
+                                        fetchTranscriptEvalSummary(true);
+                                        fetchDiarizationBenchmarkSummary(true);
+                                    }}
+                                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                                >
+                                    <RefreshCw size={14} />
+                                    Refresh
+                                </button>
+                            </div>
+                            <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Gold Windows</div>
+                                    <div className="mt-1 text-xl font-semibold text-slate-800">{transcriptEvalSummary?.total_gold_windows ?? 0}</div>
+                                </div>
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Results</div>
+                                    <div className="mt-1 text-xl font-semibold text-slate-800">{transcriptEvalSummary?.total_results ?? 0}</div>
+                                </div>
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Avg WER</div>
+                                    <div className="mt-1 text-xl font-semibold text-slate-800">{transcriptEvalSummary?.average_wer?.toFixed(3) ?? 'n/a'}</div>
+                                </div>
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Reviewed</div>
+                                    <div className="mt-1 text-xl font-semibold text-slate-800">{transcriptEvalSummary?.total_reviewed_results ?? 0}</div>
+                                </div>
+                            </div>
+                            <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                <div className="text-sm font-semibold text-slate-800">Diarization Config Leaderboard</div>
+                                {diarizationBenchmarkSummary.length === 0 ? (
+                                    <div className="mt-2 text-xs text-slate-500">No diarization benchmark runs scored against gold windows yet.</div>
+                                ) : (
+                                    <div className="mt-3 space-y-2">
+                                        {diarizationBenchmarkSummary.slice(0, 4).map((item) => (
+                                            <div key={item.label} className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                <div className="min-w-0">
+                                                    <div className="text-sm font-medium text-slate-800">{item.label}</div>
+                                                    <div className="mt-0.5 text-[11px] text-slate-500">
+                                                        {item.run_count} run{item.run_count === 1 ? '' : 's'} · WER {item.average_wer?.toFixed(3) ?? 'n/a'} · CER {item.average_cer?.toFixed(3) ?? 'n/a'}
+                                                    </div>
+                                                </div>
+                                                {item.latest_run_id ? <div className="text-[11px] text-slate-500">Run {item.latest_run_id}</div> : null}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </section>
+                    ) : (
+                    <div className="space-y-4">
+                    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Campaign Overview</div>
+                        <div className="mt-1 text-sm text-slate-600">Plan and execute transcript repair, rebuild, and retranscription campaigns without crowding the live queue monitor.</div>
+                        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Campaigns</div>
+                                <div className="mt-1 text-xl font-semibold text-slate-800">{campaigns.length}</div>
+                            </div>
+                            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Reviewed Results</div>
+                                <div className="mt-1 text-xl font-semibold text-slate-800">{transcriptEvalSummary?.total_reviewed_results ?? 0}</div>
+                            </div>
+                            <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Avg WER</div>
+                            <div className="mt-1 text-xl font-semibold text-slate-800">{transcriptEvalSummary?.average_wer?.toFixed(3) ?? 'n/a'}</div>
+                            </div>
+                        </div>
+                    </section>
+                    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Optimization Campaigns</div>
+                            <div className="mt-1 text-sm text-slate-600">Create a queueable optimization pass across the benchmark backlog instead of firing jobs ad hoc.</div>
+                            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                                <label className="text-xs text-slate-600">
+                                    <span className="mb-1 block font-medium">Channel Scope</span>
+                                    <select
+                                        value={campaignChannelIdDraft}
+                                        onChange={(e) => setCampaignChannelIdDraft(e.target.value)}
+                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                    >
+                                        <option value="all">All Channels</option>
+                                        {channels.map((channel) => (
+                                            <option key={channel.id} value={String(channel.id)}>
+                                                {channel.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </label>
+                                <label className="text-xs text-slate-600">
+                                    <span className="mb-1 block font-medium">Limit</span>
+                                    <input
+                                        value={campaignLimitDraft}
+                                        onChange={(e) => setCampaignLimitDraft(e.target.value)}
+                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                    />
+                                </label>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                                {[
+                                    ['low_risk_repair', 'Repair'],
+                                    ['diarization_rebuild', 'Rebuild'],
+                                    ['full_retranscription', 'Retranscribe'],
+                                    ['manual_review', 'Manual'],
+                                ].map(([tier, label]) => (
+                                    <label key={tier} className="group relative inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-slate-700">
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(campaignTierDrafts[tier])}
+                                            onChange={(e) => setCampaignTierDrafts((current) => ({ ...current, [tier]: e.target.checked }))}
+                                        />
+                                        {label}
+                                        <span className="inline-flex text-slate-400">
+                                            <CircleHelp size={13} />
+                                        </span>
+                                        <span className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-64 -translate-x-1/2 rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 text-[11px] leading-5 text-white shadow-xl group-hover:block">
+                                            {optimizationTierHelp[tier] || 'Optimization help unavailable.'}
+                                        </span>
+                                    </label>
+                                ))}
+                            </div>
+                            <label className="mt-3 inline-flex items-center gap-2 text-xs text-slate-600">
+                                <input
+                                    type="checkbox"
+                                    checked={campaignForceNonEligible}
+                                    onChange={(e) => setCampaignForceNonEligible(e.target.checked)}
+                                />
+                                Force queueing even when the current evaluator no longer recommends the item tier
+                            </label>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                    onClick={handleCreateTranscriptCampaign}
+                                    disabled={creatingCampaign}
+                                    className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+                                >
+                                    {creatingCampaign ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+                                    Create Campaign
+                                </button>
+                                {selectedCampaignId && (
+                                    <button
+                                        onClick={() => handleExecuteTranscriptCampaign(selectedCampaignId)}
+                                        disabled={executingCampaignId === selectedCampaignId}
+                                        className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                                    >
+                                        {executingCampaignId === selectedCampaignId ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                                        Execute Selected
+                                    </button>
+                                )}
+                            </div>
+                            <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(220px,0.8fr)_minmax(0,1.2fr)]">
+                                <div className="space-y-2">
+                                    {campaigns.length === 0 ? (
+                                        <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-xs text-slate-500">
+                                            No transcript optimization campaigns created yet.
+                                        </div>
+                                    ) : campaigns.map((campaign) => (
+                                        <div
+                                            key={campaign.id}
+                                            onClick={() => setSelectedCampaignId(campaign.id)}
+                                            className={`w-full rounded-xl border px-3 py-3 text-left transition cursor-pointer ${
+                                                selectedCampaignId === campaign.id
+                                                    ? 'border-blue-300 bg-blue-50'
+                                                    : 'border-slate-200 bg-slate-50 hover:bg-slate-100'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between gap-2">
+                                                <div className="text-sm font-semibold text-slate-800">Campaign {campaign.id}</div>
+                                                <div className="flex items-center gap-2">
+                                                    <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600">{campaign.status}</span>
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleDeleteTranscriptCampaign(campaign.id);
+                                                        }}
+                                                        disabled={deletingCampaignId === campaign.id}
+                                                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-600 hover:border-rose-200 hover:text-rose-600 disabled:opacity-50"
+                                                        title="Delete campaign"
+                                                    >
+                                                        {deletingCampaignId === campaign.id ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                                                        Delete
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            <div className="mt-1 text-[11px] text-slate-500">
+                                                {campaign.scope}{campaign.channel_id ? ` · channel ${campaign.channel_id}` : ''} · {campaign.queued_jobs} queued
+                                            </div>
+                                            <div className="mt-1 text-[11px] text-slate-500">
+                                                {campaign.tiers.join(', ') || 'all tiers'}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+                                    <div className="text-sm font-semibold text-slate-800">Campaign Items</div>
+                                    {selectedCampaignId == null ? (
+                                        <div className="mt-2 text-xs text-slate-500">Select a campaign to inspect backlog items and queue status.</div>
+                                    ) : campaignItems.length === 0 ? (
+                                        <div className="mt-2 text-xs text-slate-500">No campaign items available.</div>
+                                    ) : (
+                                        <div className="mt-3 space-y-2 max-h-[340px] overflow-y-auto pr-1">
+                                            {campaignItems.slice(0, 40).map((item) => (
+                                                <div key={item.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                    <div className="flex items-start justify-between gap-2">
+                                                        <div className="min-w-0">
+                                                            <div className="text-sm font-medium text-slate-800">
+                                                                <Link to={`/videos/${item.video_id}`} className="hover:text-blue-600">
+                                                                    Video {item.video_id}
+                                                                </Link>
+                                                            </div>
+                                                            <div className="mt-0.5 text-[11px] text-slate-500">
+                                                                {item.action_tier.replaceAll('_', ' ')} · score {item.quality_score.toFixed(1)} · {item.status}
+                                                            </div>
+                                                            {item.reason && <div className="mt-1 text-xs text-slate-600 line-clamp-2">{item.reason}</div>}
+                                                        </div>
+                                                        {item.job_id ? (
+                                                            <Link to={`/jobs`} className="text-[11px] text-blue-600 hover:text-blue-700">
+                                                                Job {item.job_id}
+                                                            </Link>
+                                                        ) : null}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                    </section>
+                    </div>
+                    )}
+                    </section>
+                    )}
+
+                    {upperTab === 'queue' && (
+                    <div className="space-y-4">
                     <section className="space-y-3">
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                             <h2 className="text-xl font-bold text-slate-700 flex items-center gap-2">
@@ -1374,6 +2023,10 @@ const getStatusLabel = (status: string): string => {
                                         <span className="font-bold text-red-600">{historyJobs.filter(j => j.status === 'failed').length}</span>
                                     </div>
                                     <div className="flex items-center gap-1.5">
+                                        <span className="text-slate-500 font-medium">Cancelled:</span>
+                                        <span className="font-bold text-slate-600">{historyJobs.filter(j => j.status === 'cancelled').length}</span>
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
                                         <span className="text-slate-500 font-medium">Success Rate:</span>
                                         <span className="font-bold text-slate-700">
                                             {historyJobs.length > 0 
@@ -1547,8 +2200,10 @@ const getStatusLabel = (status: string): string => {
                                 )}
                             </div>
                         </div>
-                    )}
+                        )}
                     </section>
+                    </div>
+                    )}
                 </>
             )}
         </div>

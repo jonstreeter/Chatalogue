@@ -51,10 +51,12 @@ interface SystemVersionInfo {
 
 export function Layout({ children }: { children: React.ReactNode }) {
     const location = useLocation();
-    const isHome = location.pathname === '/';
-    const isJobs = location.pathname === '/jobs';
-    const isSpeakers = location.pathname === '/speakers';
-    const isSettings = location.pathname === '/settings';
+    const pathname = location.pathname;
+    const matchesSection = (prefixes: string[]) => prefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
+    const isHome = pathname === '/' || matchesSection(['/channel', '/video']);
+    const isJobs = matchesSection(['/jobs']);
+    const isSpeakers = matchesSection(['/speakers', '/avatars']);
+    const isSettings = matchesSection(['/settings']);
     const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
     const [mobileNavOpen, setMobileNavOpen] = useState(false);
     const [backendOnline, setBackendOnline] = useState(false);
@@ -203,6 +205,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         { key: 'parakeet', label: 'Parakeet', color: 'bg-violet-500' },
         { key: 'whisper', label: 'Whisper', color: 'bg-cyan-500' },
         { key: 'pyannote', label: 'Pyannote', color: 'bg-emerald-500' },
+        { key: 'avatar_training', label: 'Avatar Trainer', color: 'bg-amber-500' },
     ] as const;
 
     const renderMemoryBar = (
@@ -214,7 +217,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     ) => {
         if (totalGb == null || totalGb <= 0) return null;
         const componentUsed = values.reduce((sum, item) => sum + Math.max(0, item.valueGb || 0), 0);
-        const effectiveUsed = Math.max(0, Math.min(totalGb, usedGb ?? componentUsed));
+        const effectiveUsed = Math.max(0, Math.min(totalGb, Math.max(componentUsed, usedGb ?? 0)));
         const otherUsed = Math.max(0, effectiveUsed - componentUsed);
         const barSegments = [
             ...values,
@@ -474,7 +477,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
             </aside>
 
             {/* Main Content */}
-            <main className="flex-1 min-w-0 overflow-y-auto relative z-10 px-3 pb-6 pt-20 md:p-8 md:pt-8">
+            <main className="flex-1 min-w-0 overflow-y-auto relative z-10 px-3 pb-6 pt-16 md:p-8 md:pt-8">
                 {cudaBannerSeverity && (
                     <div className={`mb-4 rounded-xl border px-4 py-3 flex items-start gap-3 text-sm ${
                         cudaBannerSeverity === 'red'

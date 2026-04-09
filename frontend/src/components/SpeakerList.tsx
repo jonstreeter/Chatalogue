@@ -2,22 +2,22 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../lib/api';
 import { toApiUrl } from '../lib/api';
-import type { Speaker, SpeakerCounts } from '../types';
-import { User, Edit2, Check, Mic2, ChevronDown, ChevronRight, Users, GitMerge, Brain, ExternalLink } from 'lucide-react';
+import type { Speaker, SpeakerCounts, SpeakerOverview } from '../types';
+import { User, Edit2, Check, Mic2, ChevronDown, ChevronRight, Users, GitMerge, Brain, ExternalLink, Sparkles } from 'lucide-react';
 import { SpeakerModal } from './SpeakerModal';
 
 interface SpeakerListProps {
     channelId?: string;
     videoId?: number;
+    onSpeakerUpdated?: (speaker: Speaker) => void;
+    onSpeakerMerged?: () => void;
 }
 
 // Threshold in seconds - speakers with less total time are considered "extras"
 const EXTRAS_THRESHOLD = 60; // 1 minute
 const SPEAKER_CACHE_TTL_MS = 20_000;
-const speakerListCache = new Map<string, { ts: number; items: Speaker[] }>();
-const speakerCountsCache = new Map<string, { ts: number; counts: SpeakerCounts }>();
-const speakerListInflight = new Map<string, Promise<Speaker[]>>();
-const speakerCountsInflight = new Map<string, Promise<SpeakerCounts>>();
+const speakerOverviewCache = new Map<string, { ts: number; data: SpeakerOverview }>();
+const speakerOverviewInflight = new Map<string, Promise<SpeakerOverview>>();
 
 function formatTime(seconds: number): string {
     if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -26,7 +26,45 @@ function formatTime(seconds: number): string {
     return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
 }
 
-export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
+function isUnknownSpeakerName(name?: string | null): boolean {
+    const normalized = (name || '').trim();
+    if (!normalized) return true;
+    if (/^unknown(\s+speaker)?$/i.test(normalized)) return true;
+    if (/^speaker\s+\d+$/i.test(normalized)) return true;
+    return false;
+}
+
+function categorizeSpeakerCounts(speaker: Speaker) {
+    const unknown = isUnknownSpeakerName(speaker.name);
+    const identified = !unknown;
+    const extras = identified && (speaker.is_extra || speaker.total_speaking_time < EXTRAS_THRESHOLD);
+    const main = identified && !extras;
+    return {
+        unknown: unknown ? 1 : 0,
+        identified: identified ? 1 : 0,
+        extras: extras ? 1 : 0,
+        main: main ? 1 : 0,
+    };
+}
+
+function reconcileSpeakerCounts(
+    counts: SpeakerCounts | null,
+    previousSpeaker: Speaker | undefined,
+    nextSpeaker: Speaker,
+): SpeakerCounts | null {
+    if (!counts || !previousSpeaker) return counts;
+    const before = categorizeSpeakerCounts(previousSpeaker);
+    const after = categorizeSpeakerCounts(nextSpeaker);
+    return {
+        total: counts.total,
+        unknown: Math.max(0, counts.unknown - before.unknown + after.unknown),
+        identified: Math.max(0, counts.identified - before.identified + after.identified),
+        extras: Math.max(0, counts.extras - before.extras + after.extras),
+        main: Math.max(0, counts.main - before.main + after.main),
+    };
+}
+
+export function SpeakerList({ channelId, videoId, onSpeakerUpdated, onSpeakerMerged }: SpeakerListProps) {
     const navigate = useNavigate();
     const [speakers, setSpeakers] = useState<Speaker[]>([]);
     const [loading, setLoading] = useState(true);
@@ -45,19 +83,19 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
     const [mergeMode, setMergeMode] = useState(false);
     const [mergeSelected, setMergeSelected] = useState<Set<number>>(new Set());
     const [merging, setMerging] = useState(false);
+    const [launchingAvatarSpeakerId, setLaunchingAvatarSpeakerId] = useState<number | null>(null);
     const infiniteSentinelRef = useRef<HTMLDivElement | null>(null);
-    const pageSize = 80;
+    const pageSize = channelId && !videoId ? 48 : 80;
     const canUsePagination = !videoId;
     const scopeKey = `channel:${channelId || 'all'}|video:${videoId ?? 'none'}`;
 
     const isFresh = (ts: number) => (Date.now() - ts) < SPEAKER_CACHE_TTL_MS;
     const clearScopeCache = () => {
-        for (const key of speakerListCache.keys()) {
+        for (const key of speakerOverviewCache.keys()) {
             if (key.startsWith(`${scopeKey}|`)) {
-                speakerListCache.delete(key);
+                speakerOverviewCache.delete(key);
             }
         }
-        speakerCountsCache.delete(scopeKey);
     };
 
     const fetchSpeakers = async (opts?: { append?: boolean; forceAll?: boolean }) => {
@@ -82,105 +120,65 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
             else setLoading(true);
 
             if (!append) {
-                const cached = speakerListCache.get(cacheKey);
+                const cached = speakerOverviewCache.get(cacheKey);
                 if (cached && isFresh(cached.ts)) {
-                    setSpeakers(cached.items);
-                    setHasMore(usePaging ? cached.items.length === pageSize : false);
+                    setSpeakers(cached.data.items);
+                    setSpeakerCounts(cached.data.counts);
+                    setHasMore(usePaging ? (offset + cached.data.items.length) < cached.data.total : false);
                     setLoading(false);
                     return;
                 }
             }
 
-            let request = speakerListInflight.get(cacheKey);
+            let request = speakerOverviewInflight.get(cacheKey);
             if (!request) {
-                request = api.get<Speaker[]>('/speakers', { params })
-                    .then((res) => (Array.isArray(res.data) ? res.data : []))
+                request = api.get<SpeakerOverview>('/speakers/overview', { params })
+                    .then((res) => res.data)
                     .finally(() => {
-                        speakerListInflight.delete(cacheKey);
+                        speakerOverviewInflight.delete(cacheKey);
                     });
-                speakerListInflight.set(cacheKey, request);
+                speakerOverviewInflight.set(cacheKey, request);
             }
-            const items = await request;
-            speakerListCache.set(cacheKey, { ts: Date.now(), items });
+            const overview = await request;
+            speakerOverviewCache.set(cacheKey, { ts: Date.now(), data: overview });
+            setSpeakerCounts(overview.counts);
             if (append) {
                 setSpeakers(prev => {
                     const seen = new Set(prev.map(s => s.id));
                     const next = [...prev];
-                    for (const speaker of items) {
+                    for (const speaker of overview.items) {
                         if (!seen.has(speaker.id)) next.push(speaker);
                     }
                     return next;
                 });
             } else {
-                setSpeakers(items);
+                setSpeakers(overview.items);
             }
-            setHasMore(usePaging ? items.length === pageSize : false);
+            setHasMore(usePaging ? (offset + overview.items.length) < overview.total : false);
         } catch (e) {
             console.error('Failed to fetch speakers:', e);
-            if (!append) setSpeakers([]);
+            if (!append) {
+                setSpeakers([]);
+                setSpeakerCounts(null);
+            }
         } finally {
             setLoading(false);
             setLoadingMore(false);
         }
     };
 
-    const fetchSpeakerCounts = async () => {
-        try {
-            const cached = speakerCountsCache.get(scopeKey);
-            if (cached && isFresh(cached.ts)) {
-                setSpeakerCounts(cached.counts);
-                return;
-            }
-
-            const params: any = {};
-            if (channelId) params.channel_id = channelId;
-            if (videoId) params.video_id = videoId;
-
-            let request = speakerCountsInflight.get(scopeKey);
-            if (!request) {
-                request = api.get<SpeakerCounts>('/speakers/stats', { params })
-                    .then((res) => res.data)
-                    .finally(() => {
-                        speakerCountsInflight.delete(scopeKey);
-                    });
-                speakerCountsInflight.set(scopeKey, request);
-            }
-
-            const counts = await request;
-            speakerCountsCache.set(scopeKey, { ts: Date.now(), counts });
-            setSpeakerCounts(counts);
-        } catch (e) {
-            console.error('Failed to fetch speaker counts:', e);
-            setSpeakerCounts(null);
-        }
-    };
-
     useEffect(() => {
-        let cancelled = false;
-
         const load = async () => {
             setSpeakers([]);
             setHasMore(false);
             setLoading(true);
             await fetchSpeakers();
-            if (!cancelled) {
-                void fetchSpeakerCounts();
-            }
         };
 
         void load();
-        return () => {
-            cancelled = true;
-        };
     }, [channelId, videoId]);
 
-    const isUnknownSpeaker = (speaker: Speaker) => {
-        const name = (speaker.name || '').trim();
-        if (!name) return true;
-        if (/^unknown(\s+speaker)?$/i.test(name)) return true;
-        if (/^speaker\s+\d+$/i.test(name)) return true;
-        return false;
-    };
+    const isUnknownSpeaker = (speaker: Speaker) => isUnknownSpeakerName(speaker.name);
 
     const identifiedSpeakers = speakers.filter(s => !isUnknownSpeaker(s));
     const unknownSpeakers = speakers.filter(s => isUnknownSpeaker(s));
@@ -202,6 +200,7 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
         .sort((a, b) => b.total_speaking_time - a.total_speaking_time);
     const mainCount = speakerCounts?.main ?? mainSpeakers.length;
     const extrasCount = speakerCounts?.extras ?? extraSpeakers.length;
+    const totalSpeakersInScope = speakerCounts?.total ?? speakers.length;
     const visibleTabLoadedCount = speakerTab === 'identified' ? identifiedSpeakers.length : sortedUnknownSpeakers.length;
     const visibleTabTotalCount = speakerTab === 'identified' ? identifiedCount : unknownCount;
     const visibleTabNeedsMore = paginationEnabled && visibleTabLoadedCount < visibleTabTotalCount;
@@ -280,26 +279,55 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
     };
 
     const handleSpeakerUpdate = (updatedSpeaker: Speaker) => {
+        const previousSpeaker = speakers.find((speaker) => speaker.id === updatedSpeaker.id);
+        const nextSpeaker: Speaker = previousSpeaker
+            ? {
+                ...previousSpeaker,
+                ...updatedSpeaker,
+                total_speaking_time: (updatedSpeaker.total_speaking_time ?? 0) > 0
+                    ? updatedSpeaker.total_speaking_time
+                    : previousSpeaker.total_speaking_time,
+                embedding_count: updatedSpeaker.embedding_count ?? previousSpeaker.embedding_count,
+            }
+            : updatedSpeaker;
         clearScopeCache();
         setSpeakers(prev => prev.map(s => {
             if (s.id !== updatedSpeaker.id) return s;
-            return {
-                ...s,
-                ...updatedSpeaker,
-                // Be defensive: some mutation endpoints may return partial speaker payloads.
-                total_speaking_time: (updatedSpeaker.total_speaking_time ?? 0) > 0
-                    ? updatedSpeaker.total_speaking_time
-                    : s.total_speaking_time,
-                embedding_count: updatedSpeaker.embedding_count ?? s.embedding_count,
-            };
+            return nextSpeaker;
         }));
+        setSpeakerCounts(prev => reconcileSpeakerCounts(prev, previousSpeaker, nextSpeaker));
+        const categoryChanged = !!previousSpeaker && (
+            isUnknownSpeakerName(previousSpeaker.name) !== isUnknownSpeakerName(nextSpeaker.name)
+            || Boolean(previousSpeaker.is_extra) !== Boolean(nextSpeaker.is_extra)
+        );
         if (updatedSpeaker.thumbnail_path) {
             setThumbnailVersionBySpeakerId(prev => ({
                 ...prev,
                 [updatedSpeaker.id]: Date.now()
             }));
         }
-        setSelectedSpeaker(updatedSpeaker);
+        setSelectedSpeaker(nextSpeaker);
+        onSpeakerUpdated?.(nextSpeaker);
+        if (categoryChanged && canUsePagination) {
+            void fetchSpeakers();
+        }
+    };
+
+    const handleOpenAvatarStudio = async (speaker: Speaker) => {
+        setLaunchingAvatarSpeakerId(speaker.id);
+        try {
+            const res = await api.post(`/speakers/${speaker.id}/avatar`);
+            const avatarId = Number(res.data?.id);
+            if (!Number.isFinite(avatarId) || avatarId <= 0) {
+                throw new Error('Avatar id missing from response');
+            }
+            navigate(`/avatars/${avatarId}`);
+        } catch (e) {
+            console.error('Failed to open avatar studio:', e);
+            alert('Failed to open avatar studio');
+        } finally {
+            setLaunchingAvatarSpeakerId(null);
+        }
     };
 
     const getSpeakerThumbSrc = (speaker: Speaker) => {
@@ -339,7 +367,7 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
             setMergeMode(false);
             setMergeSelected(new Set());
             clearScopeCache();
-            await Promise.all([fetchSpeakers(), fetchSpeakerCounts()]);
+            await fetchSpeakers();
         } catch (e) {
             console.error('Failed to merge speakers:', e);
             alert('Failed to merge speakers');
@@ -404,7 +432,7 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
                             </h3>
                             <button
                                 onClick={(e) => { e.stopPropagation(); handleOpenSpeakerEditor(speaker); }}
-                                className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-blue-500 transition-opacity"
+                                className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 text-slate-400 hover:text-blue-500 transition-opacity"
                                 title="Edit speaker"
                             >
                                 <Edit2 size={10} />
@@ -414,11 +442,25 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
                             <Link
                                 to={`/speakers/${speaker.id}`}
                                 onClick={(e) => e.stopPropagation()}
-                                className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-blue-600 transition-opacity p-0.5 rounded hover:bg-blue-50"
+                                className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 text-slate-400 hover:text-blue-600 transition-opacity p-0.5 rounded hover:bg-blue-50"
                                 title="Open speaker detail page"
                             >
                                 <ExternalLink size={12} />
                             </Link>
+                            {!isUnknownSpeaker(speaker) && (
+                                <button
+                                    type="button"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        void handleOpenAvatarStudio(speaker);
+                                    }}
+                                    disabled={launchingAvatarSpeakerId === speaker.id}
+                                    className="opacity-100 lg:opacity-40 lg:group-hover:opacity-100 text-blue-500 hover:text-blue-600 transition-opacity p-0.5 rounded hover:bg-blue-50 disabled:opacity-50"
+                                    title="Open Avatar Studio"
+                                >
+                                    {launchingAvatarSpeakerId === speaker.id ? <Loader2Pulse small /> : <Sparkles size={12} />}
+                                </button>
+                            )}
                             <span className="text-xs text-slate-500 font-mono">
                                 {formatTime(speaker.total_speaking_time)}
                             </span>
@@ -478,6 +520,20 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
                 )}
 
                 <div className="absolute top-2 right-2 z-10 flex items-center gap-1">
+                    {!unknown && (
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                void handleOpenAvatarStudio(speaker);
+                            }}
+                            disabled={launchingAvatarSpeakerId === speaker.id}
+                            className="p-1.5 rounded-md bg-white/90 border border-slate-200 text-slate-500 hover:text-blue-600 hover:border-blue-200 shadow-sm opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity disabled:opacity-50"
+                            title="Open Avatar Studio"
+                        >
+                            {launchingAvatarSpeakerId === speaker.id ? <Loader2Pulse small /> : <Sparkles size={12} />}
+                        </button>
+                    )}
                     <button
                         onClick={(e) => { e.stopPropagation(); handleOpenSpeakerEditor(speaker); }}
                         className="p-1.5 rounded-md bg-white/90 border border-slate-200 text-slate-500 hover:text-blue-600 hover:border-blue-200 shadow-sm opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity"
@@ -549,7 +605,7 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
 
     return (
         <div className="space-y-6 pb-20">
-            {speakers.length === 0 ? (
+            {totalSpeakersInScope === 0 ? (
                 <div className="text-center py-12 px-4 border-2 border-dashed border-slate-200 rounded-xl">
                     <Mic2 size={32} className="mx-auto text-slate-300 mb-3" />
                     <h3 className="text-slate-500 font-medium">No speakers identified</h3>
@@ -756,7 +812,8 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
                     onMerge={() => {
                         setSelectedSpeaker(null);
                         clearScopeCache();
-                        void Promise.all([fetchSpeakers(), fetchSpeakerCounts()]);
+                        onSpeakerMerged?.();
+                        void fetchSpeakers();
                     }}
                 />
             )}
@@ -764,11 +821,11 @@ export function SpeakerList({ channelId, videoId }: SpeakerListProps) {
     );
 }
 
-const Loader2Pulse = () => (
+const Loader2Pulse = ({ small = false }: { small?: boolean }) => (
     <svg
         xmlns="http://www.w3.org/2000/svg"
-        width="24"
-        height="24"
+        width={small ? 14 : 24}
+        height={small ? 14 : 24}
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"

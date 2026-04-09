@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { Save, Key, CheckCircle2, AlertCircle, Zap, ExternalLink, Loader2, RefreshCw, Terminal, Bot, AudioLines, Power, Mic, Smile, Link2, Database, Wand2 } from 'lucide-react';
+import { Save, Key, CheckCircle2, AlertCircle, Zap, ExternalLink, Loader2, RefreshCw, Terminal, Bot, AudioLines, Power, Mic, Smile, Link2, Database, Wand2, Download } from 'lucide-react';
 import api from '../lib/api';
 import { SetupWizard } from '../components/SetupWizard';
 
@@ -16,8 +16,9 @@ interface TokenValidation {
     models: Record<string, ModelStatus>;
 }
 
-type SettingsTab = 'transcription' | 'diarization' | 'llm' | 'youtube' | 'funny' | 'system';
+type SettingsTab = 'transcription' | 'diarization' | 'llm' | 'youtube' | 'funny' | 'runtimes' | 'system';
 type TranscriptionEngine = 'auto' | 'whisper' | 'parakeet';
+type WhisperBackend = 'faster_whisper' | 'insanely_fast_whisper';
 type PipelineExecutionMode = 'sequential' | 'staged';
 type LlmProvider = 'ollama' | 'nvidia_nim' | 'openai' | 'anthropic' | 'gemini' | 'groq' | 'openrouter' | 'xai';
 type OllamaModelTier = 'lite' | 'medium' | 'q8' | 'custom';
@@ -77,6 +78,77 @@ interface CloudflaredInstallInfo {
     installed: boolean;
 }
 
+interface VoiceFixerInstallInfo {
+    installed: boolean;
+    version?: string | null;
+    python_executable?: string | null;
+    package_name: string;
+    package_spec: string;
+    github_url: string;
+    pypi_url: string;
+    restart_required?: boolean;
+    message?: string | null;
+}
+
+interface VoiceFixerTestResult {
+    status: string;
+    version?: string | null;
+    instantiated: boolean;
+    error?: string | null;
+    detail?: string | null;
+}
+
+interface ClearVoiceInstallInfo {
+    installed: boolean;
+    version?: string | null;
+    python_executable?: string | null;
+    package_name: string;
+    package_spec: string;
+    github_url: string;
+    pypi_url: string;
+    restart_required?: boolean;
+    runtime_ready: boolean;
+    runtime_error?: string | null;
+    torch_version?: string | null;
+    torchaudio_version?: string | null;
+    message?: string | null;
+}
+
+interface ClearVoiceTestResult {
+    status: string;
+    version?: string | null;
+    imported: boolean;
+    class_available: boolean;
+    torch_imported: boolean;
+    torchaudio_imported: boolean;
+    runtime_ready: boolean;
+    torch_version?: string | null;
+    torchaudio_version?: string | null;
+    error?: string | null;
+    detail?: string | null;
+}
+
+interface ReconstructionInstallInfo {
+    installed: boolean;
+    version?: string | null;
+    python_executable?: string | null;
+    package_name: string;
+    package_spec: string;
+    github_url: string;
+    pypi_url: string;
+    restart_required?: boolean;
+    message?: string | null;
+}
+
+interface ReconstructionTestResult {
+    status: string;
+    version?: string | null;
+    imported: boolean;
+    model_class_available: boolean;
+    error?: string | null;
+    detail?: string | null;
+}
+
 interface TranscriptionEngineTestResult {
     status: 'ok' | 'error' | string;
     requested_engine: 'auto' | 'whisper' | 'parakeet' | string;
@@ -85,6 +157,10 @@ interface TranscriptionEngineTestResult {
     parakeet_dependencies_available?: boolean;
     whisper_model?: string;
     whisper_compute_type?: string | null;
+    whisper_backend_requested?: string | null;
+    whisper_backend_resolved?: string | null;
+    whisper_backend_available?: boolean | null;
+    whisper_backend_fallback_reason?: string | null;
     parakeet_model?: string;
     parakeet_batch_size_requested?: number;
     parakeet_batch_auto?: boolean;
@@ -112,6 +188,14 @@ interface YouTubeOAuthStatus {
     scope?: string;
     token_expires_at?: string | null;
     push_enabled?: boolean;
+}
+
+interface YouTubeDataApiTestResult {
+    status: string;
+    video_id?: string | null;
+    title?: string | null;
+    view_count?: number | null;
+    error?: string | null;
 }
 
 interface OllamaHardwareRecommendationResponse {
@@ -370,8 +454,13 @@ export function Settings() {
     const [token, setToken] = useState('');
     const [transcriptionEngine, setTranscriptionEngine] = useState<TranscriptionEngine>('auto');
     const [pipelineExecutionMode, setPipelineExecutionMode] = useState<PipelineExecutionMode>('sequential');
+    const [whisperBackend, setWhisperBackend] = useState<WhisperBackend>('faster_whisper');
     const [transcriptionModel, setTranscriptionModel] = useState('medium');
     const [computeType, setComputeType] = useState('int8_float16');
+    const [multilingualRoutingEnabled, setMultilingualRoutingEnabled] = useState(true);
+    const [multilingualWhisperModel, setMultilingualWhisperModel] = useState('large-v3');
+    const [languageDetectionSampleSeconds, setLanguageDetectionSampleSeconds] = useState(45);
+    const [languageDetectionConfidenceThreshold, setLanguageDetectionConfidenceThreshold] = useState(0.65);
     const [parakeetModel, setParakeetModel] = useState('nvidia/parakeet-tdt-0.6b-v2');
     const [parakeetBatchSize, setParakeetBatchSize] = useState(16);
     const [parakeetBatchAuto, setParakeetBatchAuto] = useState(true);
@@ -420,12 +509,15 @@ export function Settings() {
     const [xaiBaseUrl, setXaiBaseUrl] = useState('https://api.x.ai');
     const [xaiModel, setXaiModel] = useState('grok-2');
     const [xaiApiKey, setXaiApiKey] = useState('');
+    const [youtubeDataApiKey, setYoutubeDataApiKey] = useState('');
     const [youtubeOauthClientId, setYoutubeOauthClientId] = useState('');
     const [youtubeOauthClientSecret, setYoutubeOauthClientSecret] = useState('');
     const [youtubeOauthRedirectUri, setYoutubeOauthRedirectUri] = useState('http://localhost:8000/auth/youtube/callback');
     const [youtubePublishPushEnabled, setYoutubePublishPushEnabled] = useState(false);
     const [ytdlpCookiesFile, setYtdlpCookiesFile] = useState('');
     const [ytdlpCookiesFromBrowser, setYtdlpCookiesFromBrowser] = useState('');
+    const [testingYouTubeDataApi, setTestingYouTubeDataApi] = useState(false);
+    const [youtubeDataApiTestResult, setYoutubeDataApiTestResult] = useState<YouTubeDataApiTestResult | null>(null);
     const [youtubeOauthStatus, setYoutubeOauthStatus] = useState<YouTubeOAuthStatus | null>(null);
     const [loadingYoutubeOauthStatus, setLoadingYoutubeOauthStatus] = useState(false);
     const [testingYouTubeOauth, setTestingYouTubeOauth] = useState(false);
@@ -433,7 +525,7 @@ export function Settings() {
     const [connectingYouTube, setConnectingYouTube] = useState(false);
     const [disconnectingYouTube, setDisconnectingYouTube] = useState(false);
     const [diarizationSensitivity, setDiarizationSensitivity] = useState('balanced');
-    const [speakerMatchThreshold, setSpeakerMatchThreshold] = useState(0.5);
+    const [speakerMatchThreshold, setSpeakerMatchThreshold] = useState(0.35);
     const [diarizeAutoStartThreshold, setDiarizeAutoStartThreshold] = useState(0);
     const [funnyMomentsMaxSaved, setFunnyMomentsMaxSaved] = useState(25);
     const [funnyMomentsExplainBatchLimit, setFunnyMomentsExplainBatchLimit] = useState(12);
@@ -470,6 +562,23 @@ export function Settings() {
     const [externalShareIpAllowlist, setExternalShareIpAllowlist] = useState('');
     const [cloudflaredInstallInfo, setCloudflaredInstallInfo] = useState<CloudflaredInstallInfo | null>(null);
     const [installingCloudflared, setInstallingCloudflared] = useState(false);
+    const [clearVoiceInstallInfo, setClearVoiceInstallInfo] = useState<ClearVoiceInstallInfo | null>(null);
+    const [loadingClearVoiceInstallInfo, setLoadingClearVoiceInstallInfo] = useState(false);
+    const [installingClearVoice, setInstallingClearVoice] = useState(false);
+    const [repairingClearVoice, setRepairingClearVoice] = useState(false);
+    const [testingClearVoice, setTestingClearVoice] = useState(false);
+    const [clearVoiceTestResult, setClearVoiceTestResult] = useState<ClearVoiceTestResult | null>(null);
+    const [voiceFixerInstallInfo, setVoiceFixerInstallInfo] = useState<VoiceFixerInstallInfo | null>(null);
+    const [loadingVoiceFixerInstallInfo, setLoadingVoiceFixerInstallInfo] = useState(false);
+    const [installingVoiceFixer, setInstallingVoiceFixer] = useState(false);
+    const [repairingVoiceFixer, setRepairingVoiceFixer] = useState(false);
+    const [testingVoiceFixer, setTestingVoiceFixer] = useState(false);
+    const [voiceFixerTestResult, setVoiceFixerTestResult] = useState<VoiceFixerTestResult | null>(null);
+    const [reconstructionInstallInfo, setReconstructionInstallInfo] = useState<ReconstructionInstallInfo | null>(null);
+    const [loadingReconstructionInstallInfo, setLoadingReconstructionInstallInfo] = useState(false);
+    const [installingReconstruction, setInstallingReconstruction] = useState(false);
+    const [testingReconstruction, setTestingReconstruction] = useState(false);
+    const [reconstructionTestResult, setReconstructionTestResult] = useState<ReconstructionTestResult | null>(null);
 
     useEffect(() => {
         loadSettings();
@@ -502,7 +611,7 @@ export function Settings() {
 
     useEffect(() => {
         setTranscriptionEngineTestResult(null);
-    }, [transcriptionEngine, transcriptionModel, computeType, parakeetModel, parakeetBatchSize, parakeetBatchAuto, parakeetRequireWordTimestamps, parakeetAllowWhisperFallback, parakeetUnloadAfterTranscribe]);
+    }, [transcriptionEngine, whisperBackend, transcriptionModel, computeType, multilingualRoutingEnabled, multilingualWhisperModel, languageDetectionSampleSeconds, languageDetectionConfidenceThreshold, parakeetModel, parakeetBatchSize, parakeetBatchAuto, parakeetRequireWordTimestamps, parakeetAllowWhisperFallback, parakeetUnloadAfterTranscribe]);
 
     const loadSettings = async () => {
         try {
@@ -518,8 +627,17 @@ export function Settings() {
                 const mode: PipelineExecutionMode = rawPipelineMode === 'staged' ? 'staged' : 'sequential';
                 setPipelineExecutionMode(mode);
             }
+            {
+                const rawBackend = String(res.data.whisper_backend || 'faster_whisper').toLowerCase().replace(/-/g, '_');
+                const backend: WhisperBackend = rawBackend === 'insanely_fast_whisper' ? 'insanely_fast_whisper' : 'faster_whisper';
+                setWhisperBackend(backend);
+            }
             setTranscriptionModel(res.data.transcription_model || 'tiny');
             setComputeType(res.data.transcription_compute_type || 'float16');
+            setMultilingualRoutingEnabled(res.data.multilingual_routing_enabled ?? true);
+            setMultilingualWhisperModel(res.data.multilingual_whisper_model || 'large-v3');
+            setLanguageDetectionSampleSeconds(res.data.language_detection_sample_seconds ?? 45);
+            setLanguageDetectionConfidenceThreshold(res.data.language_detection_confidence_threshold ?? 0.65);
             setParakeetModel(res.data.parakeet_model || 'nvidia/parakeet-tdt-0.6b-v2');
             setParakeetBatchSize(res.data.parakeet_batch_size ?? 16);
             setParakeetBatchAuto(res.data.parakeet_batch_auto ?? true);
@@ -564,6 +682,7 @@ export function Settings() {
             setXaiBaseUrl(res.data.xai_base_url || 'https://api.x.ai');
             setXaiModel(res.data.xai_model || 'grok-2');
             setXaiApiKey(res.data.xai_api_key || '');
+            setYoutubeDataApiKey(res.data.youtube_data_api_key || '');
             setYoutubeOauthClientId(res.data.youtube_oauth_client_id || '');
             setYoutubeOauthClientSecret(res.data.youtube_oauth_client_secret || '');
             setYoutubeOauthRedirectUri(res.data.youtube_oauth_redirect_uri || 'http://localhost:8000/auth/youtube/callback');
@@ -571,7 +690,7 @@ export function Settings() {
             setYtdlpCookiesFile(res.data.ytdlp_cookies_file || '');
             setYtdlpCookiesFromBrowser(res.data.ytdlp_cookies_from_browser || '');
             setDiarizationSensitivity(res.data.diarization_sensitivity || 'balanced');
-            setSpeakerMatchThreshold(res.data.speaker_match_threshold ?? 0.5);
+            setSpeakerMatchThreshold(res.data.speaker_match_threshold ?? 0.35);
             setDiarizeAutoStartThreshold(res.data.diarize_auto_start_threshold ?? 0);
             setFunnyMomentsMaxSaved(res.data.funny_moments_max_saved ?? 25);
             setFunnyMomentsExplainBatchLimit(res.data.funny_moments_explain_batch_limit ?? 12);
@@ -631,9 +750,75 @@ export function Settings() {
         }
     };
 
+    const loadClearVoiceInstallInfo = async () => {
+        setLoadingClearVoiceInstallInfo(true);
+        try {
+            const res = await api.get<ClearVoiceInstallInfo>('/system/clearvoice/install-info');
+            setClearVoiceInstallInfo(res.data);
+        } catch (e) {
+            console.error('Failed to load ClearVoice install info:', e);
+            setClearVoiceInstallInfo(null);
+        } finally {
+            setLoadingClearVoiceInstallInfo(false);
+        }
+    };
+
+    const loadVoiceFixerInstallInfo = async () => {
+        setLoadingVoiceFixerInstallInfo(true);
+        try {
+            const res = await api.get<VoiceFixerInstallInfo>('/system/voicefixer/install-info');
+            setVoiceFixerInstallInfo(res.data);
+        } catch (e) {
+            console.error('Failed to load VoiceFixer install info:', e);
+            setVoiceFixerInstallInfo(null);
+        } finally {
+            setLoadingVoiceFixerInstallInfo(false);
+        }
+    };
+
+    const loadReconstructionInstallInfo = async () => {
+        setLoadingReconstructionInstallInfo(true);
+        try {
+            const res = await api.get<ReconstructionInstallInfo>('/system/reconstruction/install-info');
+            setReconstructionInstallInfo(res.data);
+        } catch (e) {
+            console.error('Failed to load reconstruction install info:', e);
+            setReconstructionInstallInfo(null);
+        } finally {
+            setLoadingReconstructionInstallInfo(false);
+        }
+    };
+
+    const restartBackendAndWait = async (timeoutMessage: string, onReady?: () => Promise<void>) => {
+        setRestarting(true);
+        try {
+            await api.post('/system/restart');
+        } catch {
+            // Disconnect during restart is expected.
+        }
+        for (let i = 0; i < 30; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+                await api.get('/settings');
+                setRestarting(false);
+                if (onReady) {
+                    await onReady();
+                }
+                return;
+            } catch {
+                // still restarting
+            }
+        }
+        setRestarting(false);
+        alert(timeoutMessage);
+    };
+
     useEffect(() => {
         void loadExternalShareStatus();
         void loadCloudflaredInstallInfo();
+        void loadClearVoiceInstallInfo();
+        void loadVoiceFixerInstallInfo();
+        void loadReconstructionInstallInfo();
     }, []);
 
     useEffect(() => {
@@ -707,6 +892,175 @@ export function Settings() {
             alert(e?.response?.data?.detail || 'Failed to install cloudflared automatically.');
         } finally {
             setInstallingCloudflared(false);
+        }
+    };
+
+    const handleInstallVoiceFixer = async () => {
+        if (!confirm('Install VoiceFixer into the backend Python environment now? The backend will restart automatically after installation if needed.')) return;
+        setInstallingVoiceFixer(true);
+        try {
+            const res = await api.post<VoiceFixerInstallInfo>('/system/voicefixer/install');
+            setVoiceFixerInstallInfo(res.data);
+            setVoiceFixerTestResult(null);
+            if (res.data.installed || res.data.restart_required) {
+                alert(res.data.message || 'VoiceFixer install completed. Restarting the backend to finish activation.');
+                await restartBackendAndWait(
+                    'Backend did not come back within 60 seconds after VoiceFixer install.',
+                    async () => {
+                        await loadVoiceFixerInstallInfo();
+                    }
+                );
+            } else {
+                alert(res.data.message || 'VoiceFixer install completed.');
+            }
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to install VoiceFixer automatically.');
+        } finally {
+            setInstallingVoiceFixer(false);
+            await loadVoiceFixerInstallInfo();
+        }
+    };
+
+    const handleInstallClearVoice = async () => {
+        if (!confirm('Install ClearVoice into the backend Python environment now? The backend will restart automatically after installation if needed.')) return;
+        setInstallingClearVoice(true);
+        try {
+            const res = await api.post<ClearVoiceInstallInfo>('/system/clearvoice/install');
+            setClearVoiceInstallInfo(res.data);
+            setClearVoiceTestResult(null);
+            if (res.data.installed || res.data.restart_required) {
+                alert(res.data.message || 'ClearVoice install completed. Restarting the backend to finish activation.');
+                await restartBackendAndWait(
+                    'Backend did not come back within 60 seconds after ClearVoice install.',
+                    async () => {
+                        await loadClearVoiceInstallInfo();
+                    }
+                );
+            } else {
+                alert(res.data.message || 'ClearVoice install completed.');
+            }
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to install ClearVoice automatically.');
+        } finally {
+            setInstallingClearVoice(false);
+            await loadClearVoiceInstallInfo();
+        }
+    };
+
+    const handleTestClearVoice = async () => {
+        setTestingClearVoice(true);
+        setClearVoiceTestResult(null);
+        try {
+            const res = await api.post<ClearVoiceTestResult>('/system/clearvoice/test');
+            setClearVoiceTestResult(res.data);
+        } catch (e: any) {
+            setClearVoiceTestResult({
+                status: 'error',
+                imported: false,
+                class_available: false,
+                torch_imported: false,
+                torchaudio_imported: false,
+                runtime_ready: false,
+                error: e?.response?.data?.detail || 'ClearVoice self-test failed.',
+                detail: 'The backend could not import or validate the local ClearVoice runtime.',
+            });
+        } finally {
+            setTestingClearVoice(false);
+            await loadClearVoiceInstallInfo();
+        }
+    };
+
+    const handleRepairClearVoice = async () => {
+        if (!confirm('Repair the ClearVoice runtime now? This reinstalls torchaudio to match the backend torch build.')) return;
+        setRepairingClearVoice(true);
+        try {
+            await api.post('/system/clearvoice/repair');
+            alert('ClearVoice runtime repair completed. Running self-test again...');
+            await handleTestClearVoice();
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to repair the ClearVoice runtime.');
+        } finally {
+            setRepairingClearVoice(false);
+            await loadClearVoiceInstallInfo();
+        }
+    };
+
+    const handleTestVoiceFixer = async () => {
+        setTestingVoiceFixer(true);
+        setVoiceFixerTestResult(null);
+        try {
+            const res = await api.post<VoiceFixerTestResult>('/system/voicefixer/test');
+            setVoiceFixerTestResult(res.data);
+        } catch (e: any) {
+            setVoiceFixerTestResult({
+                status: 'error',
+                instantiated: false,
+                error: e?.response?.data?.detail || 'VoiceFixer self-test failed.',
+                detail: 'The backend could not complete the VoiceFixer self-test.',
+            });
+        } finally {
+            setTestingVoiceFixer(false);
+            await loadVoiceFixerInstallInfo();
+        }
+    };
+
+    const handleRepairVoiceFixer = async () => {
+        if (!confirm('Re-download the VoiceFixer analysis checkpoint now? This is the right fix for a corrupted checkpoint cache.')) return;
+        setRepairingVoiceFixer(true);
+        try {
+            await api.post('/system/voicefixer/repair');
+            alert('VoiceFixer checkpoint repair completed. Running self-test again...');
+            await handleTestVoiceFixer();
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to repair the VoiceFixer checkpoint.');
+        } finally {
+            setRepairingVoiceFixer(false);
+        }
+    };
+
+    const handleInstallReconstruction = async () => {
+        if (!confirm('Install the local Qwen3-TTS reconstruction runtime and SoX now? The backend will restart automatically after installation if needed.')) return;
+        setInstallingReconstruction(true);
+        try {
+            const res = await api.post<ReconstructionInstallInfo>('/system/reconstruction/install');
+            setReconstructionInstallInfo(res.data);
+            setReconstructionTestResult(null);
+            if (res.data.installed || res.data.restart_required) {
+                alert(res.data.message || 'Reconstruction runtime install completed. Restarting the backend to finish activation.');
+                await restartBackendAndWait(
+                    'Backend did not come back within 60 seconds after reconstruction runtime install.',
+                    async () => {
+                        await loadReconstructionInstallInfo();
+                    }
+                );
+            } else {
+                alert(res.data.message || 'Reconstruction runtime install completed.');
+            }
+        } catch (e: any) {
+            alert(e?.response?.data?.detail || 'Failed to install the reconstruction runtime automatically.');
+        } finally {
+            setInstallingReconstruction(false);
+            await loadReconstructionInstallInfo();
+        }
+    };
+
+    const handleTestReconstruction = async () => {
+        setTestingReconstruction(true);
+        setReconstructionTestResult(null);
+        try {
+            const res = await api.post<ReconstructionTestResult>('/system/reconstruction/test');
+            setReconstructionTestResult(res.data);
+        } catch (e: any) {
+            setReconstructionTestResult({
+                status: 'error',
+                imported: false,
+                model_class_available: false,
+                error: e?.response?.data?.detail || 'Conversation reconstruction self-test failed.',
+                detail: 'The backend could not import or validate the local reconstruction runtime.',
+            });
+        } finally {
+            setTestingReconstruction(false);
+            await loadReconstructionInstallInfo();
         }
     };
 
@@ -906,6 +1260,21 @@ export function Settings() {
             setYoutubeOauthTestResult({ status: 'error', error: 'Failed to reach backend' });
         } finally {
             setTestingYouTubeOauth(false);
+        }
+    };
+
+    const testYouTubeDataApi = async () => {
+        setTestingYouTubeDataApi(true);
+        setYoutubeDataApiTestResult(null);
+        try {
+            const res = await api.post<YouTubeDataApiTestResult>('/youtube/data-api/test', {
+                api_key: youtubeDataApiKey,
+            });
+            setYoutubeDataApiTestResult(res.data);
+        } catch {
+            setYoutubeDataApiTestResult({ status: 'error', error: 'Failed to reach backend' });
+        } finally {
+            setTestingYouTubeDataApi(false);
         }
     };
 
@@ -1203,6 +1572,7 @@ export function Settings() {
         try {
             const res = await api.post<TranscriptionEngineTestResult>('/settings/test-transcription-engine', {
                 engine: transcriptionEngine,
+                whisper_backend: whisperBackend,
             });
             setTranscriptionEngineTestResult(res.data);
         } catch (e: any) {
@@ -1226,8 +1596,13 @@ export function Settings() {
                 hf_token: token,
                 transcription_engine: transcriptionEngine,
                 pipeline_execution_mode: pipelineExecutionMode,
+                whisper_backend: whisperBackend,
                 transcription_model: transcriptionModel,
                 transcription_compute_type: computeType,
+                multilingual_routing_enabled: multilingualRoutingEnabled,
+                multilingual_whisper_model: multilingualWhisperModel,
+                language_detection_sample_seconds: languageDetectionSampleSeconds,
+                language_detection_confidence_threshold: languageDetectionConfidenceThreshold,
                 parakeet_model: parakeetModel,
                 parakeet_batch_size: parakeetBatchSize,
                 parakeet_batch_auto: parakeetBatchAuto,
@@ -1267,6 +1642,7 @@ export function Settings() {
                 xai_base_url: xaiBaseUrl,
                 xai_model: xaiModel,
                 xai_api_key: xaiApiKey,
+                youtube_data_api_key: youtubeDataApiKey,
                 youtube_oauth_client_id: youtubeOauthClientId,
                 youtube_oauth_client_secret: youtubeOauthClientSecret,
                 youtube_oauth_redirect_uri: youtubeOauthRedirectUri,
@@ -1318,21 +1694,23 @@ export function Settings() {
     const isSelectedOllamaModelPendingRefresh = !isSelectedOllamaModelDownloadedByList && isSelectedOllamaModelDownloadedByOptimistic;
     const isSelectedOllamaModelDownloaded = isSelectedOllamaModelDownloadedByList;
     const shouldRenderSelectedFallbackOption = !!ollamaModel.trim() && !isSelectedOllamaModelDownloadedByList;
-    const tabs: { key: SettingsTab; label: string; icon: React.ReactNode }[] = [
-        { key: 'transcription', label: 'Transcription', icon: <Mic size={16} /> },
-        { key: 'diarization', label: 'Diarization', icon: <AudioLines size={16} /> },
-        { key: 'llm', label: 'LLM', icon: <Bot size={16} /> },
-        { key: 'youtube', label: 'YouTube', icon: <Link2 size={16} /> },
-        { key: 'funny', label: 'Funny', icon: <Smile size={16} /> },
-        { key: 'system', label: 'System', icon: <Terminal size={16} /> },
+    const tabs: { key: SettingsTab; label: string; icon: React.ReactNode; description: string }[] = [
+        { key: 'transcription', label: 'Transcription', icon: <Mic size={16} />, description: 'ASR engine, routing, batching, and throughput controls.' },
+        { key: 'diarization', label: 'Diarization', icon: <AudioLines size={16} />, description: 'Speaker segmentation, matching thresholds, and Hugging Face access.' },
+        { key: 'llm', label: 'LLM', icon: <Bot size={16} />, description: 'Provider connections, defaults, and local Ollama behavior.' },
+        { key: 'youtube', label: 'YouTube', icon: <Link2 size={16} />, description: 'Metadata API, OAuth publishing, and gated-access fallbacks.' },
+        { key: 'funny', label: 'Funny', icon: <Smile size={16} />, description: 'Funny-moment scanning, save limits, and explanation batching.' },
+        { key: 'runtimes', label: 'Runtimes', icon: <Power size={16} />, description: 'Optional local cleanup and reconstruction runtimes.' },
+        { key: 'system', label: 'System', icon: <Terminal size={16} />, description: 'Logging, health, setup, sharing, and restart controls.' },
     ];
+    const activeTabMeta = tabs.find((tab) => tab.key === activeTab) ?? tabs[0];
 
     return (
         <>
         {showSetupWizard && (
             <SetupWizard onClose={() => setShowSetupWizard(false)} onComplete={() => { setShowSetupWizard(false); void loadSettings(); }} />
         )}
-        <div className="max-w-2xl">
+        <div className="mx-auto max-w-7xl">
             <h1 className="text-2xl font-bold mb-6 flex items-center gap-2">
                 <div className="p-2 bg-slate-100 rounded-lg">
                     <Key className="w-6 h-6 text-slate-700" />
@@ -1340,27 +1718,55 @@ export function Settings() {
                 Settings
             </h1>
 
-            {/* Tab Navigation */}
-            <div className="flex gap-1 mb-6 bg-slate-100 p-1 rounded-xl overflow-hidden">
-                {tabs.map(tab => (
-                    <button
-                        key={tab.key}
-                        onClick={() => setActiveTab(tab.key)}
-                        className={`flex-1 min-w-0 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
-                            activeTab === tab.key
-                                ? 'bg-white text-slate-800 shadow-sm'
-                                : 'text-slate-500 hover:text-slate-700'
-                        }`}
-                    >
-                        {tab.icon}
-                        {tab.label}
-                    </button>
-                ))}
-            </div>
-
             <form onSubmit={handleSave}>
-                <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-4">
-                    <div className="p-6 space-y-6">
+                <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
+                    <aside className="self-start lg:sticky lg:top-6">
+                        <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+                            <div className="hidden lg:block px-2 pb-3">
+                                <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400">Sections</div>
+                                <p className="mt-2 text-sm text-slate-500">
+                                    Settings are grouped by workflow so operational controls stay separate from model and runtime configuration.
+                                </p>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-1">
+                                {tabs.map((tab) => (
+                                    <button
+                                        key={tab.key}
+                                        type="button"
+                                        onClick={() => setActiveTab(tab.key)}
+                                        className={`min-h-[56px] rounded-xl border px-3 py-3 text-left transition-all ${
+                                            activeTab === tab.key
+                                                ? 'border-slate-300 bg-slate-900 text-white shadow-sm'
+                                                : 'border-slate-200 bg-slate-50 text-slate-600 hover:border-slate-300 hover:bg-white hover:text-slate-800'
+                                        }`}
+                                    >
+                                        <div className="flex items-center gap-2 text-sm font-semibold">
+                                            {tab.icon}
+                                            <span>{tab.label}</span>
+                                        </div>
+                                        <div className={`mt-1 text-xs leading-relaxed ${activeTab === tab.key ? 'text-slate-300' : 'text-slate-500'}`}>
+                                            {tab.description}
+                                        </div>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </aside>
+
+                    <div className="min-w-0">
+                        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-4">
+                            <div className="border-b border-slate-100 bg-slate-50/70 px-6 py-4">
+                                <div className="flex items-start gap-3">
+                                    <div className="mt-0.5 rounded-lg bg-white p-2 text-slate-600 shadow-sm border border-slate-200">
+                                        {activeTabMeta.icon}
+                                    </div>
+                                    <div>
+                                        <h2 className="text-lg font-semibold text-slate-800">{activeTabMeta.label}</h2>
+                                        <p className="mt-1 text-sm text-slate-500">{activeTabMeta.description}</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="p-6 space-y-6">
 
                         {/* === TRANSCRIPTION TAB === */}
                         {activeTab === 'transcription' && (
@@ -1400,6 +1806,78 @@ export function Settings() {
                                             <p className="mt-2 text-xs text-slate-500">
                                                 Sequential keeps one video moving end-to-end and avoids queue handoff. Staged keeps transcription and diarization as separate batches.
                                             </p>
+                                        </div>
+
+                                        <div className="rounded-lg border border-emerald-100 bg-emerald-50/50 p-3 space-y-3">
+                                            <div className="flex items-center justify-between gap-4">
+                                                <div className="flex-1">
+                                                    <label className="block text-sm font-medium text-slate-700">
+                                                        Multilingual Routing
+                                                    </label>
+                                                    <p className="text-xs text-slate-500 mt-0.5">
+                                                        Detect likely non-English or mixed-language episodes before transcription and route them to Whisper with a stronger multilingual model.
+                                                    </p>
+                                                </div>
+                                                <label className="relative inline-flex items-center cursor-pointer">
+                                                    <input type="checkbox" checked={multilingualRoutingEnabled} onChange={(e) => setMultilingualRoutingEnabled(e.target.checked)} className="sr-only peer" />
+                                                    <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-emerald-300 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+                                                </label>
+                                            </div>
+
+                                            {multilingualRoutingEnabled && (
+                                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-slate-700 mb-2">
+                                                            Multilingual Whisper Model
+                                                        </label>
+                                                        <select
+                                                            value={multilingualWhisperModel}
+                                                            onChange={(e) => setMultilingualWhisperModel(e.target.value)}
+                                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all"
+                                                        >
+                                                            <option value="small">Small</option>
+                                                            <option value="medium">Medium</option>
+                                                            <option value="large-v3">Large-v3</option>
+                                                        </select>
+                                                        <p className="mt-1 text-xs text-slate-500">
+                                                            This model is used for multilingual reroutes and audio-language probing.
+                                                        </p>
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-slate-700 mb-2">
+                                                            Probe Window (seconds)
+                                                        </label>
+                                                        <input
+                                                            type="number"
+                                                            min={15}
+                                                            max={180}
+                                                            value={languageDetectionSampleSeconds}
+                                                            onChange={(e) => setLanguageDetectionSampleSeconds(Number(e.target.value || 45))}
+                                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all"
+                                                        />
+                                                        <p className="mt-1 text-xs text-slate-500">
+                                                            The opening audio slice used when title/description hints are not decisive.
+                                                        </p>
+                                                    </div>
+                                                    <div className="sm:col-span-2">
+                                                        <label className="block text-sm font-medium text-slate-700 mb-2">
+                                                            Detection Confidence Threshold
+                                                        </label>
+                                                        <input
+                                                            type="number"
+                                                            min={0.3}
+                                                            max={0.99}
+                                                            step={0.01}
+                                                            value={languageDetectionConfidenceThreshold}
+                                                            onChange={(e) => setLanguageDetectionConfidenceThreshold(Number(e.target.value || 0.65))}
+                                                            className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all"
+                                                        />
+                                                        <p className="mt-1 text-xs text-slate-500">
+                                                            Higher values are more conservative. Lower values route more episodes away from Parakeet when the language signal is uncertain.
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
 
                                         {transcriptionEngine === 'parakeet' && (
@@ -1503,6 +1981,23 @@ export function Settings() {
                                             <>
                                                 <div>
                                                     <label className="block text-sm font-medium text-slate-700 mb-2">
+                                                        Whisper Backend
+                                                    </label>
+                                                    <select
+                                                        value={whisperBackend}
+                                                        onChange={(e) => setWhisperBackend((e.target.value === 'insanely_fast_whisper' ? 'insanely_fast_whisper' : 'faster_whisper') as WhisperBackend)}
+                                                        className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                                                    >
+                                                        <option value="faster_whisper">faster_whisper - streaming-friendly, current default</option>
+                                                        <option value="insanely_fast_whisper">insanely_fast_whisper - transformers-compatible alternate path</option>
+                                                    </select>
+                                                    <p className="mt-2 text-xs text-slate-500">
+                                                        The alternate backend uses a transformers-compatible Whisper runtime. If the requested backend is unavailable, the engine test will show the fallback that was applied.
+                                                    </p>
+                                                </div>
+
+                                                <div>
+                                                    <label className="block text-sm font-medium text-slate-700 mb-2">
                                                         Transcription Accuracy (Whisper Model)
                                                     </label>
                                                     <select
@@ -1545,8 +2040,21 @@ export function Settings() {
                                         {transcriptionEngine === 'auto' && (
                                             <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
                                                 <p className="text-xs text-slate-600">
-                                                    Auto mode does not expose engine-specific options here. It will prefer Parakeet on supported CUDA hosts and fallback to Whisper automatically.
+                                                    Auto mode will prefer Parakeet on supported CUDA hosts and fallback to Whisper automatically. The selected Whisper backend still applies whenever Whisper is the routed engine.
                                                 </p>
+                                                <div className="mt-3">
+                                                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                                                        Whisper Backend
+                                                    </label>
+                                                    <select
+                                                        value={whisperBackend}
+                                                        onChange={(e) => setWhisperBackend((e.target.value === 'insanely_fast_whisper' ? 'insanely_fast_whisper' : 'faster_whisper') as WhisperBackend)}
+                                                        className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all text-sm"
+                                                    >
+                                                        <option value="faster_whisper">faster_whisper</option>
+                                                        <option value="insanely_fast_whisper">insanely_fast_whisper</option>
+                                                    </select>
+                                                </div>
                                             </div>
                                         )}
 
@@ -1580,6 +2088,19 @@ export function Settings() {
                                                     <div className="mt-1 text-xs">
                                                         Requested: {transcriptionEngineTestResult.requested_engine} | Resolved: {transcriptionEngineTestResult.resolved_engine || 'unknown'} | Device: {transcriptionEngineTestResult.device || 'unknown'}
                                                     </div>
+                                                    {transcriptionEngineTestResult.whisper_backend_requested && (
+                                                        <div className="mt-1 text-xs">
+                                                            Whisper backend: requested {transcriptionEngineTestResult.whisper_backend_requested}
+                                                            {transcriptionEngineTestResult.whisper_backend_resolved
+                                                                ? ` | resolved ${transcriptionEngineTestResult.whisper_backend_resolved}`
+                                                                : ''}
+                                                        </div>
+                                                    )}
+                                                    {typeof transcriptionEngineTestResult.whisper_backend_available === 'boolean' && (
+                                                        <div className="mt-1 text-xs">
+                                                            Whisper backend available: {transcriptionEngineTestResult.whisper_backend_available ? 'yes' : 'no'}
+                                                        </div>
+                                                    )}
                                                     {typeof transcriptionEngineTestResult.parakeet_effective_batch_size === 'number' && (
                                                         <div className="mt-1 text-xs">
                                                             Parakeet batch: {transcriptionEngineTestResult.parakeet_effective_batch_size}
@@ -1601,6 +2122,9 @@ export function Settings() {
                                                     )}
                                                     {transcriptionEngineTestResult.fallback_used && (
                                                         <div className="mt-1 text-xs">Fallback used: yes</div>
+                                                    )}
+                                                    {transcriptionEngineTestResult.whisper_backend_fallback_reason && (
+                                                        <div className="mt-1 text-xs">{transcriptionEngineTestResult.whisper_backend_fallback_reason}</div>
                                                     )}
                                                     {typeof transcriptionEngineTestResult.parakeet_dependencies_available === 'boolean' && (
                                                         <div className="mt-1 text-xs">
@@ -1795,12 +2319,12 @@ export function Settings() {
                                                 onChange={(e) => setDiarizationSensitivity(e.target.value)}
                                                 className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
                                             >
-                                                <option value="conservative">Conservative  -  fewer splits, may merge distinct speakers</option>
-                                                <option value="balanced">Balanced  -  pyannote defaults (recommended)</option>
-                                                <option value="aggressive">Aggressive  -  more splits, better for rapid back-and-forth</option>
+                                                <option value="conservative">Conservative  -  merges through longer pauses, best for recurring speakers</option>
+                                                <option value="balanced">Balanced  -  moderate pause smoothing, recommended default</option>
+                                                <option value="aggressive">Aggressive  -  keeps more boundaries, best for rapid back-and-forth</option>
                                             </select>
                                             <p className="mt-2 text-xs text-slate-500">
-                                                Controls how sensitive pyannote is to speaker changes. Requires re-running diarization to take effect.
+                                                Controls how much short silence pyannote smooths over. Requires re-running diarization to take effect.
                                             </p>
                                         </div>
 
@@ -1825,7 +2349,7 @@ export function Settings() {
                                                 <span>Lenient (more matches)</span>
                                             </div>
                                             <p className="mt-2 text-xs text-slate-500">
-                                                How similar a voice must sound to an existing speaker to be matched. Default: 0.50.
+                                                How similar a voice must sound to an existing speaker to be matched. Default: 0.35.
                                             </p>
                                         </div>
 
@@ -2527,6 +3051,76 @@ export function Settings() {
                             <>
                                 <div>
                                     <div className="flex items-center gap-2 mb-2">
+                                        <Database className="w-5 h-5 text-red-500" />
+                                        <h3 className="font-semibold text-slate-800">YouTube Data API Key</h3>
+                                    </div>
+                                    <p className="text-xs text-slate-500 mb-4">
+                                        Use an API key for public YouTube metadata like episode popularity and view counts. This is separate from OAuth publishing.
+                                    </p>
+
+                                    <div className="space-y-4 mb-6">
+                                        <div>
+                                            <label className="block text-sm font-medium text-slate-700 mb-2">
+                                                YouTube Data API Key
+                                            </label>
+                                            <div className="flex gap-2">
+                                                <input
+                                                    type="password"
+                                                    value={youtubeDataApiKey}
+                                                    onChange={(e) => setYoutubeDataApiKey(e.target.value)}
+                                                    className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-red-500 focus:border-red-500 outline-none transition-all"
+                                                    placeholder="Google API key for YouTube Data API v3"
+                                                    autoComplete="off"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={testYouTubeDataApi}
+                                                    disabled={testingYouTubeDataApi}
+                                                    className="px-3 py-2 rounded-lg text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-50 inline-flex items-center justify-center gap-1 whitespace-nowrap"
+                                                >
+                                                    {testingYouTubeDataApi ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                                                    Test API Key
+                                                </button>
+                                            </div>
+                                            <p className="mt-2 text-xs text-slate-500">
+                                                Required for the API-based popularity/view-count path. Restrict this key to YouTube Data API v3 in Google Cloud.
+                                            </p>
+                                            {youtubeDataApiTestResult && (
+                                                <div className={`mt-3 p-2 rounded text-xs border ${
+                                                    youtubeDataApiTestResult.status === 'ok'
+                                                        ? 'bg-green-50 border-green-200 text-green-800'
+                                                        : 'bg-red-50 border-red-200 text-red-800'
+                                                }`}>
+                                                    {youtubeDataApiTestResult.status === 'ok'
+                                                        ? `API key works. Sample video: "${youtubeDataApiTestResult.title || youtubeDataApiTestResult.video_id}"${youtubeDataApiTestResult.view_count != null ? ` • ${youtubeDataApiTestResult.view_count.toLocaleString()} views` : ''}`
+                                                        : `Error: ${youtubeDataApiTestResult.error || 'Unknown error'}`}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600 space-y-1.5">
+                                            <div className="font-semibold text-slate-700">Setup (Google Cloud)</div>
+                                            <div>1. Create or select a Google Cloud project.</div>
+                                            <div>2. Enable <span className="font-medium">YouTube Data API v3</span>.</div>
+                                            <div>3. Create an API key in <span className="font-medium">APIs &amp; Services → Credentials</span>.</div>
+                                            <div>4. Restrict the key to YouTube Data API v3.</div>
+                                            <div>5. Paste the key above and save settings.</div>
+                                            <div className="pt-1">Quota note: Google documents a default quota of <span className="font-medium">10,000 units/day</span>, and <code className="bg-white px-1 rounded">videos.list</code> costs <span className="font-medium">1 unit</span>.</div>
+                                            <div className="pt-1 flex flex-col gap-1">
+                                                <a className="text-blue-700 hover:text-blue-800 underline inline-flex items-center gap-1" href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">
+                                                    Enable YouTube Data API v3 <ExternalLink size={12} />
+                                                </a>
+                                                <a className="text-blue-700 hover:text-blue-800 underline inline-flex items-center gap-1" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">
+                                                    Open Google Cloud Credentials <ExternalLink size={12} />
+                                                </a>
+                                                <a className="text-blue-700 hover:text-blue-800 underline inline-flex items-center gap-1" href="https://developers.google.com/youtube/v3/determine_quota_cost" target="_blank" rel="noreferrer">
+                                                    YouTube Data API quota costs <ExternalLink size={12} />
+                                                </a>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-2 mb-2">
                                         <Link2 className="w-5 h-5 text-red-500" />
                                         <h3 className="font-semibold text-slate-800">YouTube Publishing (OAuth)</h3>
                                     </div>
@@ -2926,7 +3520,317 @@ export function Settings() {
                                         </p>
                                     </div>
                                 </div>
+                            </>
+                        )}
 
+                        {/* === RUNTIMES TAB === */}
+                        {activeTab === 'runtimes' && (
+                            <>
+                                <div>
+                                    <h3 className="font-semibold text-slate-800 mb-2">Local Runtimes</h3>
+                                    <p className="text-sm text-slate-500">
+                                        Optional local install targets for cleanup, enhancement, and conversation reconstruction workbenches.
+                                    </p>
+                                </div>
+
+                                <div className="pt-4 border-t border-slate-100">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                                            <Wand2 size={16} />
+                                            ClearVoice
+                                        </h3>
+                                        <button
+                                            type="button"
+                                            onClick={() => void loadClearVoiceInstallInfo()}
+                                            disabled={loadingClearVoiceInstallInfo}
+                                            className="px-3 py-1.5 text-xs rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-50 inline-flex items-center gap-1"
+                                        >
+                                            {loadingClearVoiceInstallInfo ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                                            Refresh
+                                        </button>
+                                    </div>
+                                    <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-4 space-y-4">
+                                        <div className="text-sm text-cyan-950">
+                                            <div className="font-semibold">Pre-cleanup enhancement toolkit</div>
+                                            <p className="mt-1 text-cyan-900/80">
+                                                Install ClearVoice for the cleanup workbench. It runs enhancement candidates before the existing VoiceFixer pass so you can choose a better source for cleanup and reconstruction.
+                                            </p>
+                                        </div>
+                                        <div className="rounded-lg border border-cyan-200 bg-white p-4 space-y-3 text-sm">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${clearVoiceInstallInfo?.installed ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                                    {clearVoiceInstallInfo?.installed ? 'Installed' : 'Not installed'}
+                                                </span>
+                                                {clearVoiceInstallInfo?.installed && (
+                                                    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${clearVoiceInstallInfo?.runtime_ready ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-800'}`}>
+                                                        {clearVoiceInstallInfo?.runtime_ready ? 'Runtime Ready' : 'Runtime Needs Repair'}
+                                                    </span>
+                                                )}
+                                                {clearVoiceInstallInfo?.version && (
+                                                    <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+                                                        v{clearVoiceInstallInfo.version}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-slate-600">
+                                                Backend Python: <span className="font-mono text-[12px]">{clearVoiceInstallInfo?.python_executable || 'unknown'}</span>
+                                            </div>
+                                            {clearVoiceInstallInfo?.installed && (
+                                                <div className="text-slate-600">
+                                                    Torch: <span className="font-mono text-[12px]">{clearVoiceInstallInfo?.torch_version || 'not detected'}</span>
+                                                    {' '}| Torchaudio: <span className="font-mono text-[12px]">{clearVoiceInstallInfo?.torchaudio_version || 'not detected'}</span>
+                                                </div>
+                                            )}
+                                            {clearVoiceInstallInfo?.message && (
+                                                <div className={`rounded-lg border px-3 py-2 text-sm ${clearVoiceInstallInfo.restart_required || (clearVoiceInstallInfo.installed && !clearVoiceInstallInfo.runtime_ready) ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-cyan-200 bg-cyan-50 text-cyan-900'}`}>
+                                                    {clearVoiceInstallInfo.message}
+                                                </div>
+                                            )}
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleInstallClearVoice()}
+                                                    disabled={installingClearVoice}
+                                                    className="inline-flex items-center gap-2 rounded-lg bg-cyan-600 px-3 py-2 text-sm font-semibold text-white hover:bg-cyan-700 disabled:opacity-50"
+                                                >
+                                                    {installingClearVoice ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                                                    {installingClearVoice ? 'Installing...' : 'Install ClearVoice'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleTestClearVoice()}
+                                                    disabled={testingClearVoice || !clearVoiceInstallInfo?.installed || !!clearVoiceInstallInfo?.restart_required}
+                                                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                                >
+                                                    {testingClearVoice ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                                                    {testingClearVoice ? 'Testing...' : 'Run Self-Test'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleRepairClearVoice()}
+                                                    disabled={repairingClearVoice || !clearVoiceInstallInfo?.installed}
+                                                    className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                                                >
+                                                    {repairingClearVoice ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                                                    {repairingClearVoice ? 'Repairing...' : 'Repair Runtime'}
+                                                </button>
+                                                <a
+                                                    href={clearVoiceInstallInfo?.github_url || 'https://github.com/modelscope/ClearerVoice-Studio'}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                                                >
+                                                    <ExternalLink size={14} />
+                                                    GitHub
+                                                </a>
+                                            </div>
+                                            {clearVoiceTestResult && (
+                                                <div className={`rounded-lg border px-3 py-2 text-sm ${clearVoiceTestResult.status === 'ok' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+                                                    <div className="font-medium">
+                                                        {clearVoiceTestResult.status === 'ok' ? 'ClearVoice self-test passed.' : 'ClearVoice self-test failed.'}
+                                                    </div>
+                                                    {clearVoiceTestResult.detail && (
+                                                        <div className="mt-1 text-xs whitespace-pre-wrap">{clearVoiceTestResult.detail}</div>
+                                                    )}
+                                                    {(clearVoiceTestResult.torch_version || clearVoiceTestResult.torchaudio_version) && (
+                                                        <div className="mt-1 text-[11px]">
+                                                            Torch: {clearVoiceTestResult.torch_version || 'not detected'} | Torchaudio: {clearVoiceTestResult.torchaudio_version || 'not detected'}
+                                                        </div>
+                                                    )}
+                                                    {clearVoiceTestResult.error && (
+                                                        <pre className="mt-2 whitespace-pre-wrap break-words rounded bg-white/70 p-2 text-[11px] font-mono">
+                                                            {clearVoiceTestResult.error}
+                                                        </pre>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="pt-4 border-t border-slate-100">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                                            <AudioLines size={16} />
+                                            VoiceFixer
+                                        </h3>
+                                        <button
+                                            type="button"
+                                            onClick={() => void loadVoiceFixerInstallInfo()}
+                                            disabled={loadingVoiceFixerInstallInfo}
+                                            className="px-3 py-1.5 text-xs rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-50 inline-flex items-center gap-1"
+                                        >
+                                            {loadingVoiceFixerInstallInfo ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                                            Refresh
+                                        </button>
+                                    </div>
+                                    <div className="rounded-lg border border-sky-200 bg-sky-50 p-4 space-y-4">
+                                        <div className="text-sm text-sky-950">
+                                            <div className="font-semibold">Manual media cleanup pipeline</div>
+                                            <p className="mt-1 text-sky-900/80">
+                                                Install VoiceFixer for uploaded audio/video cleanup. Cleaned media can be switched on per episode for both processing and playback, with one-click revert back to the original file.
+                                            </p>
+                                        </div>
+                                        <div className="rounded-lg border border-sky-200 bg-white p-4 space-y-3 text-sm">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${voiceFixerInstallInfo?.installed ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                                    {voiceFixerInstallInfo?.installed ? 'Installed' : 'Not installed'}
+                                                </span>
+                                                {voiceFixerInstallInfo?.version && (
+                                                    <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+                                                        v{voiceFixerInstallInfo.version}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-slate-600">
+                                                Backend Python: <span className="font-mono text-[12px]">{voiceFixerInstallInfo?.python_executable || 'unknown'}</span>
+                                            </div>
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleInstallVoiceFixer()}
+                                                    disabled={installingVoiceFixer}
+                                                    className="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50"
+                                                >
+                                                    {installingVoiceFixer ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                                                    {installingVoiceFixer ? 'Installing...' : 'Install VoiceFixer'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleTestVoiceFixer()}
+                                                    disabled={testingVoiceFixer || !voiceFixerInstallInfo?.installed}
+                                                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                                >
+                                                    {testingVoiceFixer ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                                                    {testingVoiceFixer ? 'Testing...' : 'Run Self-Test'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleRepairVoiceFixer()}
+                                                    disabled={repairingVoiceFixer || !voiceFixerInstallInfo?.installed}
+                                                    className="inline-flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                                                >
+                                                    {repairingVoiceFixer ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                                                    {repairingVoiceFixer ? 'Repairing...' : 'Repair Weights'}
+                                                </button>
+                                                <a
+                                                    href={voiceFixerInstallInfo?.github_url || 'https://github.com/haoheliu/voicefixer'}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                                                >
+                                                    <ExternalLink size={14} />
+                                                    GitHub
+                                                </a>
+                                            </div>
+                                            {voiceFixerTestResult && (
+                                                <div className={`rounded-lg border px-3 py-2 text-sm ${voiceFixerTestResult.status === 'ok' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+                                                    <div className="font-medium">
+                                                        {voiceFixerTestResult.status === 'ok' ? 'VoiceFixer self-test passed.' : 'VoiceFixer self-test failed.'}
+                                                    </div>
+                                                    {voiceFixerTestResult.detail && (
+                                                        <div className="mt-1 text-xs whitespace-pre-wrap">{voiceFixerTestResult.detail}</div>
+                                                    )}
+                                                    {voiceFixerTestResult.error && (
+                                                        <pre className="mt-2 whitespace-pre-wrap break-words rounded bg-white/70 p-2 text-[11px] font-mono">
+                                                            {voiceFixerTestResult.error}
+                                                        </pre>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="pt-4 border-t border-slate-100">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                                            <Bot size={16} />
+                                            Conversation Reconstruction
+                                        </h3>
+                                        <button
+                                            type="button"
+                                            onClick={() => void loadReconstructionInstallInfo()}
+                                            disabled={loadingReconstructionInstallInfo}
+                                            className="px-3 py-1.5 text-xs rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 disabled:opacity-50 inline-flex items-center gap-1"
+                                        >
+                                            {loadingReconstructionInstallInfo ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                                            Refresh
+                                        </button>
+                                    </div>
+                                    <div className="rounded-lg border border-violet-200 bg-violet-50 p-4 space-y-4">
+                                        <div className="text-sm text-violet-950">
+                                            <div className="font-semibold">Speaker-cloned reconstruction runtime</div>
+                                            <p className="mt-1 text-violet-900/80">
+                                                Install a local Qwen3-TTS runtime plus SoX for reconstructing uploaded conversations into clean studio-style audio using diarized transcript timing and speaker voice references.
+                                            </p>
+                                        </div>
+                                        <div className="rounded-lg border border-violet-200 bg-white p-4 space-y-3 text-sm">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${reconstructionInstallInfo?.installed ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                                    {reconstructionInstallInfo?.installed ? 'Installed' : 'Not installed'}
+                                                </span>
+                                                {reconstructionInstallInfo?.version && (
+                                                    <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+                                                        v{reconstructionInstallInfo.version}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="text-slate-600">
+                                                Backend Python: <span className="font-mono text-[12px]">{reconstructionInstallInfo?.python_executable || 'unknown'}</span>
+                                            </div>
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleInstallReconstruction()}
+                                                    disabled={installingReconstruction}
+                                                    className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50"
+                                                >
+                                                    {installingReconstruction ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                                                    {installingReconstruction ? 'Installing...' : 'Install Runtime'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleTestReconstruction()}
+                                                    disabled={testingReconstruction || !reconstructionInstallInfo?.installed}
+                                                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                                                >
+                                                    {testingReconstruction ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                                                    {testingReconstruction ? 'Testing...' : 'Run Self-Test'}
+                                                </button>
+                                                <a
+                                                    href={reconstructionInstallInfo?.github_url || 'https://github.com/QwenLM/Qwen3-TTS'}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                                                >
+                                                    <ExternalLink size={14} />
+                                                    GitHub
+                                                </a>
+                                            </div>
+                                            {reconstructionTestResult && (
+                                                <div className={`rounded-lg border px-3 py-2 text-sm ${reconstructionTestResult.status === 'ok' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+                                                    <div className="font-medium">
+                                                        {reconstructionTestResult.status === 'ok' ? 'Conversation reconstruction self-test passed.' : 'Conversation reconstruction self-test failed.'}
+                                                    </div>
+                                                    {reconstructionTestResult.detail && (
+                                                        <div className="mt-1 text-xs whitespace-pre-wrap">{reconstructionTestResult.detail}</div>
+                                                    )}
+                                                    {reconstructionTestResult.error && (
+                                                        <pre className="mt-2 whitespace-pre-wrap break-words rounded bg-white/70 p-2 text-[11px] font-mono">
+                                                            {reconstructionTestResult.error}
+                                                        </pre>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </>
+                        )}
+
+                        {activeTab === 'system' && (
+                            <>
                                 <div className="pt-4 border-t border-slate-100">
                                     <div className="flex items-center justify-between mb-4">
                                         <h3 className="font-semibold text-slate-800 flex items-center gap-2">
@@ -3107,11 +4011,14 @@ export function Settings() {
                                                     </div>
                                                     {externalShareStatus.share_url && (
                                                         <div className="rounded-md border border-slate-200 bg-slate-50 p-3 space-y-2">
-                                                            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Share URL</div>
+                                                            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Share This Link</div>
                                                             <div className="text-slate-700 break-all">
                                                                 <a href={externalShareStatus.share_url} target="_blank" rel="noreferrer" className="text-blue-600 underline">
                                                                     {externalShareStatus.share_url}
                                                                 </a>
+                                                            </div>
+                                                            <div className="text-[11px] text-slate-500">
+                                                                Remote users should open this link, not the raw LAN app URL below. It includes the share-session routing context required for the API to load correctly.
                                                             </div>
                                                             <div className="flex flex-wrap items-center gap-2">
                                                                 <button
@@ -3135,13 +4042,13 @@ export function Settings() {
                                                         </div>
                                                     )}
                                                     {externalShareStatus.api_public_url && (
-                                                        <div className="text-slate-600 break-all">API URL: {externalShareStatus.api_public_url}</div>
+                                                        <div className="text-slate-600 break-all">Diagnostic API URL: {externalShareStatus.api_public_url}</div>
                                                     )}
                                                     {!externalShareStatus.api_public_url && externalShareStatus.api_lan_url && (
-                                                        <div className="text-slate-600 break-all">LAN API URL: {externalShareStatus.api_lan_url}</div>
+                                                        <div className="text-slate-600 break-all">Diagnostic LAN API URL: {externalShareStatus.api_lan_url}</div>
                                                     )}
                                                     {!externalShareStatus.frontend_public_url && externalShareStatus.frontend_lan_url && (
-                                                        <div className="text-slate-600 break-all">LAN App URL: {externalShareStatus.frontend_lan_url}</div>
+                                                        <div className="text-slate-600 break-all">Diagnostic LAN App URL: {externalShareStatus.frontend_lan_url}</div>
                                                     )}
                                                     <div className="text-slate-600">
                                                         Password required: {externalShareStatus.password_required ? 'yes' : 'no'} · Allowlist: {externalShareStatus.ip_allowlist.length ? externalShareStatus.ip_allowlist.join(', ') : 'none'}
@@ -3202,6 +4109,8 @@ export function Settings() {
                                 </div>
                             </>
                         )}
+                            </div>
+                        </div>
                     </div>
                 </div>
 

@@ -90,8 +90,8 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
         }
         const containerW = overlay.clientWidth;
         const containerH = overlay.clientHeight;
-        const sourceW = media.videoWidth || 0;
-        const sourceH = media.videoHeight || 0;
+        const sourceW = (media as HTMLVideoElement).videoWidth || 0;
+        const sourceH = (media as HTMLVideoElement).videoHeight || 0;
         if (!(containerW > 0 && containerH > 0 && sourceW > 0 && sourceH > 0)) {
             return null;
         }
@@ -700,7 +700,7 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
                                     "{sampleText}"
                                 </blockquote>
                                 <p className="text-xs text-slate-400 mt-2">
-                                    Duration: {currentSample ? ((currentSample.end_time - currentSample.start_time).toFixed(1)) : 0}s
+                                    Duration: {currentSample && currentSample.end_time ? ((currentSample.end_time - currentSample.start_time).toFixed(1)) : 0}s
                                 </p>
                             </div>
                         )}

@@ -2,14 +2,31 @@ import { useEffect, useState, useMemo, useRef, type MouseEvent } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import api from '../../lib/api';
 import type { Channel, Video } from '../../types';
-import { Play, Loader2, Eye, EyeOff, RefreshCw, Download, Grid, List, Search, X, ArrowUpDown, ArrowUp, ArrowDown, Plus, Filter, Upload } from 'lucide-react';
+import { Play, Loader2, Eye, EyeOff, RefreshCw, Download, Grid, List, Search, X, ArrowUpDown, ArrowUp, ArrowDown, Plus, Filter, Upload, TrendingUp } from 'lucide-react';
 import { VideoStatusBadge } from '../../components/VideoStatusBadge';
 
-type SortField = 'published_at' | 'title' | 'duration' | 'status';
+type SortField = 'published_at' | 'title' | 'duration' | 'status' | 'popularity';
 type SortOrder = 'asc' | 'desc';
 const VIDEO_PAGE_SIZE = 250;
 const DATE_BACKFILL_POLL_MS = 5000;
 const DATE_BACKFILL_MAX_POLLS = 24;
+const REFRESH_BURST_POLL_MS = 800;
+const REFRESH_BURST_ATTEMPTS = 6;
+const ACTIVE_PIPELINE_STATUSES = new Set(['pending', 'queued', 'downloading', 'transcribing', 'diarizing', 'waiting_diarize']);
+const STALLED_PIPELINE_STATUSES = new Set(['failed', 'downloaded', 'transcribed']);
+
+function normalizeStatus(value?: string | null) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function isMetadataBackfillDetail(detail?: string | null) {
+    const normalized = normalizeStatus(detail);
+    return (
+        normalized.startsWith('initial import complete. finishing metadata backfill') ||
+        normalized.startsWith('finishing metadata backfill') ||
+        normalized.startsWith('backfilling publication dates')
+    );
+}
 
 export function ChannelVideos() {
     const { id } = useParams<{ id: string }>();
@@ -55,13 +72,15 @@ export function ChannelVideos() {
         }
     };
 
-    const fetchChannel = async () => {
-        if (!id) return;
+    const fetchChannel = async (): Promise<Channel | null> => {
+        if (!id) return null;
         try {
             const res = await api.get<Channel>(`/channels/${id}`);
             setChannel(res.data);
+            return res.data;
         } catch (e) {
             console.error('Failed to fetch channel:', e);
+            return null;
         }
     };
 
@@ -90,15 +109,27 @@ export function ChannelVideos() {
         return null;
     };
 
+    const getEffectiveProcessingStatus = (video: Video) => {
+        if (video.access_restricted) return 'access_restricted';
+        if (video.processed) return 'completed';
+        const latestPipelineStatus = normalizeStatus(video.last_pipeline_job_status);
+        const videoStatus = normalizeStatus(video.status) || 'pending';
+        if (ACTIVE_PIPELINE_STATUSES.has(latestPipelineStatus)) return latestPipelineStatus;
+        if (latestPipelineStatus === 'failed') return 'failed';
+        if (STALLED_PIPELINE_STATUSES.has(videoStatus) && !ACTIVE_PIPELINE_STATUSES.has(latestPipelineStatus)) {
+            return 'failed';
+        }
+        return videoStatus;
+    };
+
     const isProcessableVideo = (video: Video) => !video.processed && !video.muted && !video.access_restricted;
     const channelSourceType = (channel?.source_type || 'youtube').toLowerCase();
     const isManualChannel = channelSourceType === 'manual';
     const isTikTokChannel = channelSourceType === 'tiktok';
-    const isYoutubeChannel = channelSourceType === 'youtube';
 
     const getChannelSyncProgress = () => Math.max(0, Math.min(100, Number(channel?.sync_progress ?? 0)));
 
-    const fetchVideos = async (polling: boolean = false) => {
+    const fetchVideos = async (polling: boolean = false): Promise<Video[]> => {
         try {
             const res = await api.get<Video[]>('/videos/list', { params: { channel_id: id } });
             setVideos(res.data);
@@ -109,10 +140,28 @@ export function ChannelVideos() {
             if (!polling && nextMissingDateCount === 0) {
                 backfillPollCountRef.current = 0;
             }
+            return res.data;
         } catch (e) {
             console.error('Failed to fetch videos:', e);
+            return [];
         } finally {
             setLoading(false);
+        }
+    };
+
+    const runRefreshBurstPoll = async () => {
+        for (let attempt = 0; attempt < REFRESH_BURST_ATTEMPTS; attempt += 1) {
+            await new Promise((resolve) => window.setTimeout(resolve, REFRESH_BURST_POLL_MS));
+            const [nextChannel, nextVideos] = await Promise.all([
+                fetchChannel(),
+                fetchVideos(true),
+            ]);
+            const channelIsRefreshing = nextChannel?.status === 'refreshing';
+            const hasVideos = nextVideos.length > 0;
+            const hasMissingDates = nextVideos.some((video) => !video.published_at);
+            if (!channelIsRefreshing && hasVideos && !hasMissingDates) {
+                break;
+            }
         }
     };
 
@@ -133,7 +182,13 @@ export function ChannelVideos() {
         }
 
         const shouldPollRefresh = channel?.status === 'refreshing';
-        const shouldPollDates = missingDateCount > 0 && backfillPollCountRef.current < DATE_BACKFILL_MAX_POLLS;
+        const shouldPollDates = (
+            missingDateCount > 0 &&
+            !isManualChannel &&
+            isMetadataBackfillDetail(channel?.sync_status_detail) &&
+            Number(channel?.sync_progress ?? 0) < 100 &&
+            backfillPollCountRef.current < DATE_BACKFILL_MAX_POLLS
+        );
         if (!shouldPollRefresh && !shouldPollDates) {
             if (missingDateCount === 0) {
                 backfillPollCountRef.current = 0;
@@ -154,7 +209,7 @@ export function ChannelVideos() {
         return () => {
             clearBackfillPollTimer();
         };
-    }, [channel?.status, id, missingDateCount]);
+    }, [channel?.status, channel?.sync_progress, channel?.sync_status_detail, id, isManualChannel, missingDateCount]);
 
     // Handle deep linking to video via URL params
     useEffect(() => {
@@ -193,7 +248,7 @@ export function ChannelVideos() {
         // 2. Filter by status categories
         if (statusFilters.size > 0) {
             result = result.filter(v => {
-                const effective = v.processed ? 'completed' : (v.status || 'pending');
+                const effective = getEffectiveProcessingStatus(v);
                 if (statusFilters.has('completed') && v.processed) return true;
                 if (statusFilters.has('failed') && effective === 'failed') return true;
                 if (statusFilters.has('unprocessed') && !v.processed && effective !== 'failed' && !v.access_restricted) return true;
@@ -203,8 +258,8 @@ export function ChannelVideos() {
 
         // 3. Sort
         return [...result].sort((a, b) => {
-            let valA: any = a[sortField];
-            let valB: any = b[sortField];
+            let valA: any = null;
+            let valB: any = null;
 
             if (sortField === 'published_at') {
                 valA = new Date(a.published_at || 0).getTime();
@@ -212,11 +267,17 @@ export function ChannelVideos() {
             } else if (sortField === 'title') {
                 valA = a.title.toLowerCase();
                 valB = b.title.toLowerCase();
+            } else if (sortField === 'duration') {
+                valA = Number(a.duration || 0);
+                valB = Number(b.duration || 0);
+            } else if (sortField === 'popularity') {
+                valA = getVideoPopularityScore(a);
+                valB = getVideoPopularityScore(b);
             } else if (sortField === 'status') {
                 // Sort priority: processed > transcribing > downloading > pending > failed > restricted
                 const statusOrder: Record<string, number> = { processed: 5, transcribing: 4, downloading: 3, pending: 2, failed: 1, access_restricted: 0 };
-                valA = statusOrder[a.access_restricted ? 'access_restricted' : (a.processed ? 'processed' : (a.status || 'pending'))] || 0;
-                valB = statusOrder[b.access_restricted ? 'access_restricted' : (b.processed ? 'processed' : (b.status || 'pending'))] || 0;
+                valA = statusOrder[getEffectiveProcessingStatus(a)] || 0;
+                valB = statusOrder[getEffectiveProcessingStatus(b)] || 0;
             }
 
             if (valA < valB) return sortOrder === 'asc' ? -1 : 1;
@@ -239,8 +300,11 @@ export function ChannelVideos() {
         setFetching(true);
         try {
             await api.post(`/channels/${id}/refresh`);
-            await fetchChannel();
-            await fetchVideos();
+            await Promise.all([
+                fetchChannel(),
+                fetchVideos(),
+            ]);
+            void runRefreshBurstPoll();
         } catch (e) {
             console.error('Failed to fetch videos:', e);
             alert('Failed to start video fetch');
@@ -362,10 +426,59 @@ export function ChannelVideos() {
         return `${m}:${s.toString().padStart(2, '0')}`;
     };
 
+    function formatCompactNumber(value?: number | null) {
+        if (value == null || !Number.isFinite(value)) return 'Unknown';
+        return new Intl.NumberFormat('en-US', {
+            notation: value >= 1000 ? 'compact' : 'standard',
+            maximumFractionDigits: value >= 1000 ? 1 : 0,
+        }).format(value);
+    }
+
+    function getVideoViewsPerDay(video: Video) {
+        if (video.view_count == null || !video.published_at) return null;
+        const publishedAtMs = new Date(video.published_at).getTime();
+        if (!Number.isFinite(publishedAtMs) || publishedAtMs <= 0) return null;
+        const ageDays = Math.max(1, (Date.now() - publishedAtMs) / 86400000);
+        return Number(video.view_count) / ageDays;
+    }
+
+    function getVideoPopularityScore(video: Video) {
+        const viewsPerDay = getVideoViewsPerDay(video);
+        if (viewsPerDay != null) {
+            return (viewsPerDay * 1_000_000) + Number(video.view_count || 0);
+        }
+        if (video.view_count != null) {
+            return Number(video.view_count);
+        }
+        return -1;
+    }
+
+    function getVideoPopularityLabel(video: Video) {
+        if (video.view_count == null) return 'Popularity unknown';
+        const viewsPerDay = getVideoViewsPerDay(video);
+        if (viewsPerDay != null) {
+            return `${formatCompactNumber(video.view_count)} views • ${formatCompactNumber(Math.round(viewsPerDay))}/day`;
+        }
+        return `${formatCompactNumber(video.view_count)} views`;
+    }
+
+    function formatPublishedDate(value?: string | null) {
+        if (!value) return null;
+        const parsed = new Date(value);
+        if (!Number.isFinite(parsed.getTime())) return null;
+        return parsed.toLocaleDateString();
+    }
+
     const unprocessedCount = videos.filter(isProcessableVideo).length;
     const unmutedFilteredCount = processedVideos.filter(v => !v.muted && !v.access_restricted).length;
     const isRefreshingChannel = !isManualChannel && (channel?.status === 'refreshing' || fetching);
-    const isDateBackfillActive = missingDateCount > 0 && (isRefreshingChannel || backfillPollCountRef.current < DATE_BACKFILL_MAX_POLLS);
+    const isDateBackfillActive = (
+        missingDateCount > 0 &&
+        !isRefreshingChannel &&
+        !isManualChannel &&
+        isMetadataBackfillDetail(channel?.sync_status_detail) &&
+        Number(channel?.sync_progress ?? 0) < 100
+    );
     const syncProgress = getChannelSyncProgress();
     const activityMessage = isRefreshingChannel
         ? videos.length > 0
@@ -493,9 +606,9 @@ export function ChannelVideos() {
     }
 
     return (
-        <div className="flex gap-4 h-[calc(100vh-200px)]">
+        <div className="space-y-4">
             {/* Video list section */}
-            <div className="flex-1 flex flex-col space-y-4 transition-all">
+            <div className="space-y-4 transition-all">
                 {/* Header with search and action buttons */}
                 <div className="flex flex-col gap-3 shrink-0">
                     {activityMessage && (
@@ -527,86 +640,99 @@ export function ChannelVideos() {
                         </div>
                     )}
 
-                    {/* Search bar */}
-                    <div className="relative">
-                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                        <input
-                            type="text"
-                            placeholder="Search title or description..."
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            className="w-full pl-9 pr-9 py-2 bg-white border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400"
-                        />
-                        {searchQuery && (
-                            <button
-                                onClick={() => setSearchQuery('')}
-                                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
-                            >
-                                <X size={16} />
-                            </button>
-                        )}
-                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white px-3.5 py-3 shadow-sm">
+                        <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+                                <div className="relative min-w-0 flex-1">
+                                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                                    <input
+                                        type="text"
+                                        placeholder="Search title or description..."
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-9 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400"
+                                    />
+                                    {searchQuery && (
+                                        <button
+                                            onClick={() => setSearchQuery('')}
+                                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                        >
+                                            <X size={16} />
+                                        </button>
+                                    )}
+                                </div>
 
-                    {/* Status filter chips */}
-                    <div className="flex items-center gap-2">
-                        <Filter size={14} className="text-slate-400 shrink-0" />
-                        {[
-                            { key: 'unprocessed', label: 'Unprocessed', color: 'slate' },
-                            { key: 'completed', label: 'Completed', color: 'green' },
-                            { key: 'failed', label: 'Failed', color: 'red' },
-                        ].map(({ key, label, color }) => {
-                            const active = statusFilters.has(key);
-                            const colorMap: Record<string, string> = {
-                                slate: active ? 'bg-slate-500 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200',
-                                green: active ? 'bg-green-500 text-white' : 'bg-green-50 text-green-600 hover:bg-green-100',
-                                red: active ? 'bg-red-500 text-white' : 'bg-red-50 text-red-600 hover:bg-red-100',
-                            };
-                            return (
-                                <button
-                                    key={key}
-                                    onClick={() => toggleStatusFilter(key)}
-                                    className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${colorMap[color]}`}
-                                >
-                                    {label}
-                                </button>
-                            );
-                        })}
-                        {statusFilters.size > 0 && (
-                            <button
-                                onClick={() => setStatusFilters(new Set())}
-                                className="text-xs text-slate-400 hover:text-slate-600 ml-1"
-                            >
-                                Clear
-                            </button>
-                        )}
-                    </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <div className="inline-flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-2">
+                                        <Filter size={14} className="text-slate-400 shrink-0" />
+                                        {[
+                                            { key: 'unprocessed', label: 'Unprocessed', color: 'slate' },
+                                            { key: 'completed', label: 'Completed', color: 'green' },
+                                            { key: 'failed', label: 'Failed', color: 'red' },
+                                        ].map(({ key, label, color }) => {
+                                            const active = statusFilters.has(key);
+                                            const colorMap: Record<string, string> = {
+                                                slate: active ? 'bg-slate-500 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200',
+                                                green: active ? 'bg-green-500 text-white' : 'bg-green-50 text-green-600 hover:bg-green-100',
+                                                red: active ? 'bg-red-500 text-white' : 'bg-red-50 text-red-600 hover:bg-red-100',
+                                            };
+                                            return (
+                                                <button
+                                                    key={key}
+                                                    onClick={() => toggleStatusFilter(key)}
+                                                    className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${colorMap[color]}`}
+                                                >
+                                                    {label}
+                                                </button>
+                                            );
+                                        })}
+                                        {statusFilters.size > 0 && (
+                                            <button
+                                                onClick={() => setStatusFilters(new Set())}
+                                                className="text-xs text-slate-400 hover:text-slate-600"
+                                            >
+                                                Clear
+                                            </button>
+                                        )}
+                                    </div>
 
-                    {/* Actions row */}
-                    <div className="flex justify-between items-center">
-                        <div className="flex items-center gap-4">
-                            <p className="text-sm text-slate-500">
-                                {(searchQuery || statusFilters.size > 0) ? `${processedVideos.length} of ${videos.length}` : `${videos.length}`} video{videos.length !== 1 ? 's' : ''}
-                                {unprocessedCount > 0 && !searchQuery && ` | ${unprocessedCount} ready`}
-                            </p>
-                            {/* View toggle */}
-                            <div className="flex items-center bg-slate-100 rounded-lg p-0.5">
-                                <button
-                                    onClick={() => setViewMode('compact')}
-                                    className={`p-1.5 rounded ${viewMode === 'compact' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-400'}`}
-                                    title="Compact view"
-                                >
-                                    <List size={16} />
-                                </button>
-                                <button
-                                    onClick={() => setViewMode('grid')}
-                                    className={`p-1.5 rounded ${viewMode === 'grid' ? 'bg-white shadow-sm text-blue-600' : 'text-slate-400'}`}
-                                    title="Grid view"
-                                >
-                                    <Grid size={16} />
-                                </button>
+                                    <div className="flex items-center rounded-lg bg-slate-100 p-0.5">
+                                        <button
+                                            onClick={() => setViewMode('compact')}
+                                            className={`rounded-md p-1.5 ${viewMode === 'compact' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}
+                                            title="Compact view"
+                                        >
+                                            <List size={16} />
+                                        </button>
+                                        <button
+                                            onClick={() => setViewMode('grid')}
+                                            className={`rounded-md p-1.5 ${viewMode === 'grid' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}
+                                            title="Grid view"
+                                        >
+                                            <Grid size={16} />
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
-                        </div>
-                        <div className="flex items-center gap-2">
+
+                            <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-[13px] font-medium text-slate-700">
+                                        {(searchQuery || statusFilters.size > 0) ? `${processedVideos.length} of ${videos.length}` : `${videos.length}`} video{videos.length !== 1 ? 's' : ''}
+                                    </span>
+                                    {unprocessedCount > 0 && !searchQuery && (
+                                        <span className="inline-flex items-center rounded-full bg-blue-50 px-3 py-1 text-[13px] font-medium text-blue-700">
+                                            {unprocessedCount} ready to process
+                                        </span>
+                                    )}
+                                    {isDateBackfillActive && (
+                                        <span className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-[13px] font-medium text-amber-700">
+                                            {missingDateCount} dates pending
+                                        </span>
+                                    )}
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-2 lg:justify-end">
                             {/* Mute filtered button */}
                             {searchQuery && unmutedFilteredCount > 0 && (
                                 <button
@@ -691,6 +817,8 @@ export function ChannelVideos() {
                                     {processingAll ? 'Queueing...' : `Process All (${unprocessedCount})`}
                                 </button>
                             )}
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -704,22 +832,22 @@ export function ChannelVideos() {
 
                 {/* Compact List View */}
                 {viewMode === 'compact' && processedVideos.length > 0 && (
-                    <div className="glass-panel rounded-xl overflow-hidden flex-1 flex flex-col">
-                        <div className="overflow-auto flex-1">
+                    <div className="glass-panel rounded-xl overflow-hidden">
+                        <div className="overflow-auto">
                             <table className="w-full text-sm relative">
                                 <thead className="bg-slate-50 sticky top-0 z-10 shadow-sm">
                                     <tr className="text-left text-slate-500 text-xs uppercase tracking-wider">
-                                        <th className="px-2 py-3 w-10"></th>
+                                        <th className="px-4 py-3 w-20"></th>
                                         <th
-                                            className="px-2 py-3 cursor-pointer hover:bg-slate-100 transition-colors"
+                                            className="px-4 py-3 cursor-pointer hover:bg-slate-100 transition-colors"
                                             onClick={() => handleSort('title')}
                                         >
                                             <div className="flex items-center gap-1">
-                                                Title {getSortIcon('title')}
+                                                Episode {getSortIcon('title')}
                                             </div>
                                         </th>
                                         <th
-                                            className="px-2 py-3 w-28 text-center cursor-pointer hover:bg-slate-100 transition-colors"
+                                            className="px-4 py-3 w-24 text-center cursor-pointer hover:bg-slate-100 transition-colors"
                                             onClick={() => handleSort('published_at')}
                                         >
                                             <div className="flex items-center justify-center gap-1">
@@ -727,22 +855,22 @@ export function ChannelVideos() {
                                             </div>
                                         </th>
                                         <th
-                                            className="px-2 py-3 w-20 text-center cursor-pointer hover:bg-slate-100 transition-colors"
-                                            onClick={() => handleSort('duration')}
+                                            className="px-4 py-3 w-32 text-center cursor-pointer hover:bg-slate-100 transition-colors"
+                                            onClick={() => handleSort('popularity')}
                                         >
                                             <div className="flex items-center justify-center gap-1">
-                                                Dur {getSortIcon('duration')}
+                                                Yield {getSortIcon('popularity')}
                                             </div>
                                         </th>
                                         <th
-                                            className="px-2 py-3 w-32 text-center cursor-pointer hover:bg-slate-100 transition-colors"
+                                            className="px-4 py-3 w-28 text-center cursor-pointer hover:bg-slate-100 transition-colors"
                                             onClick={() => handleSort('status')}
                                         >
                                             <div className="flex items-center justify-center gap-1">
                                                 Status {getSortIcon('status')}
                                             </div>
                                         </th>
-                                        <th className="px-2 py-3 w-20 text-center">Actions</th>
+                                        <th className="px-4 py-3 w-24 text-center">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
@@ -753,23 +881,30 @@ export function ChannelVideos() {
                                             className={`transition-colors cursor-pointer group ${video.access_restricted ? 'bg-slate-50/90 opacity-65' : 'hover:bg-slate-50'} ${video.muted ? 'opacity-50 bg-slate-50' : ''}`}
                                         >
                                             {/* Thumbnail */}
-                                            <td className="px-2 py-2">
-                                                <div className="w-12 h-8 bg-slate-200 rounded overflow-hidden flex-shrink-0 relative">
+                                            <td className="px-4 py-3">
+                                                <div className="relative h-10 w-16 flex-shrink-0 overflow-hidden rounded-md bg-slate-200">
                                                     {video.thumbnail_url ? (
                                                         <img src={video.thumbnail_url} alt="" className="w-full h-full object-cover" />
                                                     ) : (
                                                         <div className="flex items-center justify-center h-full">
-                                                            <Play size={10} className="text-slate-400" />
+                                                            <Play size={12} className="text-slate-400" />
                                                         </div>
                                                     )}
                                                 </div>
                                             </td>
                                             {/* Title */}
-                                            <td className="px-2 py-2">
-                                                <div className="flex flex-col gap-1">
-                                                    <span className={`font-medium text-slate-700 line-clamp-2 text-xs leading-snug ${video.muted ? 'line-through' : ''}`} title={video.title}>
+                                            <td className="px-4 py-3">
+                                                <div className="flex min-w-0 flex-col gap-1.5">
+                                                    <span className={`line-clamp-2 text-sm font-semibold leading-snug text-slate-700 ${video.muted ? 'line-through' : ''}`} title={video.title}>
                                                         {video.title}
                                                     </span>
+                                                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+                                                        <span className="font-mono text-slate-400">{formatDuration(video.duration)}</span>
+                                                        {formatPublishedDate(video.published_at) && (
+                                                            <span>{formatPublishedDate(video.published_at)}</span>
+                                                        )}
+                                                    </div>
+                                                    <div className="flex flex-wrap items-center gap-1.5">
                                                     {video.access_restricted && (
                                                         <span
                                                             className="inline-flex w-fit items-center rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-700"
@@ -792,27 +927,35 @@ export function ChannelVideos() {
                                                             {getSourceMediaLabel(video)}
                                                         </span>
                                                     )}
+                                                    </div>
                                                 </div>
                                             </td>
                                             {/* Date */}
-                                            <td className="px-2 py-2 text-center text-slate-500 text-xs whitespace-nowrap">
-                                                {video.published_at ? (
-                                                    new Date(video.published_at).toLocaleDateString()
+                                            <td className="px-4 py-3 text-center text-slate-500 text-xs whitespace-nowrap">
+                                                {formatPublishedDate(video.published_at) ? (
+                                                    formatPublishedDate(video.published_at)
                                                 ) : isDateBackfillActive ? (
                                                     <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
                                                         Fetching...
                                                     </span>
                                                 ) : '-'}
                                             </td>
-                                            {/* Duration */}
-                                            <td className="px-2 py-2 text-center text-slate-500 text-xs font-mono">
-                                                {formatDuration(video.duration)}
+                                            {/* Popularity */}
+                                            <td className="px-4 py-3 text-center">
+                                                <div className="inline-flex flex-col items-center gap-0.5 text-[11px] leading-tight">
+                                                    <span className="font-semibold text-slate-700">
+                                                        {video.view_count != null ? `${formatCompactNumber(video.view_count)} views` : 'Unknown'}
+                                                    </span>
+                                                    <span className="text-slate-400">
+                                                        {getVideoViewsPerDay(video) != null ? `${formatCompactNumber(Math.round(getVideoViewsPerDay(video) || 0))}/day` : '-'}
+                                                    </span>
+                                                </div>
                                             </td>
                                             {/* Status */}
-                                            <td className="px-2 py-2">
+                                            <td className="px-4 py-3">
                                                 <div className="flex justify-center">
                                                     <VideoStatusBadge
-                                                        status={video.status}
+                                                        status={getEffectiveProcessingStatus(video)}
                                                         processed={video.processed}
                                                         accessRestricted={video.access_restricted}
                                                         className={video.muted || video.access_restricted ? 'opacity-50' : ''}
@@ -821,7 +964,7 @@ export function ChannelVideos() {
                                             </td>
                                             {/* Actions */}
 
-                                            <td className="px-2 py-2">
+                                            <td className="px-4 py-3">
                                                 <div className="flex items-center justify-center gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
                                                     <button
                                                         onClick={(e) => handleToggleMute(video.id, e)}
@@ -863,13 +1006,13 @@ export function ChannelVideos() {
 
                 {/* Grid View */}
                 {viewMode === 'grid' && processedVideos.length > 0 && (
-                    <div className="flex-1 overflow-y-auto pr-2">
-                        <div className={`grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3`}>
+                    <div className="pr-1">
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
                             {visibleVideos.map((video) => (
                                 <div
                                     key={video.id}
                                     onClick={() => navigate(`/video/${video.id}`)}
-                                    className={`glass-panel rounded-lg overflow-hidden transition-all duration-300 group cursor-pointer ${video.access_restricted ? 'opacity-65 saturate-0' : video.muted ? 'opacity-50 grayscale' : 'hover:shadow-lg hover:-translate-y-0.5'
+                                    className={`glass-panel group cursor-pointer overflow-hidden rounded-xl transition-all duration-300 ${video.access_restricted ? 'opacity-65 saturate-0' : video.muted ? 'opacity-50 grayscale' : 'hover:-translate-y-0.5 hover:shadow-lg'
                                         }`}
                                 >
                                     {/* Thumbnail */}
@@ -884,45 +1027,76 @@ export function ChannelVideos() {
                                         {/* Mute button overlay */}
                                         <button
                                             onClick={(e) => handleToggleMute(video.id, e)}
-                                            className={`absolute top-1 right-1 p-1 rounded-full transition-all ${video.muted ? 'bg-red-500 text-white' : 'bg-black/50 text-white/80 opacity-0 group-hover:opacity-100'
+                                            className={`absolute right-2 top-2 rounded-full p-1.5 transition-all ${video.muted ? 'bg-red-500 text-white' : 'bg-black/55 text-white/85'
                                                 }`}
                                             title={video.muted ? 'Unmute' : 'Mute'}
                                         >
-                                            {video.muted ? <EyeOff size={10} /> : <Eye size={10} />}
+                                            {video.muted ? <EyeOff size={12} /> : <Eye size={12} />}
                                         </button>
                                         {video.duration && (
-                                            <span className="absolute bottom-1 right-1 bg-black/70 text-white px-1 py-0.5 rounded text-[9px]">
+                                            <span className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">
                                                 {formatDuration(video.duration)}
                                             </span>
                                         )}
                                     </div>
                                     {/* Content */}
-                                    <div className="p-1.5">
-                                        <h3 className={`text-[10px] font-medium text-slate-700 line-clamp-2 leading-tight ${video.muted ? 'line-through' : ''}`} title={video.title}>
-                                            {video.title}
-                                        </h3>
-                                        {video.access_restricted && (
-                                            <div
-                                                className="mt-1 inline-flex items-center rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-700"
-                                                title={video.access_restriction_reason || 'This video is not accessible with the current YouTube session.'}
-                                            >
-                                                {getAccessRestrictionLabel(video)}
+                                    <div className="space-y-2 p-3">
+                                        <div className="space-y-1">
+                                            <h3 className={`line-clamp-2 text-sm font-semibold leading-snug text-slate-700 ${video.muted ? 'line-through' : ''}`} title={video.title}>
+                                                {video.title}
+                                            </h3>
+                                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+                                                <span>{formatPublishedDate(video.published_at) || 'Date unknown'}</span>
+                                                <span className="font-mono text-slate-400">{formatDuration(video.duration)}</span>
                                             </div>
-                                        )}
-                                        {video.transcript_is_placeholder && (
-                                            <div className="mt-1 inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
-                                                {getPlaceholderLabel(video)}
-                                            </div>
-                                        )}
-                                        {getSourceMediaLabel(video) && (
-                                            <div className={`mt-1 inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
-                                                video.media_source_type === 'tiktok'
-                                                    ? 'bg-pink-100 text-pink-800'
-                                                    : 'bg-blue-100 text-blue-800'
-                                            }`}>
-                                                {getSourceMediaLabel(video)}
-                                            </div>
-                                        )}
+                                        </div>
+                                        <div className="flex items-center gap-1 text-[11px] font-medium text-emerald-700">
+                                            <TrendingUp size={11} className="shrink-0" />
+                                            <span className="line-clamp-1">{getVideoPopularityLabel(video)}</span>
+                                        </div>
+                                        <div className="flex flex-wrap items-center gap-1.5">
+                                            {video.access_restricted && (
+                                                <div
+                                                    className="inline-flex items-center rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-700"
+                                                    title={video.access_restriction_reason || 'This video is not accessible with the current YouTube session.'}
+                                                >
+                                                    {getAccessRestrictionLabel(video)}
+                                                </div>
+                                            )}
+                                            {video.transcript_is_placeholder && (
+                                                <div className="inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">
+                                                    {getPlaceholderLabel(video)}
+                                                </div>
+                                            )}
+                                            {getSourceMediaLabel(video) && (
+                                                <div className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                                                    video.media_source_type === 'tiktok'
+                                                        ? 'bg-pink-100 text-pink-800'
+                                                        : 'bg-blue-100 text-blue-800'
+                                                }`}>
+                                                    {getSourceMediaLabel(video)}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="flex items-center justify-between gap-2 pt-1">
+                                            <VideoStatusBadge
+                                                status={getEffectiveProcessingStatus(video)}
+                                                processed={video.processed}
+                                                accessRestricted={video.access_restricted}
+                                                className={video.muted || video.access_restricted ? 'opacity-60' : ''}
+                                            />
+                                            {!video.processed && !video.muted && !video.access_restricted && (
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); handleProcess(video.id); }}
+                                                    disabled={processingIds.has(video.id)}
+                                                    className="inline-flex items-center gap-1.5 rounded-lg bg-blue-100 px-2.5 py-1.5 text-[11px] font-semibold text-blue-700 transition-colors hover:bg-blue-200 disabled:opacity-50"
+                                                    title="Process"
+                                                >
+                                                    {processingIds.has(video.id) ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
+                                                    Process
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             ))}

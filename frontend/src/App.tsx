@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { SetupWizard } from './components/SetupWizard';
 import { Channels } from './pages/Channels';
@@ -12,8 +12,9 @@ import { JobQueue } from './pages/JobQueue';
 import { Settings } from './pages/Settings';
 import { Speakers } from './pages/Speakers';
 import { SpeakerDetailPage } from './pages/SpeakerDetailPage';
+import { AvatarStudioPage } from './pages/AvatarStudioPage';
 import { VideoDetailPage } from './pages/video/VideoDetailPage';
-import api, { API_BASE_URL, getSharePassword, getShareToken, setSharePassword } from './lib/api';
+import api, { getApiBaseUrl, getShareApiBase, getSharePassword, getShareToken, setSharePassword } from './lib/api';
 
 interface ExternalShareBannerStatus {
   active: boolean;
@@ -22,11 +23,44 @@ interface ExternalShareBannerStatus {
   password_required?: boolean;
 }
 
+function ShareUrlStateSync() {
+  const location = useLocation();
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const shareToken = getShareToken();
+    const shareApiBase = getShareApiBase();
+    if (!shareToken || !shareApiBase) return;
+
+    const url = new URL(window.location.href);
+    let changed = false;
+
+    if (url.searchParams.get('share_token') !== shareToken) {
+      url.searchParams.set('share_token', shareToken);
+      changed = true;
+    }
+
+    if (url.searchParams.get('api_base') !== shareApiBase) {
+      url.searchParams.set('api_base', shareApiBase);
+      changed = true;
+    }
+
+    if (changed) {
+      const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+      window.history.replaceState(window.history.state, '', nextUrl);
+    }
+  }, [location.pathname, location.search, location.hash]);
+
+  return null;
+}
+
 function App() {
   const [showWizard, setShowWizard] = useState(false);
   const [shareStatus, setShareStatus] = useState<ExternalShareBannerStatus | null>(null);
   const [sharePasswordPromptOpen, setSharePasswordPromptOpen] = useState(false);
   const [sharePasswordDraft, setSharePasswordDraft] = useState('');
+  const [copiedShareLink, setCopiedShareLink] = useState(false);
 
   useEffect(() => {
     api.get('/system/setup-status')
@@ -41,11 +75,11 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const loadShareStatus = async () => {
-      const shareToken = getShareToken();
-      if (shareToken) {
-        try {
-          const res = await fetch(`${API_BASE_URL}/share/public-status?token=${encodeURIComponent(shareToken)}`);
+        const loadShareStatus = async () => {
+            const shareToken = getShareToken();
+            if (shareToken) {
+                try {
+          const res = await fetch(`${getApiBaseUrl()}/share/public-status?token=${encodeURIComponent(shareToken)}`);
           const data = await res.json();
           setShareStatus(data);
           setSharePasswordPromptOpen(Boolean(data?.active && data?.password_required && !getSharePassword()));
@@ -77,8 +111,21 @@ function App() {
     window.location.reload();
   };
 
+  const handleCopyShareLink = async () => {
+    const shareUrl = String(shareStatus?.share_url || '').trim();
+    if (!shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopiedShareLink(true);
+      window.setTimeout(() => setCopiedShareLink(false), 1500);
+    } catch {
+      // Clipboard access is best-effort here.
+    }
+  };
+
   return (
     <BrowserRouter>
+      <ShareUrlStateSync />
       {showWizard && (
         <SetupWizard onClose={() => setShowWizard(false)} onComplete={() => setShowWizard(false)} />
       )}
@@ -114,17 +161,29 @@ function App() {
             <div>
               <span className="font-semibold">External access mode is active.</span>{' '}
               {shareStatus.expires_at ? `Expires ${new Date(shareStatus.expires_at).toLocaleString()}.` : null}
+              <div className="text-xs text-amber-800/90">
+                Share the dedicated share link, not the browser URL after you navigate around.
+              </div>
             </div>
             <div className="flex items-center gap-3">
               {shareStatus.share_url && (
-                <a
-                  href={shareStatus.share_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-medium text-amber-800 underline"
-                >
-                  Open share link
-                </a>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyShareLink()}
+                    className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-100"
+                  >
+                    {copiedShareLink ? 'Copied Share Link' : 'Copy Share Link'}
+                  </button>
+                  <a
+                    href={shareStatus.share_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-medium text-amber-800 underline"
+                  >
+                    Open share link
+                  </a>
+                </>
               )}
               <a href="/settings" className="font-medium text-amber-800 underline">
                 Settings
@@ -139,6 +198,7 @@ function App() {
           <Route path="/jobs" element={<JobQueue />} />
           <Route path="/speakers" element={<Speakers />} />
           <Route path="/speakers/:id" element={<SpeakerDetailPage />} />
+          <Route path="/avatars/:id" element={<AvatarStudioPage />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/video/:id" element={<VideoDetailPage />} />
           <Route path="/channel/:id" element={<ChannelDetail />}>

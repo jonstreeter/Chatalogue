@@ -7,7 +7,8 @@ export default {
     theme: {
         extend: {
             fontFamily: {
-                sans: ['Inter', 'sans-serif'],
+                sans: ['"Fira Sans"', 'sans-serif'],
+                mono: ['"Fira Code"', 'monospace'],
             },
             colors: {
                 glass: {
@@ -36,5 +37,7 @@ export default {
             }
         },
     },
-    plugins: [],
+    plugins: [
+        require('tailwind-scrollbar-hide')
+    ],
 }
