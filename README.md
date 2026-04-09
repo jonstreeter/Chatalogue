@@ -4,15 +4,18 @@
 |---|---|
 | <img src="frontend/public/chatalogue-logo.svg" width="44" alt="Chatalogue logo" /> | **Chatalogue**<br/>*Dialogue -> Data* |
 
-Chatalogue is a local-first workstation for ingesting, transcribing, diarizing, searching, and editing long-form spoken content.
+Chatalogue is a local-first workstation for ingesting, transcribing, diarizing, optimizing, searching, and editing long-form spoken content.
 
 ## Core Features
 - Channel ingest and automatic refreshing
 - High-performance transcription and speaker diarization pipeline
+- Transcript optimization workbench with repair, rebuild, retranscribe, benchmarks, and campaigns
 - Channel-level transcript search
 - Speaker profile management and merging
+- AI episode cloning workbench with multi-variant generation
 - Funny-moment detection and explanation
 - AI-powered summaries and chapter generation
+- Cleanup, ClearVoice, VoiceFixer, and conversation reconstruction runtimes
 - Video clip editing, exporting, and uploading
 
 ---
@@ -81,6 +84,30 @@ Backend API docs are available at `http://localhost:8011/docs`.
 
 ---
 
+## Test-Ready Development Setup
+
+The normal installers create a runtime-ready environment. If you also want local test execution:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
+On macOS/Linux:
+
+```bash
+cd backend
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
+
+Then run tests with:
+
+```bash
+python -m pytest backend/src -q
+```
+
+---
+
 ## Configuration
 
 To override backend settings, copy `backend/.env.example` to `backend/.env` and adjust values as needed.
@@ -88,10 +115,34 @@ To override backend settings, copy `backend/.env.example` to `backend/.env` and 
 Common settings:
 - `HF_TOKEN`: Hugging Face token for gated diarization models
 - `TRANSCRIPTION_ENGINE`: `auto`, `whisper`, or `parakeet`
+- `WHISPER_BACKEND`: `faster_whisper` or `insanely_fast_whisper`
 - `PARAKEET_MODEL`: default `nvidia/parakeet-tdt-0.6b-v2`
 - `PARAKEET_ALLOW_WHISPER_FALLBACK`: `true` or `false`
+- `MULTILINGUAL_ROUTING_ENABLED`: route likely non-English episodes to Whisper automatically
+- `MULTILINGUAL_WHISPER_MODEL`: multilingual Whisper model used for language-routed jobs
+- `LANGUAGE_DETECTION_SAMPLE_SECONDS`: opening-audio probe window for language detection
+- `LANGUAGE_DETECTION_CONFIDENCE_THRESHOLD`: threshold for metadata/audio language routing
 - `PIPELINE_EXECUTION_MODE`: `sequential` or `staged`
+- `YOUTUBE_DATA_API_KEY`: optional YouTube Data API key for view-count/popularity metadata and API-key test
 - `DB_PROVIDER`: default `postgres`
+
+---
+
+## Recommended Post-Install Setup
+
+After first launch, open `Settings` and review these sections:
+
+- `Transcription`
+  - choose `TRANSCRIPTION_ENGINE`
+  - choose `WHISPER_BACKEND`
+  - test the engine/runtime path
+- `YouTube`
+  - add a `YouTube Data API Key` if you want stable popularity/view-count backfill
+  - use `Test API Key` to verify connectivity
+- `Runtimes`
+  - install and self-test optional local runtimes such as `ClearVoice`, `VoiceFixer`, and `Conversation Reconstruction`
+
+The YouTube Data API key is the preferred path for public view-count metadata. Browser-cookie scraping remains optional fallback behavior, not the recommended default.
 
 ---
 

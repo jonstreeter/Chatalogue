@@ -78,3 +78,5 @@ echo
 echo "[7/7] Update complete!"
 echo
 echo "Run $ROOT_DIR/run_mac.sh to start Chatalogue."
+echo "If you use local backend tests, also refresh:"
+echo "  cd \"$BACKEND_DIR\" && \"$VENV_PYTHON\" -m pip install -r requirements-dev.txt"

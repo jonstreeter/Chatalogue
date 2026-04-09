@@ -111,6 +111,8 @@ echo.
 echo [7/7] Update complete!
 echo.
 echo Run "%PROJECT_ROOT%\run_windows.bat" to start Chatalogue.
+echo If you use local backend tests, also refresh:
+echo   "%VENV_PYTHON%" -m pip install -r "%BACKEND_DIR%\requirements-dev.txt"
 echo.
 pause
 ENDLOCAL

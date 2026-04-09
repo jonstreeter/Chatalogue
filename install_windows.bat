@@ -19,7 +19,7 @@ exit /b %ERRORLEVEL%
 
 :core_install
 SETLOCAL EnableDelayedExpansion
-SET "INSTALLER_VERSION=2026-03-19.1"
+SET "INSTALLER_VERSION=2026-04-09.1"
 
 echo.
 echo  ============================================
@@ -425,5 +425,17 @@ echo  CONFIGURATION:
 echo  --------------
 echo   Copy backend\.env.example to backend\.env and set:
 echo     HF_TOKEN  = your Hugging Face token (for diarization models)
+echo     YOUTUBE_DATA_API_KEY = optional, recommended for popularity/view-count metadata
+echo     WHISPER_BACKEND = faster_whisper ^| insanely_fast_whisper
+echo.
+echo  OPTIONAL NEXT STEPS:
+echo  --------------------
+echo   In Settings:
+echo     - Transcription: choose engine/backend and run the engine test
+echo     - YouTube: add/test a YouTube Data API key
+echo     - Runtimes: install ClearVoice, VoiceFixer, or Conversation Reconstruction
+echo.
+echo   For a test-ready backend venv:
+echo     "%VENV_PYTHON%" -m pip install -r "%BACKEND_DIR%\requirements-dev.txt"
 echo.
 ENDLOCAL

@@ -7,7 +7,7 @@ if [ "${1:-}" != "--internal" ]; then
     exit ${PIPESTATUS[0]}
 fi
 
-INSTALLER_VERSION="2026-03-19.1"
+INSTALLER_VERSION="2026-04-09.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 REPO_URL="${CHATALOGUE_REPO_URL:-https://github.com/jonstreeter/Chatalogue.git}"
@@ -354,4 +354,17 @@ echo " CONFIGURATION:"
 echo " --------------"
 echo "  Copy backend/.env.example to backend/.env and set:"
 echo "    HF_TOKEN  = your Hugging Face token (for diarization models)"
+echo "    YOUTUBE_DATA_API_KEY = optional, recommended for popularity/view-count metadata"
+echo "    WHISPER_BACKEND = faster_whisper | insanely_fast_whisper"
+echo
+echo " OPTIONAL NEXT STEPS:"
+echo " --------------------"
+echo "  In Settings:"
+echo "    - Transcription: choose engine/backend and run the engine test"
+echo "    - YouTube: add/test a YouTube Data API key"
+echo "    - Runtimes: install ClearVoice, VoiceFixer, or Conversation Reconstruction"
+echo
+echo "  For a test-ready backend venv:"
+echo "    cd \"$BACKEND_DIR\""
+echo "    \"$VENV_PYTHON\" -m pip install -r requirements-dev.txt"
 echo
