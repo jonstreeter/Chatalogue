@@ -3,11 +3,19 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import YouTube from 'react-youtube';
 import api from '../../lib/api';
 import { toApiUrl } from '../../lib/api';
-import type { Video, TranscriptSegment, Clip, Speaker, SpeakerSample, FunnyMoment, VideoChapterSuggestion, VideoDescriptionRevision, ClipExportArtifact, ReconstructionWorkbench, Job, WorkbenchTaskProgress, CleanupWorkbench, ClearVoiceInstallInfo, ClearVoiceTestResult, EpisodeCloneConceptsResponse, EpisodeCloneEngine, EpisodeCloneJob, TranscriptQuality, TranscriptRollbackOption, TranscriptRestoreResponse, TranscriptGoldWindow, TranscriptEvaluationResult, TranscriptEvaluationReview, TranscriptEvaluationBatchResponse, TranscriptRepairQueueResponse, TranscriptDiarizationRebuildQueueResponse, TranscriptRetranscriptionQueueResponse } from '../../types';
-import { Loader2, ArrowLeft, FileText, Scissors, Users, X, CheckCircle2, Play, Pause, Plus, Trash2, Mic, Search, ChevronUp, ChevronDown, GitMerge, RotateCcw, Eraser, AudioLines, Smile, RefreshCw, Bot, Copy, Pencil, Save, XCircle, Download, Upload, PlayCircle, Clock, Sparkles, Clapperboard, CircleHelp, type LucideIcon } from 'lucide-react';
-import { SpeakerList } from '../../components/SpeakerList';
+import type { Video, TranscriptSegment, Clip, Speaker, FunnyMoment, ReconstructionWorkbench, Job, WorkbenchTaskProgress, CleanupWorkbench, ClearVoiceInstallInfo, ClearVoiceTestResult, EpisodeChatCitation, TranscriptQuality, TranscriptRollbackOption, TranscriptRestoreResponse, TranscriptGoldWindow, TranscriptEvaluationResult, TranscriptEvaluationReview, TranscriptEvaluationBatchResponse, TranscriptRepairQueueResponse, TranscriptDiarizationRebuildQueueResponse, TranscriptRetranscriptionQueueResponse } from '../../types';
+import { Loader2, ArrowLeft, FileText, Scissors, Users, X, CheckCircle2, Play, Pause, Plus, Mic, Search, ChevronUp, ChevronDown, GitMerge, RotateCcw, Eraser, AudioLines, Smile, RefreshCw, Bot, Pencil, Save, XCircle, Download, PlayCircle, Clock, Sparkles, Clapperboard, CircleHelp, MessageSquareText, type LucideIcon } from 'lucide-react';
 import { SpeakerModal } from '../../components/SpeakerModal';
-import { CloneWorkbenchPanel } from '../../components/video/CloneWorkbenchPanel';
+import { EpisodeChatWorkbench } from '../../components/video/EpisodeChatWorkbench';
+import { CloneTab } from './tabs/CloneTab';
+import { YoutubeTab } from './tabs/YoutubeTab';
+import { SpeakersTab } from './tabs/SpeakersTab';
+import { ClipsTab } from './tabs/ClipsTab';
+import { useCloneStore, useCloneUsesOllama } from '../../store/useCloneStore';
+import { useYoutubeStore } from '../../store/useYoutubeStore';
+import { useSpeakersTabStore } from '../../store/useSpeakersTabStore';
+import { useClipsStore } from '../../store/useClipsStore';
+import { formatTime } from '../../lib/formatters';
 
 type UnifiedPlayer = {
     getCurrentTime?: () => number;
@@ -19,7 +27,7 @@ type UnifiedPlayer = {
     getPlayerState?: () => number;
 };
 
-type VideoSidebarTab = 'transcript' | 'optimize' | 'clips' | 'speakers' | 'cleanup' | 'reconstruction' | 'clone' | 'youtube';
+type VideoSidebarTab = 'transcript' | 'optimize' | 'clips' | 'speakers' | 'cleanup' | 'reconstruction' | 'clone' | 'chat' | 'youtube';
 
 type SidebarTabConfig = {
     id: VideoSidebarTab;
@@ -34,23 +42,6 @@ type WorkbenchActivity = {
     label: string;
     detail: string;
     tone: 'sky' | 'violet';
-};
-
-type OllamaLocalModel = {
-    name: string;
-    size_bytes?: number;
-    modified_at?: string;
-    parameter_size?: string;
-    quantization_level?: string;
-    families?: string[] | null;
-};
-
-type OllamaLocalModelsResponse = {
-    status: string;
-    ollama_url?: string;
-    current_model?: string;
-    models: OllamaLocalModel[];
-    error?: string;
 };
 
 type UploadedPlaybackSource = 'original' | 'cleaned' | 'reconstructed';
@@ -107,18 +98,11 @@ export function VideoDetailPage() {
 
     // Clipping State
     const [selection, setSelection] = useState<{ start: number; end: number; defaultTitle: string } | null>(null);
-    const [clipTitle, setClipTitle] = useState('');
-    const [creatingClip, setCreatingClip] = useState(false);
 
-    // Speaker Modal State
-    const [selectedSpeaker, setSelectedSpeaker] = useState<Speaker | null>(null);
-    const [initialSample, setInitialSample] = useState<SpeakerSample | null>(null);
-    const speakerDetailCacheRef = useRef<Map<number, Speaker>>(new Map());
-
-    // Clips State
-    const [clips, setClips] = useState<Clip[]>([]);
-    const [clipExportArtifactsByClip, setClipExportArtifactsByClip] = useState<Record<number, ClipExportArtifact[]>>({});
-    const [loadingClips, setLoadingClips] = useState(false);
+    const clips = useClipsStore((s) => s.clips);
+    const clipTitle = useClipsStore((s) => s.clipTitle);
+    const creatingClip = useClipsStore((s) => s.creatingClip);
+    const setClipTitle = useClipsStore((s) => s.setClipTitle);
     const [startingTranscription, setStartingTranscription] = useState(false);
 
     // Search State
@@ -142,75 +126,49 @@ export function VideoDetailPage() {
         current?: number | null;
         total?: number | null;
     } | null>(null);
-    const [generatingYoutubeAi, setGeneratingYoutubeAi] = useState(false);
-    const [copiedYoutubeField, setCopiedYoutubeField] = useState<'summary' | 'chapters' | 'description' | null>(null);
-    const [descriptionHistory, setDescriptionHistory] = useState<VideoDescriptionRevision[]>([]);
-    const [loadingDescriptionHistory, setLoadingDescriptionHistory] = useState(false);
-    const [publishingYoutubeDescription, setPublishingYoutubeDescription] = useState(false);
-    const [restoringDescriptionRevisionId, setRestoringDescriptionRevisionId] = useState<number | null>(null);
-    const [cloneEngines, setCloneEngines] = useState<EpisodeCloneEngine[]>([]);
-    const [loadingCloneEngines, setLoadingCloneEngines] = useState(false);
-    const [cloneEnginesError, setCloneEnginesError] = useState<string | null>(null);
-    const [cloneEngineKey, setCloneEngineKey] = useState('default');
-    const [cloneOllamaModels, setCloneOllamaModels] = useState<OllamaLocalModel[]>([]);
-    const [loadingCloneOllamaModels, setLoadingCloneOllamaModels] = useState(false);
-    const [cloneOllamaModelsError, setCloneOllamaModelsError] = useState<string | null>(null);
-    const [cloneOllamaModel, setCloneOllamaModel] = useState('');
-    const [cloneStylePrompt, setCloneStylePrompt] = useState('Create a fresh, original script with a clear hook, stronger structure, and a more polished delivery than the source.');
-    const [cloneNotes, setCloneNotes] = useState('');
-    const [cloneConcepts, setCloneConcepts] = useState<EpisodeCloneConceptsResponse | null>(null);
-    const [cloneConceptsText, setCloneConceptsText] = useState('');
-    const [cloneExcludedReferencesText, setCloneExcludedReferencesText] = useState('');
-    const [detectingCloneConcepts, setDetectingCloneConcepts] = useState(false);
-    const [cloneBatchSize, setCloneBatchSize] = useState(1);
-    const [generatingClone, setGeneratingClone] = useState(false);
-    const [cloneJobs, setCloneJobs] = useState<EpisodeCloneJob[]>([]);
-    const [loadingCloneJobs, setLoadingCloneJobs] = useState(false);
-    const [cloneJobsError, setCloneJobsError] = useState<string | null>(null);
-    const [selectedCloneJobId, setSelectedCloneJobId] = useState<number | null>(null);
-    const [copiedCloneScript, setCopiedCloneScript] = useState(false);
-    const cloneGenerateRequestRef = useRef(0);
-    const cloneJobsRequestRef = useRef(0);
+
+    // Clone store — only the values VideoDetailPage itself needs (chat sidebar + EpisodeChatWorkbench).
+    const cloneEngines = useCloneStore((s) => s.cloneEngines);
+    const cloneOllamaModels = useCloneStore((s) => s.cloneOllamaModels);
+    const cloneUsesOllama = useCloneUsesOllama();
+    const cloneEngineKey = useCloneStore((s) => s.cloneEngineKey);
+
     const [editingSegmentId, setEditingSegmentId] = useState<number | null>(null);
     const [editingSegmentWords, setEditingSegmentWords] = useState<string[]>([]);
     const [editingLoopSegment, setEditingLoopSegment] = useState(false);
     const [savingSegmentEdit, setSavingSegmentEdit] = useState(false);
-    const [selectedClipIds, setSelectedClipIds] = useState<Set<number>>(new Set());
-    const [editingClipId, setEditingClipId] = useState<number | null>(null);
-    const [clipEditorDraft, setClipEditorDraft] = useState<Partial<Clip> | null>(null);
-    const [clipEditorTokens, setClipEditorTokens] = useState<Array<{ key: string; start: number; end: number; word: string }>>([]);
-    const [clipEditorRemovedWordKeys, setClipEditorRemovedWordKeys] = useState<Set<string>>(new Set());
-    const [clipEditorCropTarget, setClipEditorCropTarget] = useState<'main' | 'top' | 'bottom'>('main');
-    const [clipEditorDragRect, setClipEditorDragRect] = useState<{
-        target: 'main' | 'top' | 'bottom';
-        startX: number;
-        startY: number;
-        currentX: number;
-        currentY: number;
-    } | null>(null);
-    const [clipTimelineDrag, setClipTimelineDrag] = useState<{
-        handle: 'start' | 'end';
-    } | null>(null);
-    const [savingClipEdit, setSavingClipEdit] = useState(false);
-    const [exportingClipIds, setExportingClipIds] = useState<Set<number>>(new Set());
-    const [batchExporting, setBatchExporting] = useState(false);
-    const [batchQueueingRenders, setBatchQueueingRenders] = useState(false);
-    const [uploadingClipIds, setUploadingClipIds] = useState<Set<number>>(new Set());
-    const [batchUploadingClips, setBatchUploadingClips] = useState(false);
-    const [clipUploadPrivacy, setClipUploadPrivacy] = useState<'private' | 'unlisted' | 'public'>('private');
-    const [clipPreviewLoop, setClipPreviewLoop] = useState<{ start: number; end: number; clipId: number } | null>(null);
-    const [clipBatchPresetKey, setClipBatchPresetKey] = useState<'youtube_landscape' | 'shorts_vertical' | 'square_captioned' | 'audio_focus'>('youtube_landscape');
+    const editingClipId = useClipsStore((s) => s.editingClipId);
+    const clipEditorDraft = useClipsStore((s) => s.clipEditorDraft);
+    const clipEditorTokens = useClipsStore((s) => s.clipEditorTokens);
+    const clipEditorRemovedWordKeys = useClipsStore((s) => s.clipEditorRemovedWordKeys);
+    const clipEditorCropTarget = useClipsStore((s) => s.clipEditorCropTarget);
+    const clipEditorDragRect = useClipsStore((s) => s.clipEditorDragRect);
+    const clipTimelineDrag = useClipsStore((s) => s.clipTimelineDrag);
+    const savingClipEdit = useClipsStore((s) => s.savingClipEdit);
+    const clipPreviewLoop = useClipsStore((s) => s.clipPreviewLoop);
+    const setEditingClipId = useClipsStore((s) => s.setEditingClipId);
+    const setClipEditorDraft = useClipsStore((s) => s.setClipEditorDraft);
+    const setClipEditorTokens = useClipsStore((s) => s.setClipEditorTokens);
+    const setClipEditorRemovedWordKeys = useClipsStore((s) => s.setClipEditorRemovedWordKeys);
+    const setClipEditorCropTarget = useClipsStore((s) => s.setClipEditorCropTarget);
+    const setClipEditorDragRect = useClipsStore((s) => s.setClipEditorDragRect);
+    const setClipTimelineDrag = useClipsStore((s) => s.setClipTimelineDrag);
 
-    // Assign Speaker State (for segments with no speaker_id)
-    const [assignPopup, setAssignPopup] = useState<{
-        segmentId: number;
-        x: number;
-        y: number;
-    } | null>(null);
-    const assignSpeakerPickerLimit = 100;
-    const [assignSpeakers, setAssignSpeakers] = useState<Speaker[]>([]);
-    const [assignSearch, setAssignSearch] = useState('');
-    const [assignLoading, setAssignLoading] = useState(false);
+    const selectedSpeaker = useSpeakersTabStore((s) => s.selectedSpeaker);
+    const initialSample = useSpeakersTabStore((s) => s.initialSample);
+    const assignPopup = useSpeakersTabStore((s) => s.assignPopup);
+    const assignSpeakers = useSpeakersTabStore((s) => s.assignSpeakers);
+    const assignSearch = useSpeakersTabStore((s) => s.assignSearch);
+    const assignLoading = useSpeakersTabStore((s) => s.assignLoading);
+    const setAssignSearch = useSpeakersTabStore((s) => s.setAssignSearch);
+    const closeSpeakerModal = useSpeakersTabStore((s) => s.closeSpeakerModal);
+    const closeAssignPopup = useSpeakersTabStore((s) => s.closeAssignPopup);
+    const openAssignPopup = useSpeakersTabStore((s) => s.openAssignPopup);
+    const fetchAssignSpeakers = useSpeakersTabStore((s) => s.fetchAssignSpeakers);
+    const assignSpeaker = useSpeakersTabStore((s) => s.assignSpeaker);
+    const openSpeaker = useSpeakersTabStore((s) => s.openSpeaker);
+    const handleStoreSpeakerUpdated = useSpeakersTabStore((s) => s.handleSpeakerUpdated);
+    const handleStoreSpeakerMerged = useSpeakersTabStore((s) => s.handleSpeakerMerged);
     const [purging, setPurging] = useState(false);
     const [redoing, setRedoing] = useState(false);
     const [redoingDiarization, setRedoingDiarization] = useState(false);
@@ -289,11 +247,6 @@ export function VideoDetailPage() {
         () => reconstructionWorkbench?.speakers.find((speaker) => speaker.speaker_id === selectedReconstructionSpeakerId) || null,
         [reconstructionWorkbench, selectedReconstructionSpeakerId]
     );
-    const selectedCloneJob = useMemo(
-        () => cloneJobs.find((job) => job.job_id === selectedCloneJobId) || cloneJobs[0] || null,
-        [cloneJobs, selectedCloneJobId]
-    );
-    const cloneDraftResult = selectedCloneJob?.result || null;
     const activeEditingClip = editingClipId != null ? (clips.find(c => c.id === editingClipId) || null) : null;
     const showClipEditorMain = activeTab === 'clips' && !!activeEditingClip && !!clipEditorDraft;
     const mediaSourceType = String(video?.media_source_type || 'youtube').toLowerCase();
@@ -308,23 +261,6 @@ export function VideoDetailPage() {
     const aiMetadataTabTitle = isYoutubeMedia
         ? 'AI-generated YouTube summary and chapters'
         : 'AI-generated episode summary and chapter index';
-    const aiMetadataPanelTitle = isYoutubeMedia ? 'YouTube Summary + Chapters' : 'Episode Summary + Chapters';
-    const aiMetadataPanelDescription = isYoutubeMedia
-        ? 'Generate a YouTube-style episode description summary and chapter timestamps/descriptions from the transcript using the current LLM provider.'
-        : 'Generate a readable episode summary and chapter-style conversation index from the transcript using the current LLM provider.';
-    const aiMetadataGenerateTitle = isYoutubeMedia
-        ? 'Generate or re-generate YouTube summary + chapters'
-        : 'Generate or re-generate episode summary + chapters';
-    const aiMetadataEmptyText = isYoutubeMedia
-        ? 'No generated summary/chapters yet. Click Generate to create a YouTube-ready draft description and chapter list.'
-        : 'No generated summary/chapters yet. Click Generate to create a readable summary and chapter-style conversation index.';
-    const aiMetadataCurrentDescriptionLabel = isYoutubeMedia ? 'Current Video Description (Stored)' : 'Current Episode Description (Stored)';
-    const aiMetadataChaptersLabel = isYoutubeMedia ? 'Chapters (YouTube-style)' : 'Conversation Index';
-    const aiMetadataDescriptionLabel = isYoutubeMedia ? 'YouTube Description Draft (Copy/Paste)' : 'Episode Description Draft';
-    const aiMetadataPublishLabel = isYoutubeMedia ? 'Publish Draft (Archive Current)' : 'Apply Draft (Archive Current)';
-    const aiMetadataPublishHelp = isYoutubeMedia
-        ? 'Updates the app’s stored video description and preserves restorable history.'
-        : 'Updates the app’s stored episode description and preserves restorable history.';
     const sidebarTabs = useMemo<SidebarTabConfig[]>(() => {
         const tabs: SidebarTabConfig[] = [
             {
@@ -401,6 +337,15 @@ export function VideoDetailPage() {
                 inactiveClassName: 'border-transparent text-slate-500 hover:border-slate-200 hover:bg-slate-100 hover:text-slate-700',
             });
         }
+
+        tabs.push({
+            id: 'chat',
+            label: 'Chat',
+            title: 'Ask transcript-grounded questions about this episode',
+            icon: MessageSquareText,
+            activeClassName: 'border-indigo-200 bg-indigo-50 text-indigo-700 shadow-sm',
+            inactiveClassName: 'border-transparent text-slate-500 hover:border-slate-200 hover:bg-slate-100 hover:text-slate-700',
+        });
 
         return tabs;
     }, [aiMetadataTabLabel, aiMetadataTabTitle, canShowCloneTab, canShowYoutubeTab, isUploadedMedia]);
@@ -548,139 +493,6 @@ export function VideoDetailPage() {
         return vidRes.data;
     };
 
-    const normalizeCloneTextList = (value: string) => {
-        return value
-            .split(/\r?\n/)
-            .map((item) => item.trim())
-            .filter(Boolean);
-    };
-
-    const selectedCloneEngine = cloneEngines.find((engine) => engine.key === cloneEngineKey) || cloneEngines[0] || null;
-    const cloneUsesOllama = (selectedCloneEngine?.provider || '') === 'ollama';
-
-    const cloneListsMatch = (a: string[], b: string[]) => {
-        if (a.length !== b.length) return false;
-        return a.every((item, index) => item === b[index]);
-    };
-
-    const resolveCloneEngineOverride = () => {
-        const selected = selectedCloneEngine;
-        const overrideModel = cloneUsesOllama ? (cloneOllamaModel.trim() || selected?.model || '') : (selected?.model || '');
-        if (!selected || selected.key === 'default') {
-            return { provider_override: undefined as string | undefined, model_override: overrideModel || undefined };
-        }
-        return {
-            provider_override: selected.provider || undefined,
-            model_override: overrideModel || undefined,
-        };
-    };
-
-    const cloneJobMatchesVisibleInputs = (job: EpisodeCloneJob | null | undefined) => {
-        if (!job) return false;
-        const currentEngine = resolveCloneEngineOverride();
-        return String(job.request?.style_prompt || '').trim() === cloneStylePrompt.trim()
-            && String(job.request?.notes || '').trim() === cloneNotes.trim()
-            && String(job.request?.provider_override || '') === String(currentEngine.provider_override || '')
-            && String(job.request?.model_override || '') === String(currentEngine.model_override || '')
-            && cloneListsMatch(job.request?.approved_concepts || [], normalizeCloneTextList(cloneConceptsText))
-            && cloneListsMatch(job.request?.excluded_references || [], normalizeCloneTextList(cloneExcludedReferencesText));
-    };
-
-    const fetchCloneEngines = async (signal?: AbortSignal) => {
-        setLoadingCloneEngines(true);
-        setCloneEnginesError(null);
-        try {
-            const res = await api.get<EpisodeCloneEngine[]>('/episode-clone/engines', { signal });
-            if (signal?.aborted) return;
-            const engines = Array.isArray(res.data) ? res.data : [];
-            setCloneEngines(engines);
-            setCloneEngineKey((current) => {
-                if (current && engines.some((engine) => engine.key === current)) return current;
-                return engines[0]?.key || 'default';
-            });
-        } catch (e: any) {
-            if (signal?.aborted) return;
-            console.error('Failed to fetch clone engines:', e);
-            setCloneEngines([]);
-            setCloneEnginesError(e?.response?.data?.detail || 'Failed to load clone engines');
-        } finally {
-            if (!signal?.aborted) {
-                setLoadingCloneEngines(false);
-            }
-        }
-    };
-
-    const fetchCloneOllamaModels = async (signal?: AbortSignal) => {
-        setLoadingCloneOllamaModels(true);
-        setCloneOllamaModelsError(null);
-        try {
-            const res = await api.get<OllamaLocalModelsResponse>('/settings/ollama/models', { signal });
-            if (signal?.aborted) return;
-            if (res.data?.status !== 'ok') {
-                setCloneOllamaModels([]);
-                setCloneOllamaModelsError(res.data?.error || 'Failed to load local Ollama models.');
-                return;
-            }
-            const models = Array.isArray(res.data?.models) ? res.data.models.filter((model) => !!model?.name) : [];
-            setCloneOllamaModels(models);
-            setCloneOllamaModel((current) => {
-                if (current && models.some((model) => model.name === current)) return current;
-                if (selectedCloneEngine?.model && models.some((model) => model.name === selectedCloneEngine.model)) return selectedCloneEngine.model;
-                return res.data?.current_model || models[0]?.name || '';
-            });
-        } catch (e: any) {
-            if (signal?.aborted) return;
-            console.error('Failed to fetch Ollama models for clone workbench:', e);
-            setCloneOllamaModels([]);
-            setCloneOllamaModelsError(e?.response?.data?.detail || 'Failed to load local Ollama models.');
-        } finally {
-            if (!signal?.aborted) {
-                setLoadingCloneOllamaModels(false);
-            }
-        }
-    };
-
-    const fetchCloneJobs = async (
-        videoId: number,
-        signal?: AbortSignal,
-        options?: { preferredJobId?: number | null; silent?: boolean }
-    ) => {
-        const requestId = ++cloneJobsRequestRef.current;
-        if (!options?.silent) {
-            setLoadingCloneJobs(true);
-        }
-        setCloneJobsError(null);
-        try {
-            const res = await api.get<EpisodeCloneJob[]>(`/videos/${videoId}/episode-clone/jobs`, {
-                params: { limit: 16 },
-                signal,
-            });
-            if (requestId !== cloneJobsRequestRef.current || signal?.aborted) return [];
-            const jobs = Array.isArray(res.data) ? res.data : [];
-            setCloneJobs(jobs);
-            setGeneratingClone(jobs.some((job) => ['queued', 'running'].includes(String(job.status || '').toLowerCase())));
-            setSelectedCloneJobId((current) => {
-                if (options?.preferredJobId && jobs.some((job) => job.job_id === options.preferredJobId)) {
-                    return options.preferredJobId;
-                }
-                if (current && jobs.some((job) => job.job_id === current)) {
-                    return current;
-                }
-                return jobs[0]?.job_id ?? null;
-            });
-            return jobs;
-        } catch (e: any) {
-            if (signal?.aborted) return null;
-            console.error('Failed to fetch episode clone jobs:', e);
-            setCloneJobsError(e?.response?.data?.detail || 'Failed to load clone workbench history');
-            setGeneratingClone(false);
-            return [];
-        } finally {
-            if (requestId === cloneJobsRequestRef.current && !signal?.aborted && !options?.silent) {
-                setLoadingCloneJobs(false);
-            }
-        }
-    };
 
     const fetchTranscriptQuality = async (videoId: number, signal?: AbortSignal) => {
         setLoadingTranscriptQuality(true);
@@ -789,11 +601,10 @@ export function VideoDetailPage() {
     };
 
     useEffect(() => {
-        cloneGenerateRequestRef.current += 1;
-        cloneJobsRequestRef.current += 1;
-        setCloneJobs([]);
-        setCloneJobsError(null);
-        setSelectedCloneJobId(null);
+        useCloneStore.getState().resetCloneState();
+        useYoutubeStore.getState().resetYoutubeState();
+        useSpeakersTabStore.getState().resetSpeakersTabState();
+        useClipsStore.getState().resetClipsState();
         setTranscriptQuality(null);
         setTranscriptQualityError(null);
         setTranscriptGoldWindows([]);
@@ -808,47 +619,24 @@ export function VideoDetailPage() {
         setGoldWindowReferenceDraft('');
         setGoldWindowEntitiesDraft('');
         setGoldWindowNotesDraft('');
-        setCloneEngines([]);
-        setCloneEnginesError(null);
-        setCloneEngineKey('default');
-        setCloneOllamaModels([]);
-        setCloneOllamaModelsError(null);
-        setCloneOllamaModel('');
-        setCloneConcepts(null);
-        setCloneConceptsText('');
-        setCloneExcludedReferencesText('');
-        setDetectingCloneConcepts(false);
-        setGeneratingClone(false);
-        setCopiedCloneScript(false);
         if (id) fetchData();
     }, [id]);
 
+    // Fetch clone engines for EpisodeChatWorkbench when the chat tab is active.
+    // (The clone tab manages its own fetches internally via CloneTab.)
     useEffect(() => {
-        if (activeTab !== 'clone') return;
+        if (activeTab !== 'chat') return;
         const controller = new AbortController();
-        void fetchCloneEngines(controller.signal);
-        if (id) {
-            void fetchCloneJobs(Number(id), controller.signal);
-        }
+        void useCloneStore.getState().fetchCloneEngines(controller.signal);
         return () => controller.abort();
     }, [activeTab, id]);
 
     useEffect(() => {
-        if (activeTab !== 'clone' || !cloneUsesOllama) return;
+        if (activeTab !== 'chat' || !cloneUsesOllama) return;
         const controller = new AbortController();
-        void fetchCloneOllamaModels(controller.signal);
+        void useCloneStore.getState().fetchCloneOllamaModels(controller.signal);
         return () => controller.abort();
     }, [activeTab, cloneUsesOllama, cloneEngineKey]);
-
-    useEffect(() => {
-        if (activeTab !== 'clone' || cloneJobs.length === 0) return;
-        const hasActiveCloneJob = cloneJobs.some((job) => ['queued', 'running'].includes(String(job.status || '').toLowerCase()));
-        if (!hasActiveCloneJob || !id) return;
-        const interval = window.setInterval(() => {
-            void fetchCloneJobs(Number(id), undefined, { silent: true });
-        }, 2500);
-        return () => window.clearInterval(interval);
-    }, [activeTab, cloneJobs, id]);
 
     useEffect(() => {
         if (!id || segments.length === 0) {
@@ -1253,6 +1041,7 @@ export function VideoDetailPage() {
     }, [showClipEditorMain, currentTime, clipEditorDraft]);
 
     const tParam = searchParams.get('t');
+    const requestedTabParam = String(searchParams.get('tab') || '').trim().toLowerCase();
     const segmentParam = searchParams.get('segment_id');
     const searchQueryParam = searchParams.get('q');
     const searchModeParam = String(searchParams.get('search_mode') || '').trim().toLowerCase();
@@ -1265,14 +1054,27 @@ export function VideoDetailPage() {
         if (!id) return;
         const hasRequestedSegment = Number.isInteger(requestedSegmentId) && requestedSegmentId > 0;
         const shouldRestoreSearch = requestedSearchMode === 'exact' && !!requestedSearchQuery;
+        const requestedTab = (() => {
+            const value = requestedTabParam;
+            if (value === 'chat') return 'chat';
+            if (value === 'clone') return 'clone';
+            if (value === 'optimize') return 'optimize';
+            if (value === 'clips') return 'clips';
+            if (value === 'speakers') return 'speakers';
+            if (value === 'youtube') return 'youtube';
+            if (value === 'cleanup' && isUploadedMedia) return 'cleanup';
+            if (value === 'reconstruction' && isUploadedMedia) return 'reconstruction';
+            return 'transcript';
+        })();
         setDeepLinkedSegmentId(hasRequestedSegment ? requestedSegmentId : null);
         setSearchQuery(shouldRestoreSearch ? requestedSearchQuery : '');
         setSearchMatchIndex(0);
+        setActiveTab(requestedTab);
         if (hasRequestedSegment || shouldRestoreSearch) {
             setFollowPlayback(false);
             setActiveTab('transcript');
         }
-    }, [id, requestedSearchMode, requestedSearchQuery, requestedSegmentId]);
+    }, [id, isUploadedMedia, requestedSearchMode, requestedSearchQuery, requestedSegmentId, requestedTabParam]);
 
     useEffect(() => {
         if (initialJumpDoneRef.current) return;
@@ -1484,15 +1286,6 @@ export function VideoDetailPage() {
         }
     };
 
-    const formatTime = (seconds: number) => {
-        const total = Math.max(0, Math.floor(seconds));
-        const h = Math.floor(total / 3600);
-        const m = Math.floor((total % 3600) / 60);
-        const s = total % 60;
-        return h > 0
-            ? `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
-            : `${m}:${s.toString().padStart(2, '0')}`;
-    };
 
     const placeholderTranscriptSourceLabel = (() => {
         const source = String(video?.transcript_source || '').toLowerCase();
@@ -1857,134 +1650,30 @@ export function VideoDetailPage() {
 
     const handleCreateClip = async () => {
         if (!selection || !video) return;
-        setCreatingClip(true);
-        try {
-            const res = await api.post<Clip>(`/videos/${video.id}/clips`, {
-                start_time: selection.start,
-                end_time: selection.end,
-                title: clipTitle || selection.defaultTitle
-            }); // Omit 'id' and 'created_at' as backend handles them, cast not strictly needed if shape matches
-
-            const createdClip: Clip = {
-                ...res.data,
-                aspect_ratio: res.data.aspect_ratio || 'source',
-                fade_in_sec: res.data.fade_in_sec ?? 0,
-                fade_out_sec: res.data.fade_out_sec ?? 0,
-                burn_captions: res.data.burn_captions ?? false,
-                caption_speaker_labels: res.data.caption_speaker_labels ?? true,
-            };
-            setClips(prev => {
-                const withoutDuplicate = prev.filter(c => c.id !== createdClip.id);
-                return [...withoutDuplicate, createdClip].sort((a, b) => a.start_time - b.start_time);
-            });
+        const createdClip = await useClipsStore.getState().createClip(video.id, {
+            start: selection.start,
+            end: selection.end,
+            title: clipTitle || selection.defaultTitle,
+        });
+        if (createdClip) {
             setActiveTab('clips');
             setSelection(null);
-            void fetchClips();
-        } catch (e) {
-            console.error(e);
-            alert((e as any)?.response?.data?.detail || "Failed to save clip");
-        } finally {
-            setCreatingClip(false);
         }
     };
 
     const fetchClips = async () => {
         if (!video) return;
-        setLoadingClips(true);
-        try {
-            const res = await api.get<Clip[]>(`/videos/${video.id}/clips`);
-            setClips(res.data.map(c => ({
-                ...c,
-                aspect_ratio: c.aspect_ratio || 'source',
-                fade_in_sec: c.fade_in_sec ?? 0,
-                fade_out_sec: c.fade_out_sec ?? 0,
-                burn_captions: c.burn_captions ?? false,
-                caption_speaker_labels: c.caption_speaker_labels ?? true,
-            })));
-        } catch (e) {
-            console.error(e);
-        } finally {
-            setLoadingClips(false);
-        }
+        await useClipsStore.getState().fetchClips(video.id);
     };
 
     const fetchClipExportArtifacts = async () => {
         if (!video) return;
-        try {
-            const res = await api.get<ClipExportArtifact[]>(`/videos/${video.id}/clip-exports`);
-            const grouped: Record<number, ClipExportArtifact[]> = {};
-            for (const row of (res.data || [])) {
-                const cid = Number(row.clip_id);
-                if (!grouped[cid]) grouped[cid] = [];
-                grouped[cid].push(row);
-            }
-            setClipExportArtifactsByClip(grouped);
-        } catch (e) {
-            console.error('Failed to fetch clip export artifacts:', e);
-            setClipExportArtifactsByClip({});
-        }
-    };
-
-    const handleDeleteClip = async (clipId: number) => {
-        if (!confirm("Are you sure you want to delete this clip?")) return;
-        try {
-            await api.delete(`/clips/${clipId}`);
-            setClips(prev => prev.filter(c => c.id !== clipId));
-        } catch (e) {
-            console.error(e);
-            alert("Failed to delete clip");
-        }
-    };
-
-    const buildSpeakerPlaceholder = (speakerId: number, segment?: TranscriptSegment): Speaker | null => {
-        if (!video) return null;
-        const cached = speakerDetailCacheRef.current.get(speakerId);
-        if (cached) return cached;
-        return {
-            id: speakerId,
-            channel_id: video.channel_id,
-            name: segment?.speaker || `Speaker ${speakerId}`,
-            thumbnail_path: undefined,
-            is_extra: false,
-            total_speaking_time: 0,
-            embedding_count: 0,
-            created_at: '',
-        };
+        await useClipsStore.getState().fetchClipExportArtifacts(video.id);
     };
 
     const handleSpeakerClick = async (speakerId: number, segment?: TranscriptSegment) => {
         pauseMainPreview();
-
-        if (segment && video) {
-            const sample: SpeakerSample = {
-                youtube_id: video.youtube_id,
-                video_id: video.id,
-                start_time: segment.start_time,
-                end_time: segment.end_time,
-                text: segment.text,
-                media_source_type: video.media_source_type,
-                media_kind: video.media_kind,
-            };
-            setInitialSample(sample);
-        } else {
-            setInitialSample(null);
-        }
-
-        const placeholder = buildSpeakerPlaceholder(speakerId, segment);
-        if (placeholder) {
-            setSelectedSpeaker(placeholder);
-        }
-
-        try {
-            const res = await api.get<Speaker>(`/speakers/${speakerId}`);
-            speakerDetailCacheRef.current.set(speakerId, res.data);
-            setSelectedSpeaker(res.data);
-        } catch (e) {
-            console.error("Failed to fetch speaker details", e);
-            if (!placeholder) {
-                setSelectedSpeaker(null);
-            }
-        }
+        await openSpeaker(speakerId, segment, video);
     };
 
     const transcriptPipelineStatuses = ['queued', 'downloading', 'transcribing', 'diarizing'];
@@ -2737,77 +2426,36 @@ export function VideoDetailPage() {
         e.stopPropagation();
         pauseMainPreview();
         const rect = (e.target as HTMLElement).getBoundingClientRect();
-        setAssignSearch('');
-        setAssignSpeakers([]);
-        setAssignPopup({
-            segmentId,
-            x: rect.left + window.scrollX,
-            y: rect.bottom + window.scrollY
-        });
+        openAssignPopup(segmentId, rect.left + window.scrollX, rect.bottom + window.scrollY);
     };
 
     useEffect(() => {
         if (!assignPopup || !video) return;
-        let cancelled = false;
         const timeoutId = window.setTimeout(() => {
-            const fetchAssignSpeakers = async () => {
-                setAssignLoading(true);
-                try {
-                    const trimmedSearch = assignSearch.trim();
-                    const res = await api.get<Speaker[]>('/speakers', {
-                        params: {
-                            channel_id: video.channel_id,
-                            limit: assignSpeakerPickerLimit,
-                            search: trimmedSearch || undefined,
-                        },
-                    });
-                    if (!cancelled) {
-                        setAssignSpeakers(Array.isArray(res.data) ? res.data : []);
-                    }
-                } catch (e) {
-                    if (!cancelled) {
-                        console.error("Failed to fetch speakers", e);
-                    }
-                } finally {
-                    if (!cancelled) {
-                        setAssignLoading(false);
-                    }
-                }
-            };
-            void fetchAssignSpeakers();
+            void fetchAssignSpeakers(video.channel_id);
         }, 200);
 
         return () => {
-            cancelled = true;
             window.clearTimeout(timeoutId);
         };
-    }, [assignPopup, assignSearch, video?.channel_id]);
+    }, [assignPopup, assignSearch, fetchAssignSpeakers, video]);
 
     const handleAssignSpeaker = async (speakerId: number) => {
-        if (!assignPopup) return;
-        try {
-            await api.patch(`/segments/${assignPopup.segmentId}/assign-speaker`, { speaker_id: speakerId });
-            setAssignPopup(null);
-            // Refresh segments
-            fetchData();
-        } catch (e) {
-            console.error("Failed to assign speaker", e);
-            alert("Failed to assign speaker");
-        }
+        await assignSpeaker(speakerId, fetchData);
     };
 
     const handleSpeakerListUpdated = (updatedSpeaker: Speaker) => {
-        speakerDetailCacheRef.current.set(updatedSpeaker.id, updatedSpeaker);
-        setSegments(prev => prev.map(segment =>
-            segment.speaker_id === updatedSpeaker.id
-                ? { ...segment, speaker: updatedSpeaker.name }
-                : segment
-        ));
+        handleStoreSpeakerUpdated(updatedSpeaker, (speakerId, name) => {
+            setSegments(prev => prev.map(segment =>
+                segment.speaker_id === speakerId
+                    ? { ...segment, speaker: name }
+                    : segment
+            ));
+        });
     };
 
     const handleSpeakerListMerged = () => {
-        if (!id) return;
-        void api.get<TranscriptSegment[]>(`/videos/${id}/segments`).then(res => setSegments(res.data));
+        void handleStoreSpeakerMerged(id, setSegments);
     };
 
     const beginSegmentEdit = (seg: TranscriptSegment) => {
@@ -2862,14 +2510,6 @@ export function VideoDetailPage() {
         }
     };
 
-    const toggleClipSelected = (clipId: number) => {
-        setSelectedClipIds(prev => {
-            const next = new Set(prev);
-            if (next.has(clipId)) next.delete(clipId); else next.add(clipId);
-            return next;
-        });
-    };
-
     const startClipEdit = (clip: Clip) => {
         const nextDraft: Partial<Clip> = {
             ...clip,
@@ -2888,13 +2528,7 @@ export function VideoDetailPage() {
     };
 
     const cancelClipEdit = () => {
-        setEditingClipId(null);
-        setClipEditorDraft(null);
-        setClipEditorTokens([]);
-        setClipEditorRemovedWordKeys(new Set());
-        setClipEditorCropTarget('main');
-        setClipEditorDragRect(null);
-        setClipTimelineDrag(null);
+        useClipsStore.getState().cancelClipEdit();
     };
 
     const updateClipDraftField = (field: keyof Clip, value: any) => {
@@ -3220,49 +2854,7 @@ export function VideoDetailPage() {
     };
 
     const saveClipEdit = async (clipId: number) => {
-        if (!clipEditorDraft) return;
-        if (!clipEditorDraft.title || !String(clipEditorDraft.title).trim()) {
-            alert('Clip title is required');
-            return;
-        }
-        if ((clipEditorDraft.end_time ?? 0) <= (clipEditorDraft.start_time ?? 0)) {
-            alert('End time must be after start time');
-            return;
-        }
-        setSavingClipEdit(true);
-        try {
-            const payload = {
-                start_time: Number(clipEditorDraft.start_time),
-                end_time: Number(clipEditorDraft.end_time),
-                title: String(clipEditorDraft.title),
-                aspect_ratio: clipEditorDraft.aspect_ratio || 'source',
-                crop_x: clipEditorDraft.crop_x ?? null,
-                crop_y: clipEditorDraft.crop_y ?? null,
-                crop_w: clipEditorDraft.crop_w ?? null,
-                crop_h: clipEditorDraft.crop_h ?? null,
-                portrait_split_enabled: !!clipEditorDraft.portrait_split_enabled,
-                portrait_top_crop_x: clipEditorDraft.portrait_top_crop_x ?? null,
-                portrait_top_crop_y: clipEditorDraft.portrait_top_crop_y ?? null,
-                portrait_top_crop_w: clipEditorDraft.portrait_top_crop_w ?? null,
-                portrait_top_crop_h: clipEditorDraft.portrait_top_crop_h ?? null,
-                portrait_bottom_crop_x: clipEditorDraft.portrait_bottom_crop_x ?? null,
-                portrait_bottom_crop_y: clipEditorDraft.portrait_bottom_crop_y ?? null,
-                portrait_bottom_crop_w: clipEditorDraft.portrait_bottom_crop_w ?? null,
-                portrait_bottom_crop_h: clipEditorDraft.portrait_bottom_crop_h ?? null,
-                script_edits_json: clipEditorDraft.script_edits_json ?? null,
-                fade_in_sec: Number(clipEditorDraft.fade_in_sec ?? 0),
-                fade_out_sec: Number(clipEditorDraft.fade_out_sec ?? 0),
-                burn_captions: !!clipEditorDraft.burn_captions,
-                caption_speaker_labels: !!clipEditorDraft.caption_speaker_labels,
-            };
-            const res = await api.patch<Clip>(`/clips/${clipId}`, payload);
-            setClips(prev => prev.map(c => c.id === clipId ? res.data : c));
-            cancelClipEdit();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to save clip edits');
-        } finally {
-            setSavingClipEdit(false);
-        }
+        await useClipsStore.getState().saveClipEdit(clipId);
     };
 
     const downloadBlobResponse = (blob: Blob, filename: string) => {
@@ -3336,218 +2928,6 @@ export function VideoDetailPage() {
         downloadBlobResponse(new Blob([scriptText], { type: 'text/plain;charset=utf-8' }), filename);
     };
 
-    const setClipExporting = (clipId: number, exporting: boolean) => {
-        setExportingClipIds(prev => {
-            const next = new Set(prev);
-            if (exporting) next.add(clipId); else next.delete(clipId);
-            return next;
-        });
-    };
-
-    const formatFileSize = (bytes?: number) => {
-        if (!bytes || bytes <= 0) return '';
-        const units = ['B', 'KB', 'MB', 'GB'];
-        let size = bytes;
-        let idx = 0;
-        while (size >= 1024 && idx < units.length - 1) {
-            size /= 1024;
-            idx += 1;
-        }
-        return `${size.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
-    };
-
-    const downloadArchivedArtifact = async (artifact: ClipExportArtifact) => {
-        try {
-            const response = await api.get(`/clip-exports/${artifact.id}/download`, { responseType: 'blob' });
-            downloadBlobResponse(response.data, artifact.file_name || `clip_export_${artifact.id}.${artifact.format || 'bin'}`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to download archived export');
-        }
-    };
-
-    const setClipUploading = (clipId: number, uploading: boolean) => {
-        setUploadingClipIds(prev => {
-            const next = new Set(prev);
-            if (uploading) next.add(clipId); else next.delete(clipId);
-            return next;
-        });
-    };
-
-    const exportClipMp4 = async (clip: Clip) => {
-        setClipExporting(clip.id, true);
-        try {
-            const response = await api.post(`/clips/${clip.id}/export/mp4`, null, { responseType: 'blob' });
-            const ext = 'mp4';
-            downloadBlobResponse(response.data, `${(clip.title || `clip_${clip.id}`).replace(/[\\\\/:*?\"<>|]/g, '_')}.${ext}`);
-            await fetchClipExportArtifacts();
-        } catch (e: any) {
-            const detail = e?.response?.data?.detail || 'Failed to export MP4';
-            try {
-                await api.post(`/clips/${clip.id}/export/mp4/queue`);
-                alert(`${detail}\n\nQueued a background render job for "${clip.title || `Clip #${clip.id}`}". You can download it from archived outputs when complete.`);
-            } catch {
-                alert(detail);
-            }
-        } finally {
-            setClipExporting(clip.id, false);
-        }
-    };
-
-    const queueClipMp4 = async (clip: Clip) => {
-        setClipExporting(clip.id, true);
-        try {
-            await api.post(`/clips/${clip.id}/export/mp4/queue`);
-            alert(`Queued render job for "${clip.title || `Clip #${clip.id}`}". Check Job Queue > Clip Export.`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue MP4 export');
-        } finally {
-            setClipExporting(clip.id, false);
-        }
-    };
-
-    const exportClipCaptions = async (clip: Clip, format: 'srt' | 'vtt') => {
-        setClipExporting(clip.id, true);
-        try {
-            const response = await api.post(`/clips/${clip.id}/export/captions`, { format }, { responseType: 'blob' });
-            downloadBlobResponse(response.data, `${(clip.title || `clip_${clip.id}`).replace(/[\\\\/:*?\"<>|]/g, '_')}.${format}`);
-            await fetchClipExportArtifacts();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || `Failed to export ${format.toUpperCase()}`);
-        } finally {
-            setClipExporting(clip.id, false);
-        }
-    };
-
-    const uploadClipToYoutube = async (clip: Clip) => {
-        setClipUploading(clip.id, true);
-        try {
-            const res = await api.post(`/clips/${clip.id}/youtube/upload`, {
-                privacy_status: clipUploadPrivacy,
-            });
-            const watchUrl = res.data?.uploaded_watch_url;
-            const title = res.data?.uploaded_title || clip.title;
-            if (watchUrl) {
-                if (confirm(`Uploaded "${title}". Open in YouTube Studio/watch page now?`)) {
-                    window.open(watchUrl, '_blank', 'noopener,noreferrer');
-                }
-            } else {
-                alert(`Uploaded "${title}" successfully.`);
-            }
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to upload clip to YouTube');
-        } finally {
-            setClipUploading(clip.id, false);
-        }
-    };
-
-    const CLIP_BATCH_PRESETS: Record<string, { label: string; clipSettings: Partial<Clip>; exportSrt?: boolean; exportVtt?: boolean }> = {
-        youtube_landscape: {
-            label: 'YouTube Landscape',
-            clipSettings: { aspect_ratio: '16:9', burn_captions: false, caption_speaker_labels: true },
-            exportSrt: true,
-        },
-        shorts_vertical: {
-            label: 'Shorts Vertical (Burned Captions)',
-            clipSettings: { aspect_ratio: '9:16', burn_captions: true, caption_speaker_labels: false },
-            exportSrt: true,
-        },
-        square_captioned: {
-            label: 'Square Captioned',
-            clipSettings: { aspect_ratio: '1:1', burn_captions: true, caption_speaker_labels: true },
-            exportSrt: true,
-            exportVtt: true,
-        },
-        audio_focus: {
-            label: 'Podcast Promo (4:5 + Captions)',
-            clipSettings: { aspect_ratio: '4:5', burn_captions: true, caption_speaker_labels: true },
-            exportSrt: true,
-        },
-    };
-
-    const applyPresetToClip = async (clipId: number, presetKey: keyof typeof CLIP_BATCH_PRESETS) => {
-        const preset = CLIP_BATCH_PRESETS[presetKey];
-        const res = await api.post<Clip>(`/clips/${clipId}/apply-export-preset`, preset.clipSettings);
-        setClips(prev => prev.map(c => (c.id === clipId ? res.data : c)));
-        return res.data;
-    };
-
-    const batchExportSelectedClips = async () => {
-        const ids = Array.from(selectedClipIds);
-        if (ids.length === 0) {
-            alert('Select one or more clips first');
-            return;
-        }
-        const preset = CLIP_BATCH_PRESETS[clipBatchPresetKey];
-        if (!confirm(`Apply preset "${preset.label}" and export ${ids.length} clip(s)?`)) return;
-        setBatchExporting(true);
-        try {
-            for (const clipId of ids) {
-                const updated = await applyPresetToClip(clipId, clipBatchPresetKey);
-                await exportClipMp4(updated);
-                if (preset.exportSrt) await exportClipCaptions(updated, 'srt');
-                if (preset.exportVtt) await exportClipCaptions(updated, 'vtt');
-            }
-        } finally {
-            setBatchExporting(false);
-        }
-    };
-
-    const queueRenderSelectedClips = async () => {
-        const ids = Array.from(selectedClipIds);
-        if (ids.length === 0) {
-            alert('Select one or more clips first');
-            return;
-        }
-        if (!confirm(`Queue MP4 render jobs for ${ids.length} selected clip(s)?`)) return;
-        setBatchQueueingRenders(true);
-        try {
-            let queued = 0;
-            for (const clipId of ids) {
-                try {
-                    await api.post(`/clips/${clipId}/export/mp4/queue`);
-                    queued += 1;
-                } catch {
-                    // Continue queueing other clips; summarize at end.
-                }
-            }
-            alert(`Queued ${queued}/${ids.length} clip render job(s). Check Job Queue -> Clip Export.`);
-        } finally {
-            setBatchQueueingRenders(false);
-        }
-    };
-
-    const batchUploadSelectedClips = async () => {
-        const ids = Array.from(selectedClipIds);
-        if (ids.length === 0) {
-            alert('Select one or more clips first');
-            return;
-        }
-        if (!confirm(`Upload ${ids.length} selected clip(s) to your connected YouTube channel as ${clipUploadPrivacy}?`)) return;
-        setBatchUploadingClips(true);
-        try {
-            const res = await api.post('/clips/youtube/upload-batch', {
-                clip_ids: ids,
-                privacy_status: clipUploadPrivacy,
-            });
-            const uploaded = Number(res.data?.uploaded || 0);
-            const failed = Number(res.data?.failed || 0);
-            alert(`Batch upload finished. Uploaded: ${uploaded}, Failed: ${failed}.`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to batch upload clips');
-        } finally {
-            setBatchUploadingClips(false);
-        }
-    };
-
-    const toggleClipPreviewLoop = (clip: Clip) => {
-        if (clipPreviewLoop?.clipId === clip.id) {
-            setClipPreviewLoop(null);
-            return;
-        }
-        setClipPreviewLoop({ start: clip.start_time, end: clip.end_time, clipId: clip.id });
-        handleSeek(clip.start_time);
-    };
-
     const handleDetectFunnyMoments = async (force = true) => {
         if (!id) return;
         setDetectingFunnyMoments(true);
@@ -3603,210 +2983,6 @@ export function VideoDetailPage() {
         }
     };
 
-    const handleGenerateYoutubeAi = async (force = false) => {
-        if (!id) return;
-        setGeneratingYoutubeAi(true);
-        try {
-            const res = await api.post<Video>(`/videos/${id}/youtube-ai/generate`, null, { params: { force } });
-            setVideo(res.data);
-            setActiveTab('youtube');
-        } catch (e: any) {
-            console.error('Failed to generate YouTube metadata', e);
-            alert(e?.response?.data?.detail || 'Failed to generate YouTube summary/chapters');
-        } finally {
-            setGeneratingYoutubeAi(false);
-        }
-    };
-
-    const parseYoutubeAiChapters = (chaptersJson?: string): VideoChapterSuggestion[] => {
-        if (!chaptersJson) return [];
-        try {
-            const parsed = JSON.parse(chaptersJson);
-            if (!Array.isArray(parsed)) return [];
-            return parsed.filter(Boolean).map((ch: any) => ({
-                start_seconds: Number(ch.start_seconds ?? 0),
-                timestamp: String(ch.timestamp ?? '0:00'),
-                title: String(ch.title ?? '').trim(),
-                description: ch.description ? String(ch.description) : undefined,
-            })).filter((ch: VideoChapterSuggestion) => ch.title);
-        } catch {
-            return [];
-        }
-    };
-
-    const copyToClipboard = async (text: string, kind: 'summary' | 'chapters' | 'description') => {
-        try {
-            await navigator.clipboard.writeText(text);
-            setCopiedYoutubeField(kind);
-            window.setTimeout(() => setCopiedYoutubeField(prev => (prev === kind ? null : prev)), 1500);
-        } catch {
-            alert('Failed to copy to clipboard');
-        }
-    };
-
-    const formatViewMetric = (value?: number | null, fractionDigits: number = 0) => {
-        if (value == null || Number.isNaN(value)) return 'Unknown';
-        return new Intl.NumberFormat(undefined, {
-            maximumFractionDigits: fractionDigits,
-            minimumFractionDigits: fractionDigits > 0 ? fractionDigits : 0,
-        }).format(value);
-    };
-
-    const getCloneVariantNumberSeed = () => {
-        let maxVariant = 0;
-        for (const job of cloneJobs) {
-            const match = String(job.request?.variant_label || '').match(/(\d+)\s*$/);
-            if (match) {
-                maxVariant = Math.max(maxVariant, Number(match[1] || 0));
-            }
-        }
-        return maxVariant + 1;
-    };
-
-    const loadCloneVariantInputs = (job: EpisodeCloneJob) => {
-        setCloneStylePrompt(String(job.request?.style_prompt || ''));
-        setCloneNotes(String(job.request?.notes || ''));
-        const requestProvider = String(job.request?.provider_override || '').trim();
-        const providerMatch = cloneEngines.find((engine) => (
-            requestProvider
-                ? String(engine.provider || '') === requestProvider
-                : engine.key === 'default'
-        ));
-        setCloneEngineKey(providerMatch?.key || (requestProvider ? cloneEngineKey : 'default'));
-        setCloneOllamaModel(String(job.request?.model_override || ''));
-        setCloneConceptsText((job.request?.approved_concepts || []).join('\n'));
-        setCloneExcludedReferencesText((job.request?.excluded_references || []).join('\n'));
-    };
-
-    const handleDetectCloneConcepts = async () => {
-        if (!id) return;
-        const engineOverride = resolveCloneEngineOverride();
-        setDetectingCloneConcepts(true);
-        setCloneEnginesError(null);
-        try {
-            const res = await api.post<EpisodeCloneConceptsResponse>(`/videos/${id}/episode-clone/concepts`, {
-                notes: cloneNotes.trim() || undefined,
-                related_limit: 8,
-                provider_override: engineOverride.provider_override,
-                model_override: engineOverride.model_override,
-            });
-            setCloneConcepts(res.data);
-            setCloneConceptsText((Array.isArray(res.data?.concepts) ? res.data.concepts : []).join('\n'));
-            setCloneExcludedReferencesText((Array.isArray(res.data?.excluded_references) ? res.data.excluded_references : []).join('\n'));
-        } catch (e: any) {
-            console.error('Failed to detect clone concepts:', e);
-            alert(e?.response?.data?.detail || 'Failed to detect clone concepts');
-        } finally {
-            setDetectingCloneConcepts(false);
-        }
-    };
-
-    const handleGenerateEpisodeClone = async () => {
-        if (!id) return;
-        if (!cloneStylePrompt.trim()) {
-            alert('Enter a target style prompt first.');
-            return;
-        }
-        const approvedConcepts = normalizeCloneTextList(cloneConceptsText);
-        if (approvedConcepts.length === 0) {
-            alert('Detect and approve at least one concept before generating a clone.');
-            return;
-        }
-        const engineOverride = resolveCloneEngineOverride();
-        const requestId = ++cloneGenerateRequestRef.current;
-        setGeneratingClone(true);
-        setCloneJobsError(null);
-        setCopiedCloneScript(false);
-        try {
-            const nextVariantSeed = getCloneVariantNumberSeed();
-            const jobs: EpisodeCloneJob[] = [];
-            for (let idx = 0; idx < cloneBatchSize; idx += 1) {
-                const res = await api.post<EpisodeCloneJob>(`/videos/${id}/episode-clone/generate`, {
-                    style_prompt: cloneStylePrompt.trim(),
-                    notes: cloneNotes.trim() || undefined,
-                    related_limit: 8,
-                    variant_label: `Variant ${nextVariantSeed + idx}`,
-                    provider_override: engineOverride.provider_override,
-                    model_override: engineOverride.model_override,
-                    approved_concepts: approvedConcepts,
-                    excluded_references: normalizeCloneTextList(cloneExcludedReferencesText),
-                });
-                jobs.push(res.data);
-            }
-            if (requestId !== cloneGenerateRequestRef.current) return;
-            const preferredJobId = jobs[0]?.job_id ?? null;
-            setSelectedCloneJobId(preferredJobId);
-            setCloneJobs((prev) => {
-                const merged = [...jobs, ...prev].filter(
-                    (job, index, array) => array.findIndex((candidate) => candidate.job_id === job.job_id) === index
-                );
-                return merged;
-            });
-            await fetchCloneJobs(Number(id), undefined, { preferredJobId, silent: true });
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to generate episode clone');
-            setGeneratingClone(false);
-        }
-    };
-
-    const handleCopyCloneScript = async () => {
-        if (!cloneDraftResult?.script) return;
-        try {
-            await navigator.clipboard.writeText(cloneDraftResult.script);
-            setCopiedCloneScript(true);
-            window.setTimeout(() => setCopiedCloneScript(false), 1500);
-        } catch {
-            alert('Failed to copy clone script');
-        }
-    };
-
-    const fetchDescriptionHistory = async () => {
-        if (!id) return;
-        setLoadingDescriptionHistory(true);
-        try {
-            const res = await api.get<VideoDescriptionRevision[]>(`/videos/${id}/description-history`);
-            setDescriptionHistory(res.data);
-        } catch (e) {
-            console.error('Failed to fetch description history', e);
-        } finally {
-            setLoadingDescriptionHistory(false);
-        }
-    };
-
-    const handlePublishYoutubeDescription = async () => {
-        if (!id || !video?.youtube_ai_description_text) return;
-        if (!confirm(isYoutubeMedia
-            ? 'Archive the current description and replace it with the AI-generated YouTube description draft?'
-            : 'Archive the current episode description and replace it with the AI-generated summary draft?'
-        )) return;
-        setPublishingYoutubeDescription(true);
-        try {
-            const res = await api.post<Video>(`/videos/${id}/youtube-ai/publish-description`);
-            setVideo(res.data);
-            await fetchDescriptionHistory();
-        } catch (e: any) {
-            console.error('Failed to publish AI description', e);
-            alert(e?.response?.data?.detail || 'Failed to publish AI description');
-        } finally {
-            setPublishingYoutubeDescription(false);
-        }
-    };
-
-    const handleRestoreDescriptionRevision = async (revision: VideoDescriptionRevision) => {
-        if (!id || !revision?.id) return;
-        if (!confirm(`Restore description from ${new Date(revision.created_at).toLocaleString()} (${revision.source})? The current description will be archived first.`)) return;
-        setRestoringDescriptionRevisionId(revision.id);
-        try {
-            const res = await api.post<Video>(`/videos/${id}/description-history/${revision.id}/restore`);
-            setVideo(res.data);
-            await fetchDescriptionHistory();
-        } catch (e: any) {
-            console.error('Failed to restore description', e);
-            alert(e?.response?.data?.detail || 'Failed to restore description');
-        } finally {
-            setRestoringDescriptionRevisionId(null);
-        }
-    };
 
     useEffect(() => {
         if (!id) return;
@@ -3825,11 +3001,6 @@ export function VideoDetailPage() {
         }
     }, [activeTab, video?.id]);
 
-    useEffect(() => {
-        if (activeTab === 'youtube' && id) {
-            void fetchDescriptionHistory();
-        }
-    }, [activeTab, id]);
 
     useEffect(() => {
         if (activeTab !== 'cleanup' || !id || !isUploadedMedia) return;
@@ -3858,8 +3029,6 @@ export function VideoDetailPage() {
     }
 
     const explainedFunnyMoments = funnyMoments.filter(m => !!m.humor_summary);
-    const youtubeAiChapters = parseYoutubeAiChapters(video.youtube_ai_chapters_json);
-    const hasYoutubeAiMetadata = !!(video.youtube_ai_summary || video.youtube_ai_description_text || youtubeAiChapters.length);
     const explainedModelNames = Array.from(new Set(
         explainedFunnyMoments
             .map(m => (m.humor_model || '').trim())
@@ -6772,464 +5941,65 @@ export function VideoDetailPage() {
                         </div>
                     )}
                     {activeTab === 'clips' && (
-                        <div className="h-full overflow-y-auto p-4 space-y-3">
-                            {clips.length > 0 && (
-                                <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-3 sticky top-0 z-10 shadow-sm">
-                                    <div className="flex items-center justify-between gap-2">
+                        <ClipsTab
+                            isActive={activeTab === 'clips'}
+                            onSeek={handleSeek}
+                            onStartClipEdit={startClipEdit}
+                        />
+                    )}
+                    {activeTab === 'chat' && (
+                        <div className="h-full overflow-y-auto p-4">
+                            <div className="space-y-4">
+                                <div className="rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50 via-white to-sky-50 p-4 shadow-sm">
+                                    <div className="flex items-start gap-3">
+                                        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-indigo-600 shadow-sm">
+                                            <MessageSquareText size={18} />
+                                        </div>
                                         <div>
-                                            <div className="text-sm font-semibold text-slate-800">Batch Export + Presets</div>
-                                            <div className="text-xs text-slate-500">Select clips, apply a preset, export MP4 (+ caption sidecars).</div>
-                                        </div>
-                                        <button
-                                            onClick={() => setSelectedClipIds(new Set(clips.map(c => c.id)))}
-                                            className="text-xs px-2 py-1 rounded-md bg-slate-100 text-slate-600 hover:bg-slate-200"
-                                        >
-                                            Select All
-                                        </button>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <select
-                                            value={clipBatchPresetKey}
-                                            onChange={(e) => setClipBatchPresetKey(e.target.value as any)}
-                                            className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
-                                        >
-                                            {Object.entries(CLIP_BATCH_PRESETS).map(([key, preset]) => (
-                                                <option key={key} value={key}>{preset.label}</option>
-                                            ))}
-                                        </select>
-
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                            <button
-                                                onClick={() => void batchExportSelectedClips()}
-                                                disabled={batchExporting || batchUploadingClips || batchQueueingRenders || selectedClipIds.size === 0}
-                                                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 whitespace-nowrap"
-                                            >
-                                                {batchExporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
-                                                Export Selected ({selectedClipIds.size})
-                                            </button>
-                                            <button
-                                                onClick={() => void queueRenderSelectedClips()}
-                                                disabled={batchQueueingRenders || batchExporting || batchUploadingClips || selectedClipIds.size === 0}
-                                                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 whitespace-nowrap"
-                                                title="Queue server-side clip render jobs (parallel with other queues)"
-                                            >
-                                                {batchQueueingRenders ? <Loader2 size={13} className="animate-spin" /> : <Clock size={13} />}
-                                                Queue Renders ({selectedClipIds.size})
-                                            </button>
-                                        </div>
-
-                                        <div className="grid grid-cols-1 sm:grid-cols-[160px_minmax(0,1fr)] gap-2">
-                                            <select
-                                                value={clipUploadPrivacy}
-                                                onChange={(e) => setClipUploadPrivacy(e.target.value as 'private' | 'unlisted' | 'public')}
-                                                className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
-                                                title="YouTube upload privacy"
-                                            >
-                                                <option value="private">Upload Private</option>
-                                                <option value="unlisted">Upload Unlisted</option>
-                                                <option value="public">Upload Public</option>
-                                            </select>
-                                            <button
-                                                onClick={() => void batchUploadSelectedClips()}
-                                                disabled={batchUploadingClips || batchExporting || selectedClipIds.size === 0}
-                                                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 whitespace-nowrap"
-                                                title="Upload selected clips directly to your connected YouTube channel"
-                                            >
-                                                {batchUploadingClips ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
-                                                Upload Selected ({selectedClipIds.size})
-                                            </button>
+                                            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-indigo-600">Episode Chat</div>
+                                            <div className="mt-1 text-lg font-semibold text-slate-900">Transcript-grounded conversation</div>
+                                            <p className="mt-2 text-sm leading-6 text-slate-600">
+                                                Use the main stage to ask questions about this episode. Replies are grounded in the transcript and include jump-back citations.
+                                            </p>
                                         </div>
                                     </div>
                                 </div>
-                            )}
-
-                            {loadingClips && clips.length === 0 ? (
-                                <div className="flex justify-center p-8"><Loader2 className="animate-spin text-slate-300" /></div>
-                            ) : clips.length === 0 ? (
-                                <div className="text-center mt-10 p-8 border-2 border-dashed border-slate-200 rounded-xl">
-                                    <Scissors className="mx-auto text-slate-300 mb-2" size={32} />
-                                    <h3 className="text-slate-500 font-medium">No clips yet</h3>
-                                    <p className="text-sm text-slate-400 mt-1">Select text in the transcript to create a clip.</p>
-                                </div>
-                            ) : (
-                                clips.map(clip => {
-                                    const isEditing = editingClipId === clip.id;
-                                    const draft = isEditing && clipEditorDraft ? clipEditorDraft : clip;
-                                    const isExporting = exportingClipIds.has(clip.id);
-                                    const isUploading = uploadingClipIds.has(clip.id);
-                                    const isLooping = clipPreviewLoop?.clipId === clip.id;
-                                    return (
-                                        <div key={clip.id} className={`bg-white p-3 rounded-lg border shadow-sm ${isEditing ? 'border-purple-300 ring-1 ring-purple-200' : 'border-slate-200'}`}>
-                                            <div className="flex gap-3 items-start">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={selectedClipIds.has(clip.id)}
-                                                    onChange={() => toggleClipSelected(clip.id)}
-                                                    className="mt-2 h-4 w-4 rounded border-slate-300 text-purple-600"
-                                                />
-                                                <div
-                                                    className="w-24 h-16 bg-slate-100 rounded overflow-hidden flex-shrink-0 relative cursor-pointer"
-                                                    onClick={() => handleSeek((draft.start_time as number) ?? clip.start_time)}
-                                                    title="Jump to clip start in player"
-                                                >
-                                                    <div className="w-full h-full bg-gradient-to-br from-purple-100 to-indigo-100 flex items-center justify-center">
-                                                        <Play size={20} className="text-purple-400" />
-                                                    </div>
-                                                </div>
-                                                <div className="flex-1 min-w-0 space-y-2">
-                                                    <div className="flex items-start justify-between gap-2">
-                                                        <div className="min-w-0">
-                                                            <h4 className="text-sm font-medium text-slate-800 line-clamp-1">{clip.title}</h4>
-                                                            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 font-mono mt-0.5">
-                                                                <span>{formatTime(clip.start_time)} - {formatTime(clip.end_time)}</span>
-                                                                <span className="w-1 h-1 bg-slate-300 rounded-full" />
-                                                                <span>{(clip.end_time - clip.start_time).toFixed(1)}s</span>
-                                                                <span className="w-1 h-1 bg-slate-300 rounded-full" />
-                                                                <span>{(clip.aspect_ratio || 'source').toUpperCase()}</span>
-                                                                {clip.burn_captions && <span className="px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[10px]">burned captions</span>}
-                                                                {clip.portrait_split_enabled && String(clip.aspect_ratio || '').toLowerCase() === '9:16' && (
-                                                                    <span className="px-1 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px]">split</span>
-                                                                )}
-                                                                {clip.script_edits_json && (
-                                                                    <span className="px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px]">text-edited</span>
-                                                                )}
-                                                                {((clip.fade_in_sec || 0) > 0 || (clip.fade_out_sec || 0) > 0) && (
-                                                                    <span className="px-1 py-0.5 rounded bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-200 text-[10px]">
-                                                                        fades {Number(clip.fade_in_sec || 0).toFixed(1)}/{Number(clip.fade_out_sec || 0).toFixed(1)}s
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                        </div>
-                                                        <div className="flex items-center gap-1">
-                                                            <button
-                                                                onClick={() => toggleClipPreviewLoop(clip)}
-                                                                className={`px-2 py-1 text-xs rounded-md ${isLooping ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-                                                                title="Loop preview this clip in the main player"
-                                                            >
-                                                                {isLooping ? 'Stop Loop' : 'Loop'}
-                                                            </button>
-                                                            <button
-                                                                onClick={() => isEditing ? cancelClipEdit() : startClipEdit(clip)}
-                                                                className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded"
-                                                                title="Edit clip trim/export settings"
-                                                            >
-                                                                <Pencil size={14} />
-                                                            </button>
-                                                            <button
-                                                                onClick={() => handleDeleteClip(clip.id)}
-                                                                className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded"
-                                                                title="Delete clip"
-                                                            >
-                                                                <Trash2 size={14} />
-                                                            </button>
-                                                        </div>
-                                                    </div>
-
-                                                    <div className="flex flex-wrap gap-2">
-                                                        <button
-                                                            onClick={() => void queueClipMp4(clip)}
-                                                            disabled={isExporting || isUploading}
-                                                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-                                                        >
-                                                            {isExporting ? <Loader2 size={12} className="animate-spin" /> : <Clock size={12} />}
-                                                            Queue MP4
-                                                        </button>
-                                                        <button
-                                                            onClick={() => void exportClipMp4(clip)}
-                                                            disabled={isExporting || isUploading}
-                                                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50"
-                                                        >
-                                                            {isExporting ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-                                                            Download MP4
-                                                        </button>
-                                                        <button
-                                                            onClick={() => void uploadClipToYoutube(clip)}
-                                                            disabled={isExporting || isUploading || batchUploadingClips}
-                                                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
-                                                            title="Upload this clip to your connected YouTube channel"
-                                                        >
-                                                            {isUploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
-                                                            Upload
-                                                        </button>
-                                                        <button
-                                                            onClick={() => void exportClipCaptions(clip, 'srt')}
-                                                            disabled={isExporting || isUploading}
-                                                            className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-50"
-                                                        >
-                                                            SRT
-                                                        </button>
-                                                        <button
-                                                            onClick={() => void exportClipCaptions(clip, 'vtt')}
-                                                            disabled={isExporting || isUploading}
-                                                            className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-50"
-                                                        >
-                                                            VTT
-                                                        </button>
-                                                    </div>
-
-                                                    {(() => {
-                                                        const artifacts = (clipExportArtifactsByClip[clip.id] || []).slice(0, 4);
-                                                        if (artifacts.length === 0) {
-                                                            return (
-                                                                <div className="text-[11px] text-slate-400">
-                                                                    No archived exports yet. Export once to save for re-download.
-                                                                </div>
-                                                            );
-                                                        }
-                                                        return (
-                                                            <div className="space-y-1">
-                                                                <div className="text-[11px] font-medium text-slate-500">Archived outputs</div>
-                                                                <div className="flex flex-wrap gap-1.5">
-                                                                    {artifacts.map((art) => (
-                                                                        <button
-                                                                            key={art.id}
-                                                                            onClick={() => void downloadArchivedArtifact(art)}
-                                                                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
-                                                                            title={`${art.file_name} • ${new Date(art.created_at).toLocaleString()}`}
-                                                                        >
-                                                                            <Download size={11} />
-                                                                            {art.format.toUpperCase()} {formatFileSize(art.file_size_bytes)}
-                                                                        </button>
-                                                                    ))}
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })()}
-
-                                                    {isEditing && (
-                                                        <div className="text-[11px] text-purple-700 bg-purple-50 border border-purple-200 rounded-lg px-2.5 py-2">
-                                                            Editing in main preview panel. Scroll/right pane to adjust trim, crop, split layout, and burned captions.
-                                                        </div>
-                                                    )}
-
-                                                    {false && isEditing && draft && (
-                                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
-                                                            <div className="grid grid-cols-1 gap-4">
-                                                                <div className="space-y-3">
-                                                                <div>
-                                                                    <label className="block text-[11px] font-medium text-slate-600 mb-1">Title</label>
-                                                                    <input
-                                                                        type="text"
-                                                                        value={String(draft.title || '')}
-                                                                        onChange={(e) => updateClipDraftField('title', e.target.value)}
-                                                                        className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
-                                                                    />
-                                                                </div>
-                                                                <div className="grid grid-cols-2 gap-3">
-                                                                    <div>
-                                                                        <label className="block text-[11px] font-medium text-slate-600 mb-1">Start (sec)</label>
-                                                                        <input type="number" step="0.1" value={Number(draft.start_time ?? clip.start_time)} onChange={(e) => updateClipDraftField('start_time', Number(e.target.value))} className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white" />
-                                                                    </div>
-                                                                    <div>
-                                                                        <label className="block text-[11px] font-medium text-slate-600 mb-1">End (sec)</label>
-                                                                        <input type="number" step="0.1" value={Number(draft.end_time ?? clip.end_time)} onChange={(e) => updateClipDraftField('end_time', Number(e.target.value))} className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white" />
-                                                                    </div>
-                                                                </div>
-                                                                <div className="grid grid-cols-2 gap-3">
-                                                                    <div>
-                                                                        <label className="block text-[11px] font-medium text-slate-600 mb-1">Aspect Ratio</label>
-                                                                        <select value={String(draft.aspect_ratio || 'source')} onChange={(e) => updateClipDraftField('aspect_ratio', e.target.value)} className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">
-                                                                            <option value="source">Source</option>
-                                                                            <option value="16:9">16:9</option>
-                                                                            <option value="9:16">9:16</option>
-                                                                            <option value="1:1">1:1</option>
-                                                                            <option value="4:5">4:5</option>
-                                                                        </select>
-                                                                    </div>
-                                                                    <div className="flex items-end">
-                                                                        <button
-                                                                            onClick={() => {
-                                                                                updateClipDraftField('crop_x', null);
-                                                                                updateClipDraftField('crop_y', null);
-                                                                                updateClipDraftField('crop_w', null);
-                                                                                updateClipDraftField('crop_h', null);
-                                                                            }}
-                                                                            className="w-full px-3 py-2 text-xs rounded-lg bg-white border border-slate-300 text-slate-600 hover:bg-slate-50"
-                                                                        >
-                                                                            Reset Crop
-                                                                        </button>
-                                                                    </div>
-                                                                </div>
-                                                                <div>
-                                                                    <label className="block text-[11px] font-medium text-slate-600 mb-1">Crop / Reframe (normalized 0-1)</label>
-                                                                    <div className="grid grid-cols-4 gap-2">
-                                                                        {(['crop_x','crop_y','crop_w','crop_h'] as const).map((field) => (
-                                                                            <input
-                                                                                key={field}
-                                                                                type="number"
-                                                                                min={0}
-                                                                                max={1}
-                                                                                step={0.01}
-                                                                                value={draft[field] == null ? '' : Number(draft[field])}
-                                                                                placeholder={field.replace('crop_','')}
-                                                                                onChange={(e) => updateClipDraftField(field, e.target.value === '' ? null : Number(e.target.value))}
-                                                                                className="px-2 py-2 text-xs border border-slate-300 rounded-lg bg-white"
-                                                                            />
-                                                                        ))}
-                                                                    </div>
-                                                                    <p className="mt-1 text-[10px] text-slate-500">Set `x y w h` to crop before aspect-ratio scaling/padding. Leave blank for full frame.</p>
-                                                                </div>
-                                                                {String(draft.aspect_ratio || 'source') === '9:16' && (
-                                                                    <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-2.5 space-y-2">
-                                                                        <label className="inline-flex items-center gap-2 text-xs text-indigo-700 font-medium">
-                                                                            <input
-                                                                                type="checkbox"
-                                                                                checked={!!draft.portrait_split_enabled}
-                                                                                onChange={(e) => {
-                                                                                    if (e.target.checked) {
-                                                                                        applyPortraitSplitDefaults();
-                                                                                    } else {
-                                                                                        updateClipDraftField('portrait_split_enabled', false);
-                                                                                    }
-                                                                                }}
-                                                                                className="h-4 w-4 rounded border-indigo-300 text-indigo-600"
-                                                                            />
-                                                                            Portrait split mode (top/lower stacked)
-                                                                        </label>
-                                                                        {!!draft.portrait_split_enabled && (
-                                                                            <>
-                                                                                <div className="grid grid-cols-4 gap-2">
-                                                                                    {(['portrait_top_crop_x', 'portrait_top_crop_y', 'portrait_top_crop_w', 'portrait_top_crop_h'] as const).map((field) => (
-                                                                                        <input
-                                                                                            key={field}
-                                                                                            type="number"
-                                                                                            min={0}
-                                                                                            max={1}
-                                                                                            step={0.01}
-                                                                                            value={draft[field] == null ? '' : Number(draft[field])}
-                                                                                            placeholder={field.replace('portrait_top_crop_', 'top_')}
-                                                                                            onChange={(e) => updateClipDraftField(field, e.target.value === '' ? null : Number(e.target.value))}
-                                                                                            className="px-2 py-2 text-xs border border-indigo-200 rounded-lg bg-white"
-                                                                                        />
-                                                                                    ))}
-                                                                                </div>
-                                                                                <div className="grid grid-cols-4 gap-2">
-                                                                                    {(['portrait_bottom_crop_x', 'portrait_bottom_crop_y', 'portrait_bottom_crop_w', 'portrait_bottom_crop_h'] as const).map((field) => (
-                                                                                        <input
-                                                                                            key={field}
-                                                                                            type="number"
-                                                                                            min={0}
-                                                                                            max={1}
-                                                                                            step={0.01}
-                                                                                            value={draft[field] == null ? '' : Number(draft[field])}
-                                                                                            placeholder={field.replace('portrait_bottom_crop_', 'low_')}
-                                                                                            onChange={(e) => updateClipDraftField(field, e.target.value === '' ? null : Number(e.target.value))}
-                                                                                            className="px-2 py-2 text-xs border border-indigo-200 rounded-lg bg-white"
-                                                                                        />
-                                                                                    ))}
-                                                                                </div>
-                                                                            </>
-                                                                        )}
-                                                                    </div>
-                                                                )}
-                                                                <div className="grid grid-cols-2 gap-3">
-                                                                    <label className="inline-flex items-center gap-2 text-xs text-slate-600">
-                                                                        <input type="checkbox" checked={!!draft.burn_captions} onChange={(e) => updateClipDraftField('burn_captions', e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-purple-600" />
-                                                                        Burn captions into MP4
-                                                                    </label>
-                                                                    <label className="inline-flex items-center gap-2 text-xs text-slate-600">
-                                                                        <input type="checkbox" checked={!!draft.caption_speaker_labels} onChange={(e) => updateClipDraftField('caption_speaker_labels', e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-purple-600" />
-                                                                        Speaker labels in captions
-                                                                    </label>
-                                                                </div>
-                                                                <div className="space-y-2">
-                                                                    <div className="text-[11px] font-semibold tracking-wide text-slate-600">Preview (guide)</div>
-                                                                    <div
-                                                                        className="relative w-full rounded-lg overflow-hidden border border-slate-300 bg-slate-900"
-                                                                        style={{
-                                                                            aspectRatio:
-                                                                                String(draft.aspect_ratio || 'source') === '1:1'
-                                                                                    ? '1 / 1'
-                                                                                    : String(draft.aspect_ratio || 'source') === '4:5'
-                                                                                        ? '4 / 5'
-                                                                                        : String(draft.aspect_ratio || 'source') === '9:16'
-                                                                                            ? '9 / 16'
-                                                                                            : '16 / 9',
-                                                                        }}
-                                                                    >
-                                                                        {video?.thumbnail_url ? (
-                                                                            <img src={video?.thumbnail_url || ''} alt="" className="absolute inset-0 w-full h-full object-cover opacity-70" />
-                                                                        ) : (
-                                                                            <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900" />
-                                                                        )}
-                                                                        {!(String(draft.aspect_ratio || 'source') === '9:16' && !!draft.portrait_split_enabled) && (
-                                                                            <div
-                                                                                className="absolute border-2 border-cyan-300/90 bg-cyan-300/10"
-                                                                                style={{
-                                                                                    left: `${normalizeCropRect(draft.crop_x, draft.crop_y, draft.crop_w, draft.crop_h).x * 100}%`,
-                                                                                    top: `${normalizeCropRect(draft.crop_x, draft.crop_y, draft.crop_w, draft.crop_h).y * 100}%`,
-                                                                                    width: `${normalizeCropRect(draft.crop_x, draft.crop_y, draft.crop_w, draft.crop_h).w * 100}%`,
-                                                                                    height: `${normalizeCropRect(draft.crop_x, draft.crop_y, draft.crop_w, draft.crop_h).h * 100}%`,
-                                                                                }}
-                                                                            />
-                                                                        )}
-                                                                        {String(draft.aspect_ratio || 'source') === '9:16' && !!draft.portrait_split_enabled && (
-                                                                            <>
-                                                                                <div
-                                                                                    className="absolute border-2 border-amber-300/90 bg-amber-300/15"
-                                                                                    style={{
-                                                                                        left: `${normalizeCropRect(draft.portrait_top_crop_x, draft.portrait_top_crop_y, draft.portrait_top_crop_w, draft.portrait_top_crop_h, { x: 0, y: 0, w: 1, h: 0.5 }).x * 100}%`,
-                                                                                        top: `${normalizeCropRect(draft.portrait_top_crop_x, draft.portrait_top_crop_y, draft.portrait_top_crop_w, draft.portrait_top_crop_h, { x: 0, y: 0, w: 1, h: 0.5 }).y * 100}%`,
-                                                                                        width: `${normalizeCropRect(draft.portrait_top_crop_x, draft.portrait_top_crop_y, draft.portrait_top_crop_w, draft.portrait_top_crop_h, { x: 0, y: 0, w: 1, h: 0.5 }).w * 100}%`,
-                                                                                        height: `${normalizeCropRect(draft.portrait_top_crop_x, draft.portrait_top_crop_y, draft.portrait_top_crop_w, draft.portrait_top_crop_h, { x: 0, y: 0, w: 1, h: 0.5 }).h * 100}%`,
-                                                                                    }}
-                                                                                />
-                                                                                <div
-                                                                                    className="absolute border-2 border-lime-300/90 bg-lime-300/15"
-                                                                                    style={{
-                                                                                        left: `${normalizeCropRect(draft.portrait_bottom_crop_x, draft.portrait_bottom_crop_y, draft.portrait_bottom_crop_w, draft.portrait_bottom_crop_h, { x: 0, y: 0.5, w: 1, h: 0.5 }).x * 100}%`,
-                                                                                        top: `${normalizeCropRect(draft.portrait_bottom_crop_x, draft.portrait_bottom_crop_y, draft.portrait_bottom_crop_w, draft.portrait_bottom_crop_h, { x: 0, y: 0.5, w: 1, h: 0.5 }).y * 100}%`,
-                                                                                        width: `${normalizeCropRect(draft.portrait_bottom_crop_x, draft.portrait_bottom_crop_y, draft.portrait_bottom_crop_w, draft.portrait_bottom_crop_h, { x: 0, y: 0.5, w: 1, h: 0.5 }).w * 100}%`,
-                                                                                        height: `${normalizeCropRect(draft.portrait_bottom_crop_x, draft.portrait_bottom_crop_y, draft.portrait_bottom_crop_w, draft.portrait_bottom_crop_h, { x: 0, y: 0.5, w: 1, h: 0.5 }).h * 100}%`,
-                                                                                    }}
-                                                                                />
-                                                                                <div className="absolute inset-x-0 top-1/2 border-t border-white/70 border-dashed" />
-                                                                            </>
-                                                                        )}
-                                                                        {!!draft.burn_captions && (
-                                                                            <div className="absolute inset-x-2 bottom-2 px-2 py-1.5 rounded bg-black/55 text-[11px] text-white text-center">
-                                                                                [Speaker] Sample burned caption preview
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                    <p className="text-[10px] text-slate-500">Preview is approximate and shows crop + burn-overlay placement.</p>
-                                                                </div>
-                                                            </div>
-                                                            </div>
-                                                            <div className="flex items-center justify-end gap-2">
-                                                                <button onClick={cancelClipEdit} className="px-3 py-2 text-xs font-medium rounded-lg bg-white border border-slate-300 text-slate-600 hover:bg-slate-50">Cancel</button>
-                                                                <button
-                                                                    onClick={() => void saveClipEdit(clip.id)}
-                                                                    disabled={savingClipEdit}
-                                                                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-                                                                >
-                                                                    {savingClipEdit ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                                                                    Save Clip Settings
-                                                                </button>
-                                                            </div>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
+                                <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Chat Readiness</div>
+                                    <div className="mt-3 space-y-2 text-sm text-slate-600">
+                                        <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
+                                            <span>Transcript segments</span>
+                                            <span className="font-semibold text-slate-800">{segments.length}</span>
                                         </div>
-                                    );
-                                })
-                            )}
+                                        <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
+                                            <span>Transcript language</span>
+                                            <span className="font-semibold text-slate-800">{video?.transcript_language || 'Unknown'}</span>
+                                        </div>
+                                        <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
+                                            <span>Model routing</span>
+                                            <span className="font-semibold text-slate-800">{cloneEngines[0]?.label || 'Configured default'}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">How It Works</div>
+                                    <div className="mt-3 space-y-2 text-sm leading-6 text-slate-600">
+                                        <div className="rounded-xl bg-slate-50 px-3 py-2">Saved threads are scoped to this episode only.</div>
+                                        <div className="rounded-xl bg-slate-50 px-3 py-2">The assistant pulls relevant transcript context before answering.</div>
+                                        <div className="rounded-xl bg-slate-50 px-3 py-2">Citation chips in the reply jump back into the transcript timeline.</div>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     )}
                     {activeTab === 'speakers' && (
-                        <div className="h-full overflow-y-auto p-4">
-                            {video ? (
-                                <SpeakerList
-                                    videoId={video.id}
-                                    channelId={undefined}
-                                    onSpeakerUpdated={handleSpeakerListUpdated}
-                                    onSpeakerMerged={handleSpeakerListMerged}
-                                />
-                            ) : (
-                                <Loader2 className="animate-spin" />
-                            )}
-                        </div>
+                        <SpeakersTab
+                            video={video}
+                            videoId={Number(id)}
+                            isActive={activeTab === 'speakers'}
+                            onSegmentsUpdated={setSegments}
+                            onSegmentsLoaded={setSegments}
+                        />
                     )}
                     {activeTab === 'reconstruction' && isUploadedMedia && (
                         <div className="h-full overflow-y-auto p-4">
@@ -7292,210 +6062,16 @@ export function VideoDetailPage() {
                             </div>
                         </div>
                     )}
-                    {activeTab === 'youtube' && (
-                        <div className="h-full overflow-y-auto p-4 space-y-4">
-                            <div className="rounded-xl border border-emerald-100 bg-gradient-to-br from-emerald-50 to-teal-50 p-4">
-                                <div className="flex items-start justify-between gap-3">
-                                    <div>
-                                        <div className="flex items-center gap-2 text-sm font-semibold text-emerald-800">
-                                            <Bot size={15} className="text-emerald-600" />
-                                            {aiMetadataPanelTitle}
-                                        </div>
-                                        <p className="mt-1 text-xs text-emerald-700/80">
-                                            {aiMetadataPanelDescription}
-                                        </p>
-                                    </div>
-                                    <button
-                                        onClick={() => handleGenerateYoutubeAi(hasYoutubeAiMetadata)}
-                                        disabled={generatingYoutubeAi || segments.length === 0}
-                                        className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-white text-emerald-700 border border-emerald-200 hover:bg-emerald-50 disabled:opacity-50 disabled:cursor-not-allowed"
-                                        title={segments.length === 0 ? 'Transcript required first' : aiMetadataGenerateTitle}
-                                    >
-                                        {generatingYoutubeAi ? <Loader2 size={13} className="animate-spin" /> : (hasYoutubeAiMetadata ? <RefreshCw size={13} /> : <Bot size={13} />)}
-                                        {hasYoutubeAiMetadata ? 'Re-generate' : 'Generate'}
-                                    </button>
-                                </div>
-                                <div className="mt-2 flex items-center gap-2">
-                                    <button
-                                        onClick={handlePublishYoutubeDescription}
-                                        disabled={publishingYoutubeDescription || !video.youtube_ai_description_text}
-                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                                        title={video.youtube_ai_description_text ? aiMetadataPublishHelp : 'Generate a draft first'}
-                                    >
-                                        {publishingYoutubeDescription ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
-                                        {aiMetadataPublishLabel}
-                                    </button>
-                                    <span className="text-[11px] text-emerald-800/80">
-                                        {aiMetadataPublishHelp}
-                                    </span>
-                                </div>
-                                {video.youtube_ai_model && (
-                                    <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
-                                        <span className="px-2 py-0.5 rounded bg-white/80 border border-emerald-200 text-emerald-700">
-                                            {video.youtube_ai_model}
-                                        </span>
-                                        {video.youtube_ai_generated_at && (
-                                            <span className="text-emerald-800/80">
-                                                {new Date(video.youtube_ai_generated_at).toLocaleString()}
-                                            </span>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-
-                            {segments.length === 0 ? (
-                                <div className="rounded-xl border border-dashed border-slate-200 bg-white p-4 text-sm text-slate-500">
-                                    Transcript required first. Run transcription/diarization before generating {isYoutubeMedia ? 'AI summary metadata' : 'episode summary metadata'}.
-                                </div>
-                            ) : !hasYoutubeAiMetadata ? (
-                                <div className="rounded-xl border border-dashed border-slate-200 bg-white p-4 text-sm text-slate-500">
-                                    {aiMetadataEmptyText}
-                                </div>
-                            ) : (
-                                <>
-                                    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                                        <div className="flex items-center justify-between gap-2 mb-2">
-                                            <h3 className="text-sm font-semibold text-slate-800">{aiMetadataCurrentDescriptionLabel}</h3>
-                                            {video.description && (
-                                                <button
-                                                    onClick={() => void copyToClipboard(video.description || '', 'description')}
-                                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200"
-                                                >
-                                                    <Copy size={12} />
-                                                    Copy Current
-                                                </button>
-                                            )}
-                                        </div>
-                                        <pre className="text-xs text-slate-700 bg-slate-50 border border-slate-100 rounded-lg p-3 whitespace-pre-wrap break-words font-mono leading-relaxed max-h-56 overflow-y-auto">
-                                            {video.description || 'No description stored.'}
-                                        </pre>
-                                    </div>
-
-                                    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                                        <div className="flex items-center justify-between gap-2 mb-2">
-                                            <h3 className="text-sm font-semibold text-slate-800">Episode Summary</h3>
-                                            {video.youtube_ai_summary && (
-                                                <button
-                                                    onClick={() => void copyToClipboard(video.youtube_ai_summary || '', 'summary')}
-                                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200"
-                                                >
-                                                    <Copy size={12} />
-                                                    {copiedYoutubeField === 'summary' ? 'Copied' : 'Copy'}
-                                                </button>
-                                            )}
-                                        </div>
-                                        <p className="text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">
-                                            {video.youtube_ai_summary || 'No summary generated.'}
-                                        </p>
-                                    </div>
-
-                                    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                                        <div className="flex items-center justify-between gap-2 mb-2">
-                                            <h3 className="text-sm font-semibold text-slate-800">{aiMetadataChaptersLabel}</h3>
-                                            {youtubeAiChapters.length > 0 && (
-                                                <button
-                                                    onClick={() => void copyToClipboard(youtubeAiChapters.map(ch => `${ch.timestamp} ${ch.title}`).join('\n'), 'chapters')}
-                                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200"
-                                                >
-                                                    <Copy size={12} />
-                                                    {copiedYoutubeField === 'chapters' ? 'Copied' : 'Copy Lines'}
-                                                </button>
-                                            )}
-                                        </div>
-                                        {youtubeAiChapters.length === 0 ? (
-                                            <p className="text-sm text-slate-500">No chapter timestamps generated.</p>
-                                        ) : (
-                                            <div className="space-y-2">
-                                                {youtubeAiChapters.map((ch, idx) => (
-                                                    <button
-                                                        key={`${ch.timestamp}-${idx}`}
-                                                        onClick={() => handleSeek(ch.start_seconds)}
-                                                        className="w-full text-left rounded-lg border border-slate-100 hover:border-emerald-200 hover:bg-emerald-50/40 p-2.5 transition-colors"
-                                                        title="Jump preview to chapter timestamp"
-                                                    >
-                                                        <div className="flex items-center gap-2">
-                                                            <span className="font-mono text-xs text-emerald-700 min-w-[46px]">{ch.timestamp}</span>
-                                                            <span className="text-sm font-medium text-slate-800">{ch.title}</span>
-                                                        </div>
-                                                        {ch.description && (
-                                                            <p className="mt-1 ml-[54px] text-xs text-slate-600 leading-relaxed">
-                                                                {ch.description}
-                                                            </p>
-                                                        )}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                                        <div className="flex items-center justify-between gap-2 mb-2">
-                                            <h3 className="text-sm font-semibold text-slate-800">{aiMetadataDescriptionLabel}</h3>
-                                            {video.youtube_ai_description_text && (
-                                                <button
-                                                    onClick={() => void copyToClipboard(video.youtube_ai_description_text || '', 'description')}
-                                                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200"
-                                                >
-                                                    <Copy size={12} />
-                                                    {copiedYoutubeField === 'description' ? 'Copied' : 'Copy Full'}
-                                                </button>
-                                            )}
-                                        </div>
-                                        <pre className="text-xs text-slate-700 bg-slate-50 border border-slate-100 rounded-lg p-3 whitespace-pre-wrap break-words font-mono leading-relaxed">
-                                            {video.youtube_ai_description_text || 'No description draft generated yet.'}
-                                        </pre>
-                                    </div>
-
-                                    <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                                        <div className="flex items-center justify-between gap-2 mb-2">
-                                            <h3 className="text-sm font-semibold text-slate-800">Description History (Restore)</h3>
-                                            {loadingDescriptionHistory && <Loader2 size={14} className="animate-spin text-slate-400" />}
-                                        </div>
-                                        {descriptionHistory.length === 0 ? (
-                                            <p className="text-sm text-slate-500">No archived descriptions yet. Publishing a draft will archive the current description first.</p>
-                                        ) : (
-                                            <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                                                {descriptionHistory.map((rev) => (
-                                                    <div key={rev.id} className="rounded-lg border border-slate-100 p-2.5 bg-slate-50/60">
-                                                        <div className="flex items-start justify-between gap-2">
-                                                            <div className="min-w-0">
-                                                                <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                                                                    <span className="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-slate-700 font-medium">
-                                                                        {rev.source}
-                                                                    </span>
-                                                                    <span className="text-slate-500">
-                                                                        {new Date(rev.created_at).toLocaleString()}
-                                                                    </span>
-                                                                    {rev.ai_model && (
-                                                                        <span className="px-1.5 py-0.5 rounded bg-purple-50 border border-purple-100 text-purple-700">
-                                                                            {rev.ai_model}
-                                                                        </span>
-                                                                    )}
-                                                                </div>
-                                                                {rev.note && (
-                                                                    <p className="mt-1 text-[11px] text-slate-500">{rev.note}</p>
-                                                                )}
-                                                            </div>
-                                                            <button
-                                                                onClick={() => handleRestoreDescriptionRevision(rev)}
-                                                                disabled={restoringDescriptionRevisionId === rev.id}
-                                                                className="shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 disabled:opacity-50"
-                                                            >
-                                                                {restoringDescriptionRevisionId === rev.id ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}
-                                                                Restore
-                                                            </button>
-                                                        </div>
-                                                        <pre className="mt-2 text-[11px] text-slate-700 whitespace-pre-wrap break-words font-mono leading-relaxed max-h-24 overflow-y-auto">
-                                                            {rev.description_text}
-                                                        </pre>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        )}
-                                    </div>
-                                </>
-                            )}
-                        </div>
+                    {activeTab === 'youtube' && video && (
+                        <YoutubeTab
+                            video={video}
+                            videoId={Number(id)}
+                            segments={segments}
+                            isYoutubeMedia={isYoutubeMedia}
+                            isActive={activeTab === 'youtube'}
+                            onVideoUpdated={setVideo}
+                            onSeek={handleSeek}
+                        />
                     )}
                 </div>
 
@@ -7645,47 +6221,40 @@ export function VideoDetailPage() {
                 ) : activeTab === 'optimize' ? (
                     renderTranscriptOptimizationWorkbench()
                 ) : activeTab === 'clone' ? (
-                    <CloneWorkbenchPanel
+                    <CloneTab
                         video={video}
                         segmentsCount={segments.length}
-                        cloneEngineKey={cloneEngineKey}
-                        onCloneEngineKeyChange={setCloneEngineKey}
+                        videoId={Number(id)}
+                        isActive={activeTab === 'clone'}
+                    />
+                ) : activeTab === 'chat' ? (
+                    <EpisodeChatWorkbench
+                        videoId={Number(id)}
                         cloneEngines={cloneEngines}
-                        loadingCloneEngines={loadingCloneEngines}
-                        cloneEnginesError={cloneEnginesError}
-                        cloneUsesOllama={cloneUsesOllama}
-                        cloneOllamaModel={cloneOllamaModel}
-                        onCloneOllamaModelChange={setCloneOllamaModel}
                         cloneOllamaModels={cloneOllamaModels}
-                        loadingCloneOllamaModels={loadingCloneOllamaModels}
-                        cloneOllamaModelsError={cloneOllamaModelsError}
-                        detectingCloneConcepts={detectingCloneConcepts}
-                        onDetectConcepts={() => void handleDetectCloneConcepts()}
-                        cloneConcepts={cloneConcepts}
-                        cloneConceptsText={cloneConceptsText}
-                        onCloneConceptsTextChange={setCloneConceptsText}
-                        cloneExcludedReferencesText={cloneExcludedReferencesText}
-                        onCloneExcludedReferencesTextChange={setCloneExcludedReferencesText}
-                        cloneStylePrompt={cloneStylePrompt}
-                        onCloneStylePromptChange={setCloneStylePrompt}
-                        cloneNotes={cloneNotes}
-                        onCloneNotesChange={setCloneNotes}
-                        cloneBatchSize={cloneBatchSize}
-                        onCloneBatchSizeChange={setCloneBatchSize}
-                        generatingClone={generatingClone}
-                        onGenerate={() => void handleGenerateEpisodeClone()}
-                        cloneJobs={cloneJobs}
-                        loadingCloneJobs={loadingCloneJobs}
-                        cloneJobsError={cloneJobsError}
-                        selectedCloneJobId={selectedCloneJobId}
-                        onSelectCloneJob={setSelectedCloneJobId}
-                        onLoadCloneVariantInputs={loadCloneVariantInputs}
-                        cloneDraft={cloneDraftResult}
-                        copiedCloneScript={copiedCloneScript}
-                        onCopyCloneScript={() => void handleCopyCloneScript()}
-                        cloneJobMatchesVisibleInputs={cloneJobMatchesVisibleInputs}
-                        formatViewMetric={formatViewMetric}
-                        formatTime={formatTime}
+                        onCitationClick={(citation: EpisodeChatCitation) => {
+                            const citationVideoId = Number(citation.video_id || 0);
+                            const jumpTime = Number(citation.start_time || 0);
+                            const primarySegmentId = Array.isArray(citation.segment_ids) ? Number(citation.segment_ids[0] || 0) : 0;
+                            if (citationVideoId > 0 && citationVideoId !== Number(id)) {
+                                const params = new URLSearchParams();
+                                params.set('tab', 'chat');
+                                if (Number.isFinite(jumpTime) && jumpTime >= 0) {
+                                    params.set('t', String(Math.floor(jumpTime)));
+                                }
+                                if (primarySegmentId > 0) {
+                                    params.set('segment_id', String(primarySegmentId));
+                                }
+                                navigate(`/video/${citationVideoId}?${params.toString()}`);
+                                return;
+                            }
+                            handleSeek(jumpTime);
+                            if (primarySegmentId > 0) {
+                                scrollTranscriptToSegment(primarySegmentId);
+                            } else {
+                                scrollTranscriptToTime(jumpTime);
+                            }
+                        }}
                     />
                 ) : activeTab === 'reconstruction' && isUploadedMedia ? (
                     renderReconstructionStudio()
@@ -8412,22 +6981,12 @@ export function VideoDetailPage() {
                 <SpeakerModal
                     speaker={selectedSpeaker}
                     initialSample={initialSample || undefined}
-                    onClose={() => { setSelectedSpeaker(null); setInitialSample(null); }}
+                    onClose={closeSpeakerModal}
                     onUpdate={(updatedSpeaker) => {
-                        speakerDetailCacheRef.current.set(updatedSpeaker.id, updatedSpeaker);
-                        setSelectedSpeaker(updatedSpeaker);
-                        // Update segments to reflect new name
-                        setSegments(prev => prev.map(s =>
-                            s.speaker_id === updatedSpeaker.id
-                                ? { ...s, speaker: updatedSpeaker.name }
-                                : s
-                        ));
+                        handleSpeakerListUpdated(updatedSpeaker);
                     }}
                     onMerge={() => {
-                        // Re-fetch segments to reflect merged speaker assignments
-                        if (id) {
-                            api.get<TranscriptSegment[]>(`/videos/${id}/segments`).then(res => setSegments(res.data));
-                        }
+                        handleSpeakerListMerged();
                     }}
                 />
             )}
@@ -8435,7 +6994,7 @@ export function VideoDetailPage() {
             {/* Assign Speaker Popup (for segments with no speaker) */}
             {assignPopup && (
                 <>
-                    <div className="fixed inset-0 z-40" onClick={() => setAssignPopup(null)} />
+                    <div className="fixed inset-0 z-40" onClick={closeAssignPopup} />
                     <div
                         className="fixed z-50 bg-white rounded-xl shadow-2xl border border-slate-200 w-72 overflow-hidden"
                         style={{ left: assignPopup.x, top: assignPopup.y }}

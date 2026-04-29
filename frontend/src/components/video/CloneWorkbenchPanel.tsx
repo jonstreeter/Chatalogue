@@ -1,5 +1,6 @@
 import type { EpisodeCloneConceptsResponse, EpisodeCloneEngine, EpisodeCloneGenerateResponse, EpisodeCloneJob, Video } from '../../types';
 import { Bot, Clapperboard, Copy, Loader2, Radar, RotateCcw, ShieldBan, Sparkles } from 'lucide-react';
+import { formatTime, formatViewMetric } from '../../lib/formatters';
 
 type Props = {
   video: Video | null;
@@ -40,8 +41,6 @@ type Props = {
   copiedCloneScript: boolean;
   onCopyCloneScript: () => void;
   cloneJobMatchesVisibleInputs: (job: EpisodeCloneJob | null | undefined) => boolean;
-  formatViewMetric: (value?: number | null, fractionDigits?: number) => string;
-  formatTime: (seconds: number) => string;
 };
 
 const splitLines = (value: string) => value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
@@ -53,7 +52,7 @@ export function CloneWorkbenchPanel({
   onCloneConceptsTextChange, cloneExcludedReferencesText, onCloneExcludedReferencesTextChange, cloneStylePrompt,
   onCloneStylePromptChange, cloneBatchSize, onCloneBatchSizeChange, generatingClone, onGenerate, cloneJobs,
   loadingCloneJobs, cloneJobsError, selectedCloneJobId, onSelectCloneJob, onLoadCloneVariantInputs, cloneDraft,
-  copiedCloneScript, onCopyCloneScript, cloneJobMatchesVisibleInputs, formatViewMetric, formatTime,
+  copiedCloneScript, onCopyCloneScript, cloneJobMatchesVisibleInputs,
 }: Props) {
   const selectedJob = cloneJobs.find((job) => job.job_id === selectedCloneJobId) || cloneJobs[0] || null;
   const selectedEngine = cloneEngines.find((engine) => engine.key === cloneEngineKey) || cloneEngines[0] || null;
