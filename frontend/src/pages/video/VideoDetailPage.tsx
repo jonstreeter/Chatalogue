@@ -3,7 +3,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import YouTube from 'react-youtube';
 import api from '../../lib/api';
 import { toApiUrl } from '../../lib/api';
-import type { Video, TranscriptSegment, Clip, Speaker, FunnyMoment, ReconstructionWorkbench, Job, WorkbenchTaskProgress, CleanupWorkbench, ClearVoiceInstallInfo, ClearVoiceTestResult, EpisodeChatCitation, TranscriptQuality, TranscriptRollbackOption, TranscriptRestoreResponse, TranscriptGoldWindow, TranscriptEvaluationResult, TranscriptEvaluationReview, TranscriptEvaluationBatchResponse, TranscriptRepairQueueResponse, TranscriptDiarizationRebuildQueueResponse, TranscriptRetranscriptionQueueResponse } from '../../types';
+import type { Video, TranscriptSegment, Clip, Speaker, ReconstructionWorkbench, Job, WorkbenchTaskProgress, CleanupWorkbench, ClearVoiceInstallInfo, ClearVoiceTestResult, EpisodeChatCitation, TranscriptQuality, TranscriptRollbackOption, TranscriptRestoreResponse, TranscriptGoldWindow, TranscriptEvaluationResult, TranscriptEvaluationReview, TranscriptEvaluationBatchResponse, TranscriptRepairQueueResponse, TranscriptDiarizationRebuildQueueResponse, TranscriptRetranscriptionQueueResponse } from '../../types';
 import { Loader2, ArrowLeft, FileText, Scissors, Users, X, CheckCircle2, Play, Pause, Plus, Mic, Search, ChevronUp, ChevronDown, GitMerge, RotateCcw, Eraser, AudioLines, Smile, RefreshCw, Bot, Pencil, Save, XCircle, Download, PlayCircle, Clock, Sparkles, Clapperboard, CircleHelp, MessageSquareText, type LucideIcon } from 'lucide-react';
 import { SpeakerModal } from '../../components/SpeakerModal';
 import { EpisodeChatWorkbench } from '../../components/video/EpisodeChatWorkbench';
@@ -71,7 +71,8 @@ export function VideoDetailPage() {
     // Data State
     const [video, setVideo] = useState<Video | null>(null);
     const [segments, setSegments] = useState<TranscriptSegment[]>([]);
-    const [funnyMoments, setFunnyMoments] = useState<FunnyMoment[]>([]);
+    const funnyMoments = useTranscriptStore((s) => s.funnyMoments);
+    const setFunnyMoments = useTranscriptStore((s) => s.setFunnyMoments);
     const [loading, setLoading] = useState(true);
 
     // UI State
@@ -112,26 +113,28 @@ export function VideoDetailPage() {
     const [startingTranscription, setStartingTranscription] = useState(false);
 
     // Search State
-    const [searchQuery, setSearchQuery] = useState('');
-    const [deepLinkedSegmentId, setDeepLinkedSegmentId] = useState<number | null>(null);
-    const [searchMatchIndex, setSearchMatchIndex] = useState(0);
-    const [followPlayback, setFollowPlayback] = useState(true);
-    const [loadingFunnyMoments, setLoadingFunnyMoments] = useState(false);
-    const [detectingFunnyMoments, setDetectingFunnyMoments] = useState(false);
-    const [funnyDrawerOpen, setFunnyDrawerOpen] = useState(false);
-    const [explainingFunnyMoments, setExplainingFunnyMoments] = useState(false);
-    const [showGlobalHumorContext, setShowGlobalHumorContext] = useState(false);
-    const [expandedFunnySummaryIds, setExpandedFunnySummaryIds] = useState<Set<number>>(new Set());
-    const [funnyTaskProgress, setFunnyTaskProgress] = useState<{
-        video_id: number;
-        task?: 'detect' | 'explain' | string;
-        status: 'idle' | 'running' | 'completed' | 'error' | string;
-        stage?: string | null;
-        message?: string | null;
-        percent?: number | null;
-        current?: number | null;
-        total?: number | null;
-    } | null>(null);
+    const searchQuery = useTranscriptStore((s) => s.searchQuery);
+    const deepLinkedSegmentId = useTranscriptStore((s) => s.deepLinkedSegmentId);
+    const searchMatchIndex = useTranscriptStore((s) => s.searchMatchIndex);
+    const followPlayback = useTranscriptStore((s) => s.followPlayback);
+    const loadingFunnyMoments = useTranscriptStore((s) => s.loadingFunnyMoments);
+    const detectingFunnyMoments = useTranscriptStore((s) => s.detectingFunnyMoments);
+    const funnyDrawerOpen = useTranscriptStore((s) => s.funnyDrawerOpen);
+    const explainingFunnyMoments = useTranscriptStore((s) => s.explainingFunnyMoments);
+    const showGlobalHumorContext = useTranscriptStore((s) => s.showGlobalHumorContext);
+    const expandedFunnySummaryIds = useTranscriptStore((s) => s.expandedFunnySummaryIds);
+    const funnyTaskProgress = useTranscriptStore((s) => s.funnyTaskProgress);
+    const setSearchQuery = useTranscriptStore((s) => s.setSearchQuery);
+    const setDeepLinkedSegmentId = useTranscriptStore((s) => s.setDeepLinkedSegmentId);
+    const setSearchMatchIndex = useTranscriptStore((s) => s.setSearchMatchIndex);
+    const setFollowPlayback = useTranscriptStore((s) => s.setFollowPlayback);
+    const setLoadingFunnyMoments = useTranscriptStore((s) => s.setLoadingFunnyMoments);
+    const setDetectingFunnyMoments = useTranscriptStore((s) => s.setDetectingFunnyMoments);
+    const setFunnyDrawerOpen = useTranscriptStore((s) => s.setFunnyDrawerOpen);
+    const setExplainingFunnyMoments = useTranscriptStore((s) => s.setExplainingFunnyMoments);
+    const setShowGlobalHumorContext = useTranscriptStore((s) => s.setShowGlobalHumorContext);
+    const setExpandedFunnySummaryIds = useTranscriptStore((s) => s.setExpandedFunnySummaryIds);
+    const setFunnyTaskProgress = useTranscriptStore((s) => s.setFunnyTaskProgress);
 
     // Clone store — only the values VideoDetailPage itself needs (chat sidebar + EpisodeChatWorkbench).
     const cloneEngines = useCloneStore((s) => s.cloneEngines);
@@ -139,10 +142,14 @@ export function VideoDetailPage() {
     const cloneUsesOllama = useCloneUsesOllama();
     const cloneEngineKey = useCloneStore((s) => s.cloneEngineKey);
 
-    const [editingSegmentId, setEditingSegmentId] = useState<number | null>(null);
-    const [editingSegmentWords, setEditingSegmentWords] = useState<string[]>([]);
-    const [editingLoopSegment, setEditingLoopSegment] = useState(false);
-    const [savingSegmentEdit, setSavingSegmentEdit] = useState(false);
+    const editingSegmentId = useTranscriptStore((s) => s.editingSegmentId);
+    const editingSegmentWords = useTranscriptStore((s) => s.editingSegmentWords);
+    const editingLoopSegment = useTranscriptStore((s) => s.editingLoopSegment);
+    const savingSegmentEdit = useTranscriptStore((s) => s.savingSegmentEdit);
+    const setEditingSegmentId = useTranscriptStore((s) => s.setEditingSegmentId);
+    const setEditingSegmentWords = useTranscriptStore((s) => s.setEditingSegmentWords);
+    const setEditingLoopSegment = useTranscriptStore((s) => s.setEditingLoopSegment);
+    const setSavingSegmentEdit = useTranscriptStore((s) => s.setSavingSegmentEdit);
     const editingClipId = useClipsStore((s) => s.editingClipId);
     const clipEditorDraft = useClipsStore((s) => s.clipEditorDraft);
     const clipPreviewLoop = useClipsStore((s) => s.clipPreviewLoop);

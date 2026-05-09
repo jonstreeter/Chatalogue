@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import type {
+    FunnyMoment,
     TranscriptQuality,
     TranscriptRollbackOption,
     TranscriptGoldWindow,
@@ -16,6 +17,31 @@ function resolveValue<T>(value: SetStateValue<T>, previous: T): T {
 }
 
 export interface TranscriptState {
+    funnyMoments: FunnyMoment[];
+    searchQuery: string;
+    deepLinkedSegmentId: number | null;
+    searchMatchIndex: number;
+    followPlayback: boolean;
+    loadingFunnyMoments: boolean;
+    detectingFunnyMoments: boolean;
+    funnyDrawerOpen: boolean;
+    explainingFunnyMoments: boolean;
+    showGlobalHumorContext: boolean;
+    expandedFunnySummaryIds: Set<number>;
+    funnyTaskProgress: {
+        video_id: number;
+        task?: 'detect' | 'explain' | string;
+        status: 'idle' | 'running' | 'completed' | 'error' | string;
+        stage?: string | null;
+        message?: string | null;
+        percent?: number | null;
+        current?: number | null;
+        total?: number | null;
+    } | null;
+    editingSegmentId: number | null;
+    editingSegmentWords: string[];
+    editingLoopSegment: boolean;
+    savingSegmentEdit: boolean;
     transcriptQuality: TranscriptQuality | null;
     loadingTranscriptQuality: boolean;
     transcriptQualityError: string | null;
@@ -49,6 +75,22 @@ export interface TranscriptState {
     diarizationBenchmarkSensitivity: 'aggressive' | 'balanced' | 'conservative';
     diarizationBenchmarkThreshold: string;
 
+    setFunnyMoments: (value: FunnyMoment[]) => void;
+    setSearchQuery: (value: string) => void;
+    setDeepLinkedSegmentId: (value: number | null) => void;
+    setSearchMatchIndex: (value: SetStateValue<number>) => void;
+    setFollowPlayback: (value: boolean) => void;
+    setLoadingFunnyMoments: (value: boolean) => void;
+    setDetectingFunnyMoments: (value: boolean) => void;
+    setFunnyDrawerOpen: (value: SetStateValue<boolean>) => void;
+    setExplainingFunnyMoments: (value: boolean) => void;
+    setShowGlobalHumorContext: (value: SetStateValue<boolean>) => void;
+    setExpandedFunnySummaryIds: (value: SetStateValue<Set<number>>) => void;
+    setFunnyTaskProgress: (value: TranscriptState['funnyTaskProgress']) => void;
+    setEditingSegmentId: (value: number | null) => void;
+    setEditingSegmentWords: (value: SetStateValue<string[]>) => void;
+    setEditingLoopSegment: (value: boolean) => void;
+    setSavingSegmentEdit: (value: boolean) => void;
     setTranscriptQuality: (value: TranscriptQuality | null) => void;
     setLoadingTranscriptQuality: (value: boolean) => void;
     setTranscriptQualityError: (value: string | null) => void;
@@ -85,6 +127,22 @@ export interface TranscriptState {
 }
 
 const initialTranscriptState = {
+    funnyMoments: [],
+    searchQuery: '',
+    deepLinkedSegmentId: null,
+    searchMatchIndex: 0,
+    followPlayback: true,
+    loadingFunnyMoments: false,
+    detectingFunnyMoments: false,
+    funnyDrawerOpen: false,
+    explainingFunnyMoments: false,
+    showGlobalHumorContext: false,
+    expandedFunnySummaryIds: new Set<number>(),
+    funnyTaskProgress: null,
+    editingSegmentId: null,
+    editingSegmentWords: [],
+    editingLoopSegment: false,
+    savingSegmentEdit: false,
     transcriptQuality: null,
     loadingTranscriptQuality: false,
     transcriptQualityError: null,
@@ -123,6 +181,22 @@ export const useTranscriptStore = create<TranscriptState>()(
     devtools(
         (set, get) => ({
             ...initialTranscriptState,
+            setFunnyMoments: (value) => set({ funnyMoments: value }, false, 'setFunnyMoments'),
+            setSearchQuery: (value) => set({ searchQuery: value }, false, 'setSearchQuery'),
+            setDeepLinkedSegmentId: (value) => set({ deepLinkedSegmentId: value }, false, 'setDeepLinkedSegmentId'),
+            setSearchMatchIndex: (value) => set({ searchMatchIndex: resolveValue(value, get().searchMatchIndex) }, false, 'setSearchMatchIndex'),
+            setFollowPlayback: (value) => set({ followPlayback: value }, false, 'setFollowPlayback'),
+            setLoadingFunnyMoments: (value) => set({ loadingFunnyMoments: value }, false, 'setLoadingFunnyMoments'),
+            setDetectingFunnyMoments: (value) => set({ detectingFunnyMoments: value }, false, 'setDetectingFunnyMoments'),
+            setFunnyDrawerOpen: (value) => set({ funnyDrawerOpen: resolveValue(value, get().funnyDrawerOpen) }, false, 'setFunnyDrawerOpen'),
+            setExplainingFunnyMoments: (value) => set({ explainingFunnyMoments: value }, false, 'setExplainingFunnyMoments'),
+            setShowGlobalHumorContext: (value) => set({ showGlobalHumorContext: resolveValue(value, get().showGlobalHumorContext) }, false, 'setShowGlobalHumorContext'),
+            setExpandedFunnySummaryIds: (value) => set({ expandedFunnySummaryIds: resolveValue(value, get().expandedFunnySummaryIds) }, false, 'setExpandedFunnySummaryIds'),
+            setFunnyTaskProgress: (value) => set({ funnyTaskProgress: value }, false, 'setFunnyTaskProgress'),
+            setEditingSegmentId: (value) => set({ editingSegmentId: value }, false, 'setEditingSegmentId'),
+            setEditingSegmentWords: (value) => set({ editingSegmentWords: resolveValue(value, get().editingSegmentWords) }, false, 'setEditingSegmentWords'),
+            setEditingLoopSegment: (value) => set({ editingLoopSegment: value }, false, 'setEditingLoopSegment'),
+            setSavingSegmentEdit: (value) => set({ savingSegmentEdit: value }, false, 'setSavingSegmentEdit'),
             setTranscriptQuality: (value) => set({ transcriptQuality: value }, false, 'setTranscriptQuality'),
             setLoadingTranscriptQuality: (value) => set({ loadingTranscriptQuality: value }, false, 'setLoadingTranscriptQuality'),
             setTranscriptQualityError: (value) => set({ transcriptQualityError: value }, false, 'setTranscriptQualityError'),
