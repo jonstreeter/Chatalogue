@@ -241,6 +241,13 @@ export function VideoDetailPage() {
     const setQueueingFullRetranscription = useTranscriptStore((s) => s.setQueueingFullRetranscription);
     const setDiarizationBenchmarkSensitivity = useTranscriptStore((s) => s.setDiarizationBenchmarkSensitivity);
     const setDiarizationBenchmarkThreshold = useTranscriptStore((s) => s.setDiarizationBenchmarkThreshold);
+    const fetchStoreFunnyMoments = useTranscriptStore((s) => s.fetchFunnyMoments);
+    const fetchStoreFunnyTaskProgress = useTranscriptStore((s) => s.fetchFunnyTaskProgress);
+    const fetchStoreTranscriptQuality = useTranscriptStore((s) => s.fetchTranscriptQuality);
+    const fetchStoreTranscriptRollbackOptions = useTranscriptStore((s) => s.fetchTranscriptRollbackOptions);
+    const fetchStoreTranscriptGoldWindows = useTranscriptStore((s) => s.fetchTranscriptGoldWindows);
+    const fetchStoreTranscriptEvaluationResults = useTranscriptStore((s) => s.fetchTranscriptEvaluationResults);
+    const fetchStoreEvaluationReviews = useTranscriptStore((s) => s.fetchEvaluationReviews);
     const queueingVoiceFixer = useCleanupStore((s) => s.queueingVoiceFixer);
     const queueingReconstruction = useReconstructionStore((s) => s.queueingReconstruction);
     const auxiliaryJobs = useWorkbenchStore((s) => s.auxiliaryJobs);
@@ -428,26 +435,12 @@ export function VideoDetailPage() {
     };
     const fetchFunnyMoments = async () => {
         if (!id) return;
-        setLoadingFunnyMoments(true);
-        try {
-            const res = await api.get<FunnyMoment[]>(`/videos/${id}/funny-moments`);
-            setFunnyMoments(res.data);
-        } catch (e) {
-            console.error('Failed to fetch funny moments:', e);
-            setFunnyMoments([]);
-        } finally {
-            setLoadingFunnyMoments(false);
-        }
+        await fetchStoreFunnyMoments(Number(id));
     };
 
     const fetchFunnyTaskProgress = async () => {
         if (!id) return;
-        try {
-            const res = await api.get(`/videos/${id}/funny-moments/progress`);
-            setFunnyTaskProgress(res.data || null);
-        } catch {
-            // Ignore transient polling failures.
-        }
+        await fetchStoreFunnyTaskProgress(Number(id));
     };
 
     const fetchVideoMeta = async () => {
@@ -459,86 +452,23 @@ export function VideoDetailPage() {
 
 
     const fetchTranscriptQuality = async (videoId: number, signal?: AbortSignal) => {
-        setLoadingTranscriptQuality(true);
-        setTranscriptQualityError(null);
-        try {
-            const res = await api.get<TranscriptQuality>(`/videos/${videoId}/transcript-quality`, { signal });
-            if (signal?.aborted) return;
-            setTranscriptQuality(res.data);
-        } catch (e: any) {
-            if (signal?.aborted) return;
-            console.error('Failed to fetch transcript quality:', e);
-            setTranscriptQuality(null);
-            setTranscriptQualityError(e?.response?.data?.detail || 'Failed to evaluate transcript quality');
-        } finally {
-            if (!signal?.aborted) {
-                setLoadingTranscriptQuality(false);
-            }
-        }
+        await fetchStoreTranscriptQuality(videoId, signal);
     };
 
     const fetchTranscriptRollbackOptions = async (videoId: number, signal?: AbortSignal) => {
-        setLoadingTranscriptRollbackOptions(true);
-        try {
-            const res = await api.get<TranscriptRollbackOption[]>(`/videos/${videoId}/transcript-rollback-options`, { signal });
-            if (signal?.aborted) return;
-            setTranscriptRollbackOptions(res.data || []);
-        } catch (e: any) {
-            if (signal?.aborted) return;
-            console.error('Failed to fetch transcript rollback options:', e);
-            setTranscriptRollbackOptions([]);
-        } finally {
-            if (!signal?.aborted) {
-                setLoadingTranscriptRollbackOptions(false);
-            }
-        }
+        await fetchStoreTranscriptRollbackOptions(videoId, signal);
     };
 
     const fetchTranscriptGoldWindows = async (videoId: number, signal?: AbortSignal) => {
-        setLoadingTranscriptGoldWindows(true);
-        setTranscriptGoldWindowsError(null);
-        try {
-            const res = await api.get<TranscriptGoldWindow[]>(`/videos/${videoId}/transcript-gold-windows`, { signal });
-            if (signal?.aborted) return;
-            setTranscriptGoldWindows(res.data || []);
-        } catch (e: any) {
-            if (signal?.aborted) return;
-            console.error('Failed to fetch transcript gold windows:', e);
-            setTranscriptGoldWindows([]);
-            setTranscriptGoldWindowsError(e?.response?.data?.detail || 'Failed to load transcript benchmark windows');
-        } finally {
-            if (!signal?.aborted) {
-                setLoadingTranscriptGoldWindows(false);
-            }
-        }
+        await fetchStoreTranscriptGoldWindows(videoId, signal);
     };
 
     const fetchTranscriptEvaluationResults = async (videoId: number, signal?: AbortSignal) => {
-        setLoadingTranscriptEvaluationResults(true);
-        setTranscriptEvaluationError(null);
-        try {
-            const res = await api.get<TranscriptEvaluationResult[]>(`/videos/${videoId}/transcript-evaluation-results`, { signal });
-            if (signal?.aborted) return;
-            setTranscriptEvaluationResults(res.data || []);
-        } catch (e: any) {
-            if (signal?.aborted) return;
-            console.error('Failed to fetch transcript evaluation results:', e);
-            setTranscriptEvaluationResults([]);
-            setTranscriptEvaluationError(e?.response?.data?.detail || 'Failed to load transcript evaluation results');
-        } finally {
-            if (!signal?.aborted) {
-                setLoadingTranscriptEvaluationResults(false);
-            }
-        }
+        await fetchStoreTranscriptEvaluationResults(videoId, signal);
     };
 
     const fetchEvaluationReviews = async (resultId: number) => {
-        try {
-            const res = await api.get<TranscriptEvaluationReview[]>(`/transcript-evaluation-results/${resultId}/reviews`);
-            setEvaluationReviewsByResultId((current) => ({ ...current, [resultId]: res.data || [] }));
-        } catch (e: any) {
-            console.error('Failed to fetch transcript evaluation reviews:', e);
-        }
+        await fetchStoreEvaluationReviews(resultId);
     };
 
     const fetchData = async () => {
