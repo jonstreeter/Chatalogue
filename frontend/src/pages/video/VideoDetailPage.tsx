@@ -3160,7 +3160,9 @@ export function VideoDetailPage() {
                 {/* Content Area */}
                 <div className="flex-1 overflow-hidden relative bg-slate-50/50">
                     {activeTab === 'transcript' && (
-                        <div className="h-full flex flex-col">
+                        <TranscriptTab
+                            renderSidebar={() => (
+                                <div className="h-full flex flex-col">
                             {/* Search Bar */}
                             {segments.length > 0 && (
                                 <div className="p-2 border-b border-slate-100 bg-white/80 backdrop-blur-sm shrink-0">
@@ -3914,7 +3916,10 @@ export function VideoDetailPage() {
                                     })
                                 )}
                             </div>
-                        </div>
+                                </div>
+                            )}
+                            renderFunnyMomentsOverlay={() => null}
+                        />
                     )}
                     {activeTab === 'optimize' && (
                         <div className="h-full overflow-y-auto p-4">
