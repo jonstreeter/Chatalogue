@@ -3,7 +3,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import YouTube from 'react-youtube';
 import api from '../../lib/api';
 import { toApiUrl } from '../../lib/api';
-import type { Video, TranscriptSegment, Clip, Speaker, ReconstructionWorkbench, Job, WorkbenchTaskProgress, CleanupWorkbench, ClearVoiceInstallInfo, ClearVoiceTestResult, EpisodeChatCitation, TranscriptQuality, TranscriptRollbackOption, TranscriptRestoreResponse, TranscriptGoldWindow, TranscriptEvaluationResult, TranscriptEvaluationReview, TranscriptEvaluationBatchResponse, TranscriptRepairQueueResponse, TranscriptDiarizationRebuildQueueResponse, TranscriptRetranscriptionQueueResponse } from '../../types';
+import type { Video, TranscriptSegment, Clip, Speaker, ReconstructionWorkbench, Job, WorkbenchTaskProgress, CleanupWorkbench, ClearVoiceInstallInfo, ClearVoiceTestResult, EpisodeChatCitation, TranscriptQuality, TranscriptRollbackOption, TranscriptEvaluationResult } from '../../types';
 import { Loader2, ArrowLeft, FileText, Scissors, Users, X, CheckCircle2, Play, Pause, Plus, Mic, Search, ChevronUp, ChevronDown, GitMerge, RotateCcw, Eraser, AudioLines, Smile, RefreshCw, Bot, Pencil, Save, XCircle, Download, PlayCircle, Clock, Sparkles, Clapperboard, CircleHelp, MessageSquareText, type LucideIcon } from 'lucide-react';
 import { SpeakerModal } from '../../components/SpeakerModal';
 import { EpisodeChatWorkbench } from '../../components/video/EpisodeChatWorkbench';
@@ -208,20 +208,6 @@ export function VideoDetailPage() {
     const setTranscriptQuality = useTranscriptStore((s) => s.setTranscriptQuality);
     const setLoadingTranscriptQuality = useTranscriptStore((s) => s.setLoadingTranscriptQuality);
     const setTranscriptQualityError = useTranscriptStore((s) => s.setTranscriptQualityError);
-    const setTranscriptRollbackOptions = useTranscriptStore((s) => s.setTranscriptRollbackOptions);
-    const setLoadingTranscriptRollbackOptions = useTranscriptStore((s) => s.setLoadingTranscriptRollbackOptions);
-    const setRestoringTranscriptRunId = useTranscriptStore((s) => s.setRestoringTranscriptRunId);
-    const setTranscriptGoldWindows = useTranscriptStore((s) => s.setTranscriptGoldWindows);
-    const setLoadingTranscriptGoldWindows = useTranscriptStore((s) => s.setLoadingTranscriptGoldWindows);
-    const setTranscriptGoldWindowsError = useTranscriptStore((s) => s.setTranscriptGoldWindowsError);
-    const setSavingTranscriptGoldWindow = useTranscriptStore((s) => s.setSavingTranscriptGoldWindow);
-    const setEvaluatingTranscript = useTranscriptStore((s) => s.setEvaluatingTranscript);
-    const setTranscriptEvaluationSummary = useTranscriptStore((s) => s.setTranscriptEvaluationSummary);
-    const setTranscriptEvaluationResults = useTranscriptStore((s) => s.setTranscriptEvaluationResults);
-    const setLoadingTranscriptEvaluationResults = useTranscriptStore((s) => s.setLoadingTranscriptEvaluationResults);
-    const setTranscriptEvaluationError = useTranscriptStore((s) => s.setTranscriptEvaluationError);
-    const setReviewingEvaluationResultId = useTranscriptStore((s) => s.setReviewingEvaluationResultId);
-    const setEvaluationReviewsByResultId = useTranscriptStore((s) => s.setEvaluationReviewsByResultId);
     const setGoldWindowLabelDraft = useTranscriptStore((s) => s.setGoldWindowLabelDraft);
     const setGoldWindowStartDraft = useTranscriptStore((s) => s.setGoldWindowStartDraft);
     const setGoldWindowEndDraft = useTranscriptStore((s) => s.setGoldWindowEndDraft);
@@ -231,10 +217,6 @@ export function VideoDetailPage() {
     const setEvaluationReviewVerdictDrafts = useTranscriptStore((s) => s.setEvaluationReviewVerdictDrafts);
     const setEvaluationReviewNotesDrafts = useTranscriptStore((s) => s.setEvaluationReviewNotesDrafts);
     const setEvaluationReviewReviewerDrafts = useTranscriptStore((s) => s.setEvaluationReviewReviewerDrafts);
-    const setQueueingTranscriptRepair = useTranscriptStore((s) => s.setQueueingTranscriptRepair);
-    const setQueueingDiarizationRebuild = useTranscriptStore((s) => s.setQueueingDiarizationRebuild);
-    const setQueueingDiarizationBenchmark = useTranscriptStore((s) => s.setQueueingDiarizationBenchmark);
-    const setQueueingFullRetranscription = useTranscriptStore((s) => s.setQueueingFullRetranscription);
     const setDiarizationBenchmarkSensitivity = useTranscriptStore((s) => s.setDiarizationBenchmarkSensitivity);
     const setDiarizationBenchmarkThreshold = useTranscriptStore((s) => s.setDiarizationBenchmarkThreshold);
     const fetchStoreFunnyMoments = useTranscriptStore((s) => s.fetchFunnyMoments);
@@ -247,6 +229,14 @@ export function VideoDetailPage() {
     const saveStoreSegmentEdit = useTranscriptStore((s) => s.saveSegmentEdit);
     const detectStoreFunnyMoments = useTranscriptStore((s) => s.detectFunnyMoments);
     const explainStoreFunnyMoments = useTranscriptStore((s) => s.explainFunnyMoments);
+    const createStoreTranscriptGoldWindow = useTranscriptStore((s) => s.createTranscriptGoldWindow);
+    const runStoreTranscriptEvaluation = useTranscriptStore((s) => s.runTranscriptEvaluation);
+    const submitStoreTranscriptEvaluationReview = useTranscriptStore((s) => s.submitTranscriptEvaluationReview);
+    const queueStoreTranscriptRepairJob = useTranscriptStore((s) => s.queueTranscriptRepairJob);
+    const queueStoreTranscriptDiarizationRebuildJob = useTranscriptStore((s) => s.queueTranscriptDiarizationRebuildJob);
+    const queueStoreTranscriptDiarizationBenchmarkJob = useTranscriptStore((s) => s.queueTranscriptDiarizationBenchmarkJob);
+    const queueStoreTranscriptRetranscriptionJob = useTranscriptStore((s) => s.queueTranscriptRetranscriptionJob);
+    const restoreStoreTranscriptFromRun = useTranscriptStore((s) => s.restoreTranscriptFromRun);
     const queueingVoiceFixer = useCleanupStore((s) => s.queueingVoiceFixer);
     const queueingReconstruction = useReconstructionStore((s) => s.queueingReconstruction);
     const auxiliaryJobs = useWorkbenchStore((s) => s.auxiliaryJobs);
@@ -1520,170 +1510,41 @@ export function VideoDetailPage() {
 
     const createTranscriptGoldWindow = async () => {
         if (!video) return;
-        const startTime = Number(goldWindowStartDraft);
-        const endTime = Number(goldWindowEndDraft);
-        if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) {
-            alert('Set a valid gold window start/end range.');
-            return;
-        }
-        const referenceText = goldWindowReferenceDraft.trim();
-        if (!referenceText) {
-            alert('Reference transcript text is required for a gold window.');
-            return;
-        }
-        setSavingTranscriptGoldWindow(true);
-        try {
-            await api.post<TranscriptGoldWindow>(`/videos/${video.id}/transcript-gold-windows`, {
-                label: goldWindowLabelDraft.trim() || 'Gold Window',
-                quality_profile: transcriptQuality?.quality_profile || null,
-                language: video.transcript_language || transcriptQuality?.language || null,
-                start_time: startTime,
-                end_time: endTime,
-                reference_text: referenceText,
-                entities: goldWindowEntitiesDraft
-                    .split(',')
-                    .map((item) => item.trim())
-                    .filter(Boolean),
-                notes: goldWindowNotesDraft.trim() || null,
-                active: true,
-            });
-            await fetchTranscriptGoldWindows(video.id);
-            setGoldWindowLabelDraft('Gold Window');
-            setGoldWindowStartDraft('');
-            setGoldWindowEndDraft('');
-            setGoldWindowReferenceDraft('');
-            setGoldWindowEntitiesDraft('');
-            setGoldWindowNotesDraft('');
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to save transcript gold window');
-        } finally {
-            setSavingTranscriptGoldWindow(false);
-        }
+        await createStoreTranscriptGoldWindow(video.id, video.transcript_language);
     };
 
     const runTranscriptEvaluation = async () => {
         if (!video) return;
-        setEvaluatingTranscript(true);
-        setTranscriptEvaluationError(null);
-        try {
-            const res = await api.post<TranscriptEvaluationBatchResponse>(`/videos/${video.id}/transcript-evaluation`);
-            setTranscriptEvaluationSummary(res.data);
-            setTranscriptEvaluationResults(res.data.items || []);
-            for (const item of res.data.items || []) {
-                void fetchEvaluationReviews(item.id);
-            }
-        } catch (e: any) {
-            console.error('Failed to evaluate transcript against gold windows:', e);
-            setTranscriptEvaluationSummary(null);
-            setTranscriptEvaluationError(e?.response?.data?.detail || 'Failed to evaluate transcript');
-            alert(e?.response?.data?.detail || 'Failed to evaluate transcript');
-        } finally {
-            setEvaluatingTranscript(false);
-        }
+        await runStoreTranscriptEvaluation(video.id);
     };
 
     const submitTranscriptEvaluationReview = async (resultId: number) => {
-        const verdict = String(evaluationReviewVerdictDrafts[resultId] || 'same');
-        setReviewingEvaluationResultId(resultId);
-        try {
-            await api.post<TranscriptEvaluationReview>(`/transcript-evaluation-results/${resultId}/review`, {
-                reviewer: (evaluationReviewReviewerDrafts[resultId] || '').trim() || null,
-                verdict,
-                tags: [],
-                notes: (evaluationReviewNotesDrafts[resultId] || '').trim() || null,
-            });
-            await fetchEvaluationReviews(resultId);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to save transcript evaluation review');
-        } finally {
-            setReviewingEvaluationResultId(null);
-        }
+        await submitStoreTranscriptEvaluationReview(resultId);
     };
 
     const queueTranscriptRepairJob = async () => {
         if (!video) return;
-        if (!confirm('Queue the low-risk transcript repair pass for this episode?')) return;
-        setQueueingTranscriptRepair(true);
-        try {
-            const res = await api.post<TranscriptRepairQueueResponse>(`/videos/${video.id}/transcript-repair`, {});
-            alert(`Low-risk repair queued as job ${res.data.job_id}.`);
-            fetchData();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue transcript repair');
-        } finally {
-            setQueueingTranscriptRepair(false);
-        }
+        await queueStoreTranscriptRepairJob(video.id, fetchData);
     };
 
     const queueTranscriptDiarizationRebuildJob = async () => {
         if (!video) return;
-        if (!confirm('Queue a diarization rebuild for this episode? This will reuse the raw transcript but replace speaker segmentation and assignments.')) return;
-        setQueueingDiarizationRebuild(true);
-        try {
-            const res = await api.post<TranscriptDiarizationRebuildQueueResponse>(`/videos/${video.id}/transcript-diarization-rebuild`, {});
-            alert(`Diarization rebuild queued as job ${res.data.job_id}.`);
-            fetchData();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue diarization rebuild');
-        } finally {
-            setQueueingDiarizationRebuild(false);
-        }
+        await queueStoreTranscriptDiarizationRebuildJob(video.id, fetchData);
     };
 
     const queueTranscriptDiarizationBenchmarkJob = async () => {
         if (!video) return;
-        const threshold = Number(diarizationBenchmarkThreshold);
-        if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
-            alert('Set a valid speaker match threshold between 0.0 and 1.0.');
-            return;
-        }
-        if (!confirm(`Queue a diarization benchmark run using ${diarizationBenchmarkSensitivity} sensitivity and threshold ${threshold.toFixed(2)}?`)) return;
-        setQueueingDiarizationBenchmark(true);
-        try {
-            const res = await api.post<TranscriptDiarizationRebuildQueueResponse>(`/videos/${video.id}/transcript-diarization-benchmark`, {
-                force: true,
-                diarization_sensitivity: diarizationBenchmarkSensitivity,
-                speaker_match_threshold: threshold,
-            });
-            alert(`Diarization benchmark queued as job ${res.data.job_id}.`);
-            fetchData();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue diarization benchmark');
-        } finally {
-            setQueueingDiarizationBenchmark(false);
-        }
+        await queueStoreTranscriptDiarizationBenchmarkJob(video.id, fetchData);
     };
 
     const queueTranscriptRetranscriptionJob = async () => {
         if (!video) return;
-        if (!confirm('Queue a full retranscription for this episode? This will force a fresh transcription pass before diarization.')) return;
-        setQueueingFullRetranscription(true);
-        try {
-            const res = await api.post<TranscriptRetranscriptionQueueResponse>(`/videos/${video.id}/transcript-retranscribe`, {});
-            alert(`Full retranscription queued as job ${res.data.job_id}.`);
-            fetchData();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue full retranscription');
-        } finally {
-            setQueueingFullRetranscription(false);
-        }
+        await queueStoreTranscriptRetranscriptionJob(video.id, fetchData);
     };
 
     const restoreTranscriptFromRun = async (runId: number) => {
         if (!video) return;
-        if (!confirm('Restore the transcript from this saved optimization run? The current transcript will be backed up first.')) return;
-        setRestoringTranscriptRunId(runId);
-        try {
-            const res = await api.post<TranscriptRestoreResponse>(`/videos/${video.id}/transcript-runs/${runId}/restore`);
-            await fetchData();
-            await fetchTranscriptQuality(video.id);
-            await fetchTranscriptRollbackOptions(video.id);
-            alert(`Transcript restored from run ${res.data.restored_from_run_id}. New restore run ${res.data.restore_run_id} recorded.`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to restore transcript run');
-        } finally {
-            setRestoringTranscriptRunId(null);
-        }
+        await restoreStoreTranscriptFromRun(video.id, runId, fetchData);
     };
 
 

@@ -10,6 +10,10 @@ import type {
     TranscriptEvaluationResult,
     TranscriptEvaluationReview,
     TranscriptEvaluationBatchResponse,
+    TranscriptRepairQueueResponse,
+    TranscriptDiarizationRebuildQueueResponse,
+    TranscriptRetranscriptionQueueResponse,
+    TranscriptRestoreResponse,
 } from '../types';
 
 type SetStateValue<T> = T | ((previous: T) => T);
@@ -139,6 +143,14 @@ export interface TranscriptState {
     ) => Promise<void>;
     detectFunnyMoments: (videoId: number, force?: boolean) => Promise<void>;
     explainFunnyMoments: (videoId: number, force?: boolean, onVideoMetaChanged?: () => Promise<void>) => Promise<void>;
+    createTranscriptGoldWindow: (videoId: number, language?: string | null) => Promise<void>;
+    runTranscriptEvaluation: (videoId: number) => Promise<void>;
+    submitTranscriptEvaluationReview: (resultId: number) => Promise<void>;
+    queueTranscriptRepairJob: (videoId: number, onQueued?: () => void) => Promise<void>;
+    queueTranscriptDiarizationRebuildJob: (videoId: number, onQueued?: () => void) => Promise<void>;
+    queueTranscriptDiarizationBenchmarkJob: (videoId: number, onQueued?: () => void) => Promise<void>;
+    queueTranscriptRetranscriptionJob: (videoId: number, onQueued?: () => void) => Promise<void>;
+    restoreTranscriptFromRun: (videoId: number, runId: number, onRestored?: () => Promise<void>) => Promise<void>;
     resetTranscriptState: () => void;
 }
 
@@ -450,6 +462,170 @@ export const useTranscriptStore = create<TranscriptState>()(
                 } finally {
                     await get().fetchFunnyTaskProgress(videoId);
                     set({ explainingFunnyMoments: false }, false, 'explainFunnyMoments/settled');
+                }
+            },
+            createTranscriptGoldWindow: async (videoId, language) => {
+                const state = get();
+                const startTime = Number(state.goldWindowStartDraft);
+                const endTime = Number(state.goldWindowEndDraft);
+                if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) {
+                    alert('Set a valid gold window start/end range.');
+                    return;
+                }
+                const referenceText = state.goldWindowReferenceDraft.trim();
+                if (!referenceText) {
+                    alert('Reference transcript text is required for a gold window.');
+                    return;
+                }
+                set({ savingTranscriptGoldWindow: true }, false, 'createTranscriptGoldWindow/pending');
+                try {
+                    await api.post<TranscriptGoldWindow>(`/videos/${videoId}/transcript-gold-windows`, {
+                        label: state.goldWindowLabelDraft.trim() || 'Gold Window',
+                        quality_profile: state.transcriptQuality?.quality_profile || null,
+                        language: language || state.transcriptQuality?.language || null,
+                        start_time: startTime,
+                        end_time: endTime,
+                        reference_text: referenceText,
+                        entities: state.goldWindowEntitiesDraft.split(',').map((item) => item.trim()).filter(Boolean),
+                        notes: state.goldWindowNotesDraft.trim() || null,
+                        active: true,
+                    });
+                    await get().fetchTranscriptGoldWindows(videoId);
+                    set(
+                        {
+                            goldWindowLabelDraft: 'Gold Window',
+                            goldWindowStartDraft: '',
+                            goldWindowEndDraft: '',
+                            goldWindowReferenceDraft: '',
+                            goldWindowEntitiesDraft: '',
+                            goldWindowNotesDraft: '',
+                        },
+                        false,
+                        'createTranscriptGoldWindow/fulfilled'
+                    );
+                } catch (e: any) {
+                    alert(e?.response?.data?.detail || 'Failed to save transcript gold window');
+                } finally {
+                    set({ savingTranscriptGoldWindow: false }, false, 'createTranscriptGoldWindow/settled');
+                }
+            },
+            runTranscriptEvaluation: async (videoId) => {
+                set({ evaluatingTranscript: true, transcriptEvaluationError: null }, false, 'runTranscriptEvaluation/pending');
+                try {
+                    const res = await api.post<TranscriptEvaluationBatchResponse>(`/videos/${videoId}/transcript-evaluation`);
+                    set(
+                        { transcriptEvaluationSummary: res.data, transcriptEvaluationResults: res.data.items || [] },
+                        false,
+                        'runTranscriptEvaluation/fulfilled'
+                    );
+                    for (const item of res.data.items || []) {
+                        void get().fetchEvaluationReviews(item.id);
+                    }
+                } catch (e: any) {
+                    console.error('Failed to evaluate transcript against gold windows:', e);
+                    set(
+                        { transcriptEvaluationSummary: null, transcriptEvaluationError: e?.response?.data?.detail || 'Failed to evaluate transcript' },
+                        false,
+                        'runTranscriptEvaluation/rejected'
+                    );
+                    alert(e?.response?.data?.detail || 'Failed to evaluate transcript');
+                } finally {
+                    set({ evaluatingTranscript: false }, false, 'runTranscriptEvaluation/settled');
+                }
+            },
+            submitTranscriptEvaluationReview: async (resultId) => {
+                const state = get();
+                const verdict = String(state.evaluationReviewVerdictDrafts[resultId] || 'same');
+                set({ reviewingEvaluationResultId: resultId }, false, 'submitTranscriptEvaluationReview/pending');
+                try {
+                    await api.post<TranscriptEvaluationReview>(`/transcript-evaluation-results/${resultId}/review`, {
+                        reviewer: (state.evaluationReviewReviewerDrafts[resultId] || '').trim() || null,
+                        verdict,
+                        tags: [],
+                        notes: (state.evaluationReviewNotesDrafts[resultId] || '').trim() || null,
+                    });
+                    await get().fetchEvaluationReviews(resultId);
+                } catch (e: any) {
+                    alert(e?.response?.data?.detail || 'Failed to save transcript evaluation review');
+                } finally {
+                    set({ reviewingEvaluationResultId: null }, false, 'submitTranscriptEvaluationReview/settled');
+                }
+            },
+            queueTranscriptRepairJob: async (videoId, onQueued) => {
+                if (!confirm('Queue the low-risk transcript repair pass for this episode?')) return;
+                set({ queueingTranscriptRepair: true }, false, 'queueTranscriptRepairJob/pending');
+                try {
+                    const res = await api.post<TranscriptRepairQueueResponse>(`/videos/${videoId}/transcript-repair`, {});
+                    alert(`Low-risk repair queued as job ${res.data.job_id}.`);
+                    onQueued?.();
+                } catch (e: any) {
+                    alert(e?.response?.data?.detail || 'Failed to queue transcript repair');
+                } finally {
+                    set({ queueingTranscriptRepair: false }, false, 'queueTranscriptRepairJob/settled');
+                }
+            },
+            queueTranscriptDiarizationRebuildJob: async (videoId, onQueued) => {
+                if (!confirm('Queue a diarization rebuild for this episode? This will reuse the raw transcript but replace speaker segmentation and assignments.')) return;
+                set({ queueingDiarizationRebuild: true }, false, 'queueTranscriptDiarizationRebuildJob/pending');
+                try {
+                    const res = await api.post<TranscriptDiarizationRebuildQueueResponse>(`/videos/${videoId}/transcript-diarization-rebuild`, {});
+                    alert(`Diarization rebuild queued as job ${res.data.job_id}.`);
+                    onQueued?.();
+                } catch (e: any) {
+                    alert(e?.response?.data?.detail || 'Failed to queue diarization rebuild');
+                } finally {
+                    set({ queueingDiarizationRebuild: false }, false, 'queueTranscriptDiarizationRebuildJob/settled');
+                }
+            },
+            queueTranscriptDiarizationBenchmarkJob: async (videoId, onQueued) => {
+                const state = get();
+                const threshold = Number(state.diarizationBenchmarkThreshold);
+                if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+                    alert('Set a valid speaker match threshold between 0.0 and 1.0.');
+                    return;
+                }
+                if (!confirm(`Queue a diarization benchmark run using ${state.diarizationBenchmarkSensitivity} sensitivity and threshold ${threshold.toFixed(2)}?`)) return;
+                set({ queueingDiarizationBenchmark: true }, false, 'queueTranscriptDiarizationBenchmarkJob/pending');
+                try {
+                    const res = await api.post<TranscriptDiarizationRebuildQueueResponse>(`/videos/${videoId}/transcript-diarization-benchmark`, {
+                        force: true,
+                        diarization_sensitivity: state.diarizationBenchmarkSensitivity,
+                        speaker_match_threshold: threshold,
+                    });
+                    alert(`Diarization benchmark queued as job ${res.data.job_id}.`);
+                    onQueued?.();
+                } catch (e: any) {
+                    alert(e?.response?.data?.detail || 'Failed to queue diarization benchmark');
+                } finally {
+                    set({ queueingDiarizationBenchmark: false }, false, 'queueTranscriptDiarizationBenchmarkJob/settled');
+                }
+            },
+            queueTranscriptRetranscriptionJob: async (videoId, onQueued) => {
+                if (!confirm('Queue a full retranscription for this episode? This will force a fresh transcription pass before diarization.')) return;
+                set({ queueingFullRetranscription: true }, false, 'queueTranscriptRetranscriptionJob/pending');
+                try {
+                    const res = await api.post<TranscriptRetranscriptionQueueResponse>(`/videos/${videoId}/transcript-retranscribe`, {});
+                    alert(`Full retranscription queued as job ${res.data.job_id}.`);
+                    onQueued?.();
+                } catch (e: any) {
+                    alert(e?.response?.data?.detail || 'Failed to queue full retranscription');
+                } finally {
+                    set({ queueingFullRetranscription: false }, false, 'queueTranscriptRetranscriptionJob/settled');
+                }
+            },
+            restoreTranscriptFromRun: async (videoId, runId, onRestored) => {
+                if (!confirm('Restore the transcript from this saved optimization run? The current transcript will be backed up first.')) return;
+                set({ restoringTranscriptRunId: runId }, false, 'restoreTranscriptFromRun/pending');
+                try {
+                    const res = await api.post<TranscriptRestoreResponse>(`/videos/${videoId}/transcript-runs/${runId}/restore`);
+                    await onRestored?.();
+                    await get().fetchTranscriptQuality(videoId);
+                    await get().fetchTranscriptRollbackOptions(videoId);
+                    alert(`Transcript restored from run ${res.data.restored_from_run_id}. New restore run ${res.data.restore_run_id} recorded.`);
+                } catch (e: any) {
+                    alert(e?.response?.data?.detail || 'Failed to restore transcript run');
+                } finally {
+                    set({ restoringTranscriptRunId: null }, false, 'restoreTranscriptFromRun/settled');
                 }
             },
             resetTranscriptState: () => set({ ...initialTranscriptState }, false, 'resetTranscriptState'),
