@@ -3,7 +3,7 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import YouTube from 'react-youtube';
 import api from '../../lib/api';
 import { toApiUrl } from '../../lib/api';
-import type { Video, TranscriptSegment, Clip, Speaker, ReconstructionWorkbench, Job, WorkbenchTaskProgress, CleanupWorkbench, ClearVoiceInstallInfo, ClearVoiceTestResult, EpisodeChatCitation, TranscriptQuality, TranscriptRollbackOption, TranscriptEvaluationResult } from '../../types';
+import type { Video, TranscriptSegment, Clip, Speaker, FunnyMoment, ReconstructionWorkbench, Job, WorkbenchTaskProgress, CleanupWorkbench, ClearVoiceInstallInfo, ClearVoiceTestResult, EpisodeChatCitation, TranscriptQuality, TranscriptRollbackOption, TranscriptEvaluationResult } from '../../types';
 import { Loader2, ArrowLeft, FileText, Scissors, Users, X, CheckCircle2, Play, Pause, Plus, Mic, Search, ChevronUp, ChevronDown, GitMerge, RotateCcw, Eraser, AudioLines, Smile, RefreshCw, Bot, Pencil, Save, XCircle, Download, PlayCircle, Clock, Sparkles, Clapperboard, CircleHelp, MessageSquareText, type LucideIcon } from 'lucide-react';
 import { SpeakerModal } from '../../components/SpeakerModal';
 import { EpisodeChatWorkbench } from '../../components/video/EpisodeChatWorkbench';
