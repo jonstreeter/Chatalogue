@@ -11,10 +11,18 @@ import { CloneTab } from './tabs/CloneTab';
 import { YoutubeTab } from './tabs/YoutubeTab';
 import { SpeakersTab } from './tabs/SpeakersTab';
 import { ClipsTab } from './tabs/ClipsTab';
+import { CleanupTab } from './tabs/CleanupTab';
+import { ClipEditorWorkspace } from './tabs/ClipEditorWorkspace';
+import { OptimizeTab } from './tabs/OptimizeTab';
+import { ReconstructionSidebarTab, ReconstructionTab } from './tabs/ReconstructionTab';
 import { useCloneStore, useCloneUsesOllama } from '../../store/useCloneStore';
 import { useYoutubeStore } from '../../store/useYoutubeStore';
 import { useSpeakersTabStore } from '../../store/useSpeakersTabStore';
 import { useClipsStore } from '../../store/useClipsStore';
+import { useWorkbenchStore } from '../../store/useWorkbenchStore';
+import { useCleanupStore } from '../../store/useCleanupStore';
+import { useReconstructionStore } from '../../store/useReconstructionStore';
+import { useTranscriptStore } from '../../store/useTranscriptStore';
 import { formatTime } from '../../lib/formatters';
 
 type UnifiedPlayer = {
@@ -69,8 +77,6 @@ export function VideoDetailPage() {
     // UI State
     const [activeTab, setActiveTab] = useState<VideoSidebarTab>('transcript');
     const transcriptRef = useRef<HTMLDivElement>(null);
-    const cropPreviewRef = useRef<HTMLDivElement>(null);
-    const clipTimelineRef = useRef<HTMLDivElement>(null);
     const initialJumpDoneRef = useRef(false);
     const initialSeekDoneRef = useRef(false);
     const lastAutoScrollSegIdRef = useRef<number | null>(null);
@@ -139,20 +145,11 @@ export function VideoDetailPage() {
     const [savingSegmentEdit, setSavingSegmentEdit] = useState(false);
     const editingClipId = useClipsStore((s) => s.editingClipId);
     const clipEditorDraft = useClipsStore((s) => s.clipEditorDraft);
-    const clipEditorTokens = useClipsStore((s) => s.clipEditorTokens);
-    const clipEditorRemovedWordKeys = useClipsStore((s) => s.clipEditorRemovedWordKeys);
-    const clipEditorCropTarget = useClipsStore((s) => s.clipEditorCropTarget);
-    const clipEditorDragRect = useClipsStore((s) => s.clipEditorDragRect);
-    const clipTimelineDrag = useClipsStore((s) => s.clipTimelineDrag);
-    const savingClipEdit = useClipsStore((s) => s.savingClipEdit);
     const clipPreviewLoop = useClipsStore((s) => s.clipPreviewLoop);
     const setEditingClipId = useClipsStore((s) => s.setEditingClipId);
     const setClipEditorDraft = useClipsStore((s) => s.setClipEditorDraft);
-    const setClipEditorTokens = useClipsStore((s) => s.setClipEditorTokens);
-    const setClipEditorRemovedWordKeys = useClipsStore((s) => s.setClipEditorRemovedWordKeys);
     const setClipEditorCropTarget = useClipsStore((s) => s.setClipEditorCropTarget);
     const setClipEditorDragRect = useClipsStore((s) => s.setClipEditorDragRect);
-    const setClipTimelineDrag = useClipsStore((s) => s.setClipTimelineDrag);
 
     const selectedSpeaker = useSpeakersTabStore((s) => s.selectedSpeaker);
     const initialSample = useSpeakersTabStore((s) => s.initialSample);
@@ -173,76 +170,97 @@ export function VideoDetailPage() {
     const [redoing, setRedoing] = useState(false);
     const [redoingDiarization, setRedoingDiarization] = useState(false);
     const [consolidatingTranscript, setConsolidatingTranscript] = useState(false);
-    const [transcriptQuality, setTranscriptQuality] = useState<TranscriptQuality | null>(null);
-    const [loadingTranscriptQuality, setLoadingTranscriptQuality] = useState(false);
-    const [transcriptQualityError, setTranscriptQualityError] = useState<string | null>(null);
-    const [transcriptRollbackOptions, setTranscriptRollbackOptions] = useState<TranscriptRollbackOption[]>([]);
-    const [loadingTranscriptRollbackOptions, setLoadingTranscriptRollbackOptions] = useState(false);
-    const [restoringTranscriptRunId, setRestoringTranscriptRunId] = useState<number | null>(null);
-    const [transcriptGoldWindows, setTranscriptGoldWindows] = useState<TranscriptGoldWindow[]>([]);
-    const [loadingTranscriptGoldWindows, setLoadingTranscriptGoldWindows] = useState(false);
-    const [transcriptGoldWindowsError, setTranscriptGoldWindowsError] = useState<string | null>(null);
-    const [savingTranscriptGoldWindow, setSavingTranscriptGoldWindow] = useState(false);
-    const [evaluatingTranscript, setEvaluatingTranscript] = useState(false);
-    const [transcriptEvaluationSummary, setTranscriptEvaluationSummary] = useState<TranscriptEvaluationBatchResponse | null>(null);
-    const [transcriptEvaluationResults, setTranscriptEvaluationResults] = useState<TranscriptEvaluationResult[]>([]);
-    const [loadingTranscriptEvaluationResults, setLoadingTranscriptEvaluationResults] = useState(false);
-    const [transcriptEvaluationError, setTranscriptEvaluationError] = useState<string | null>(null);
-    const [reviewingEvaluationResultId, setReviewingEvaluationResultId] = useState<number | null>(null);
-    const [evaluationReviewsByResultId, setEvaluationReviewsByResultId] = useState<Record<number, TranscriptEvaluationReview[]>>({});
-    const [goldWindowLabelDraft, setGoldWindowLabelDraft] = useState('Gold Window');
-    const [goldWindowStartDraft, setGoldWindowStartDraft] = useState('');
-    const [goldWindowEndDraft, setGoldWindowEndDraft] = useState('');
-    const [goldWindowReferenceDraft, setGoldWindowReferenceDraft] = useState('');
-    const [goldWindowEntitiesDraft, setGoldWindowEntitiesDraft] = useState('');
-    const [goldWindowNotesDraft, setGoldWindowNotesDraft] = useState('');
-    const [evaluationReviewVerdictDrafts, setEvaluationReviewVerdictDrafts] = useState<Record<number, string>>({});
-    const [evaluationReviewNotesDrafts, setEvaluationReviewNotesDrafts] = useState<Record<number, string>>({});
-    const [evaluationReviewReviewerDrafts, setEvaluationReviewReviewerDrafts] = useState<Record<number, string>>({});
-    const [queueingTranscriptRepair, setQueueingTranscriptRepair] = useState(false);
-    const [queueingDiarizationRebuild, setQueueingDiarizationRebuild] = useState(false);
-    const [queueingDiarizationBenchmark, setQueueingDiarizationBenchmark] = useState(false);
-    const [queueingFullRetranscription, setQueueingFullRetranscription] = useState(false);
-    const [diarizationBenchmarkSensitivity, setDiarizationBenchmarkSensitivity] = useState<'aggressive' | 'balanced' | 'conservative'>('balanced');
-    const [diarizationBenchmarkThreshold, setDiarizationBenchmarkThreshold] = useState('0.35');
-    const [queueingVoiceFixer, setQueueingVoiceFixer] = useState(false);
-    const [queueingReconstruction, setQueueingReconstruction] = useState(false);
-    const [auxiliaryJobs, setAuxiliaryJobs] = useState<Job[]>([]);
-    const [workbenchTaskProgress, setWorkbenchTaskProgress] = useState<WorkbenchTaskProgress | null>(null);
-    const [loadingCleanupWorkbench, setLoadingCleanupWorkbench] = useState(false);
-    const [cleanupWorkbench, setCleanupWorkbench] = useState<CleanupWorkbench | null>(null);
-    const [analyzingCleanupWorkbench, setAnalyzingCleanupWorkbench] = useState(false);
-    const [runningClearVoiceModel, setRunningClearVoiceModel] = useState<string | null>(null);
-    const [selectingCleanupCandidateId, setSelectingCleanupCandidateId] = useState<string | null>(null);
-    const [clearVoiceInstallInfo, setClearVoiceInstallInfo] = useState<ClearVoiceInstallInfo | null>(null);
-    const [loadingClearVoiceInstallInfo, setLoadingClearVoiceInstallInfo] = useState(false);
-    const [installingClearVoice, setInstallingClearVoice] = useState(false);
-    const [repairingClearVoice, setRepairingClearVoice] = useState(false);
-    const [testingClearVoice, setTestingClearVoice] = useState(false);
-    const [clearVoiceTestResult, setClearVoiceTestResult] = useState<ClearVoiceTestResult | null>(null);
-    const [switchingReconstructionPlayback, setSwitchingReconstructionPlayback] = useState(false);
-    const [loadingReconstructionWorkbench, setLoadingReconstructionWorkbench] = useState(false);
-    const [reconstructionWorkbench, setReconstructionWorkbench] = useState<ReconstructionWorkbench | null>(null);
-    const [savingReconstructionSettings, setSavingReconstructionSettings] = useState(false);
-    const [testingReconstructionSpeakerId, setTestingReconstructionSpeakerId] = useState<number | null>(null);
-    const [reconstructionInstructionDraft, setReconstructionInstructionDraft] = useState('');
-    const [reconstructionStudioTab, setReconstructionStudioTab] = useState<'voices' | 'reconstruction'>('voices');
-    const [selectedReconstructionSpeakerId, setSelectedReconstructionSpeakerId] = useState<number | null>(null);
-    const [reconstructionTestTextDrafts, setReconstructionTestTextDrafts] = useState<Record<number, string>>({});
-    const [cleaningReconstructionSampleKey, setCleaningReconstructionSampleKey] = useState<string | null>(null);
-    const [updatingReconstructionSampleKey, setUpdatingReconstructionSampleKey] = useState<string | null>(null);
-    const [addingReconstructionSampleSpeakerId, setAddingReconstructionSampleSpeakerId] = useState<number | null>(null);
-    const [approvingReconstructionSpeakerId, setApprovingReconstructionSpeakerId] = useState<number | null>(null);
-    const [selectedReconstructionPreviewSegmentId, setSelectedReconstructionPreviewSegmentId] = useState<number | null>(null);
-    const [previewingReconstructionSegment, setPreviewingReconstructionSegment] = useState(false);
-    const [reconstructionPreviewAudioUrl, setReconstructionPreviewAudioUrl] = useState('');
-    const [reconstructionPreviewText, setReconstructionPreviewText] = useState('');
-    const [savingVoiceFixerSettings, setSavingVoiceFixerSettings] = useState(false);
-    const [voiceFixerModeDraft, setVoiceFixerModeDraft] = useState(0);
-    const [voiceFixerMixDraft, setVoiceFixerMixDraft] = useState(1);
-    const [voiceFixerLevelingDraft, setVoiceFixerLevelingDraft] = useState<'off' | 'gentle' | 'balanced' | 'strong'>('off');
-    const [voiceFixerApplyScopeDraft, setVoiceFixerApplyScopeDraft] = useState<'none' | 'playback' | 'processing' | 'both'>('none');
-    const defaultReconstructionTestText = 'This is a test of the voice model. If you approve this test, then click the approve voice button below.';
+    const transcriptQuality = useTranscriptStore((s) => s.transcriptQuality);
+    const loadingTranscriptQuality = useTranscriptStore((s) => s.loadingTranscriptQuality);
+    const transcriptQualityError = useTranscriptStore((s) => s.transcriptQualityError);
+    const transcriptRollbackOptions = useTranscriptStore((s) => s.transcriptRollbackOptions);
+    const loadingTranscriptRollbackOptions = useTranscriptStore((s) => s.loadingTranscriptRollbackOptions);
+    const restoringTranscriptRunId = useTranscriptStore((s) => s.restoringTranscriptRunId);
+    const transcriptGoldWindows = useTranscriptStore((s) => s.transcriptGoldWindows);
+    const loadingTranscriptGoldWindows = useTranscriptStore((s) => s.loadingTranscriptGoldWindows);
+    const transcriptGoldWindowsError = useTranscriptStore((s) => s.transcriptGoldWindowsError);
+    const savingTranscriptGoldWindow = useTranscriptStore((s) => s.savingTranscriptGoldWindow);
+    const evaluatingTranscript = useTranscriptStore((s) => s.evaluatingTranscript);
+    const transcriptEvaluationSummary = useTranscriptStore((s) => s.transcriptEvaluationSummary);
+    const transcriptEvaluationResults = useTranscriptStore((s) => s.transcriptEvaluationResults);
+    const loadingTranscriptEvaluationResults = useTranscriptStore((s) => s.loadingTranscriptEvaluationResults);
+    const transcriptEvaluationError = useTranscriptStore((s) => s.transcriptEvaluationError);
+    const reviewingEvaluationResultId = useTranscriptStore((s) => s.reviewingEvaluationResultId);
+    const evaluationReviewsByResultId = useTranscriptStore((s) => s.evaluationReviewsByResultId);
+    const goldWindowLabelDraft = useTranscriptStore((s) => s.goldWindowLabelDraft);
+    const goldWindowStartDraft = useTranscriptStore((s) => s.goldWindowStartDraft);
+    const goldWindowEndDraft = useTranscriptStore((s) => s.goldWindowEndDraft);
+    const goldWindowReferenceDraft = useTranscriptStore((s) => s.goldWindowReferenceDraft);
+    const goldWindowEntitiesDraft = useTranscriptStore((s) => s.goldWindowEntitiesDraft);
+    const goldWindowNotesDraft = useTranscriptStore((s) => s.goldWindowNotesDraft);
+    const evaluationReviewVerdictDrafts = useTranscriptStore((s) => s.evaluationReviewVerdictDrafts);
+    const evaluationReviewNotesDrafts = useTranscriptStore((s) => s.evaluationReviewNotesDrafts);
+    const evaluationReviewReviewerDrafts = useTranscriptStore((s) => s.evaluationReviewReviewerDrafts);
+    const queueingTranscriptRepair = useTranscriptStore((s) => s.queueingTranscriptRepair);
+    const queueingDiarizationRebuild = useTranscriptStore((s) => s.queueingDiarizationRebuild);
+    const queueingDiarizationBenchmark = useTranscriptStore((s) => s.queueingDiarizationBenchmark);
+    const queueingFullRetranscription = useTranscriptStore((s) => s.queueingFullRetranscription);
+    const diarizationBenchmarkSensitivity = useTranscriptStore((s) => s.diarizationBenchmarkSensitivity);
+    const diarizationBenchmarkThreshold = useTranscriptStore((s) => s.diarizationBenchmarkThreshold);
+    const setTranscriptQuality = useTranscriptStore((s) => s.setTranscriptQuality);
+    const setLoadingTranscriptQuality = useTranscriptStore((s) => s.setLoadingTranscriptQuality);
+    const setTranscriptQualityError = useTranscriptStore((s) => s.setTranscriptQualityError);
+    const setTranscriptRollbackOptions = useTranscriptStore((s) => s.setTranscriptRollbackOptions);
+    const setLoadingTranscriptRollbackOptions = useTranscriptStore((s) => s.setLoadingTranscriptRollbackOptions);
+    const setRestoringTranscriptRunId = useTranscriptStore((s) => s.setRestoringTranscriptRunId);
+    const setTranscriptGoldWindows = useTranscriptStore((s) => s.setTranscriptGoldWindows);
+    const setLoadingTranscriptGoldWindows = useTranscriptStore((s) => s.setLoadingTranscriptGoldWindows);
+    const setTranscriptGoldWindowsError = useTranscriptStore((s) => s.setTranscriptGoldWindowsError);
+    const setSavingTranscriptGoldWindow = useTranscriptStore((s) => s.setSavingTranscriptGoldWindow);
+    const setEvaluatingTranscript = useTranscriptStore((s) => s.setEvaluatingTranscript);
+    const setTranscriptEvaluationSummary = useTranscriptStore((s) => s.setTranscriptEvaluationSummary);
+    const setTranscriptEvaluationResults = useTranscriptStore((s) => s.setTranscriptEvaluationResults);
+    const setLoadingTranscriptEvaluationResults = useTranscriptStore((s) => s.setLoadingTranscriptEvaluationResults);
+    const setTranscriptEvaluationError = useTranscriptStore((s) => s.setTranscriptEvaluationError);
+    const setReviewingEvaluationResultId = useTranscriptStore((s) => s.setReviewingEvaluationResultId);
+    const setEvaluationReviewsByResultId = useTranscriptStore((s) => s.setEvaluationReviewsByResultId);
+    const setGoldWindowLabelDraft = useTranscriptStore((s) => s.setGoldWindowLabelDraft);
+    const setGoldWindowStartDraft = useTranscriptStore((s) => s.setGoldWindowStartDraft);
+    const setGoldWindowEndDraft = useTranscriptStore((s) => s.setGoldWindowEndDraft);
+    const setGoldWindowReferenceDraft = useTranscriptStore((s) => s.setGoldWindowReferenceDraft);
+    const setGoldWindowEntitiesDraft = useTranscriptStore((s) => s.setGoldWindowEntitiesDraft);
+    const setGoldWindowNotesDraft = useTranscriptStore((s) => s.setGoldWindowNotesDraft);
+    const setEvaluationReviewVerdictDrafts = useTranscriptStore((s) => s.setEvaluationReviewVerdictDrafts);
+    const setEvaluationReviewNotesDrafts = useTranscriptStore((s) => s.setEvaluationReviewNotesDrafts);
+    const setEvaluationReviewReviewerDrafts = useTranscriptStore((s) => s.setEvaluationReviewReviewerDrafts);
+    const setQueueingTranscriptRepair = useTranscriptStore((s) => s.setQueueingTranscriptRepair);
+    const setQueueingDiarizationRebuild = useTranscriptStore((s) => s.setQueueingDiarizationRebuild);
+    const setQueueingDiarizationBenchmark = useTranscriptStore((s) => s.setQueueingDiarizationBenchmark);
+    const setQueueingFullRetranscription = useTranscriptStore((s) => s.setQueueingFullRetranscription);
+    const setDiarizationBenchmarkSensitivity = useTranscriptStore((s) => s.setDiarizationBenchmarkSensitivity);
+    const setDiarizationBenchmarkThreshold = useTranscriptStore((s) => s.setDiarizationBenchmarkThreshold);
+    const queueingVoiceFixer = useCleanupStore((s) => s.queueingVoiceFixer);
+    const queueingReconstruction = useReconstructionStore((s) => s.queueingReconstruction);
+    const auxiliaryJobs = useWorkbenchStore((s) => s.auxiliaryJobs);
+    const workbenchTaskProgress = useWorkbenchStore((s) => s.workbenchTaskProgress);
+    const switchingReconstructionPlayback = useReconstructionStore((s) => s.switchingReconstructionPlayback);
+    const loadingReconstructionWorkbench = useReconstructionStore((s) => s.loadingReconstructionWorkbench);
+    const reconstructionWorkbench = useReconstructionStore((s) => s.reconstructionWorkbench);
+    const savingReconstructionSettings = useReconstructionStore((s) => s.savingReconstructionSettings);
+    const testingReconstructionSpeakerId = useReconstructionStore((s) => s.testingReconstructionSpeakerId);
+    const reconstructionInstructionDraft = useReconstructionStore((s) => s.reconstructionInstructionDraft);
+    const reconstructionStudioTab = useReconstructionStore((s) => s.reconstructionStudioTab);
+    const selectedReconstructionSpeakerId = useReconstructionStore((s) => s.selectedReconstructionSpeakerId);
+    const reconstructionTestTextDrafts = useReconstructionStore((s) => s.reconstructionTestTextDrafts);
+    const cleaningReconstructionSampleKey = useReconstructionStore((s) => s.cleaningReconstructionSampleKey);
+    const updatingReconstructionSampleKey = useReconstructionStore((s) => s.updatingReconstructionSampleKey);
+    const addingReconstructionSampleSpeakerId = useReconstructionStore((s) => s.addingReconstructionSampleSpeakerId);
+    const approvingReconstructionSpeakerId = useReconstructionStore((s) => s.approvingReconstructionSpeakerId);
+    const selectedReconstructionPreviewSegmentId = useReconstructionStore((s) => s.selectedReconstructionPreviewSegmentId);
+    const previewingReconstructionSegment = useReconstructionStore((s) => s.previewingReconstructionSegment);
+    const reconstructionPreviewAudioUrl = useReconstructionStore((s) => s.reconstructionPreviewAudioUrl);
+    const reconstructionPreviewText = useReconstructionStore((s) => s.reconstructionPreviewText);
+    const setReconstructionInstructionDraft = useReconstructionStore((s) => s.setReconstructionInstructionDraft);
+    const setReconstructionStudioTab = useReconstructionStore((s) => s.setReconstructionStudioTab);
+    const setSelectedReconstructionSpeakerId = useReconstructionStore((s) => s.setSelectedReconstructionSpeakerId);
+    const setReconstructionTestTextDrafts = useReconstructionStore((s) => s.setReconstructionTestTextDrafts);
+    const setSelectedReconstructionPreviewSegmentId = useReconstructionStore((s) => s.setSelectedReconstructionPreviewSegmentId);
+    const savingVoiceFixerSettings = useCleanupStore((s) => s.savingVoiceFixerSettings);
     const selectedReconstructionSpeaker = useMemo(
         () => reconstructionWorkbench?.speakers.find((speaker) => speaker.speaker_id === selectedReconstructionSpeakerId) || null,
         [reconstructionWorkbench, selectedReconstructionSpeakerId]
@@ -401,67 +419,6 @@ export function VideoDetailPage() {
         if (!url) return '';
         return /^https?:\/\//i.test(url) ? url : toApiUrl(url);
     };
-    const loadAuxiliaryJobs = async () => {
-        if (!video?.id || !isUploadedMedia) {
-            setAuxiliaryJobs([]);
-            return;
-        }
-        try {
-            const res = await api.get<Job[]>('/jobs', {
-                params: {
-                    video_id: video.id,
-                    status: 'queued,paused,running',
-                    job_type: 'voicefixer_cleanup,conversation_reconstruct',
-                    limit: 20,
-                },
-            });
-            setAuxiliaryJobs(Array.isArray(res.data) ? res.data : []);
-        } catch (e) {
-            console.error('Failed to fetch auxiliary jobs:', e);
-        }
-    };
-    const fetchWorkbenchTaskProgress = async () => {
-        if (!id || !isUploadedMedia) {
-            setWorkbenchTaskProgress(null);
-            return;
-        }
-        try {
-            const res = await api.get<WorkbenchTaskProgress>(`/videos/${id}/workbench/progress`);
-            setWorkbenchTaskProgress(res.data || null);
-        } catch (e) {
-            console.error('Failed to fetch workbench progress:', e);
-        }
-    };
-    const fetchCleanupWorkbench = async () => {
-        if (!id || !isUploadedMedia) {
-            setCleanupWorkbench(null);
-            return;
-        }
-        setLoadingCleanupWorkbench(true);
-        try {
-            const res = await api.get<CleanupWorkbench>(`/videos/${id}/cleanup/workbench`);
-            setCleanupWorkbench(res.data || null);
-        } catch (e) {
-            console.error('Failed to fetch cleanup workbench:', e);
-        } finally {
-            setLoadingCleanupWorkbench(false);
-        }
-    };
-    const fetchClearVoiceInstallInfo = async () => {
-        if (!isUploadedMedia) {
-            setClearVoiceInstallInfo(null);
-            return;
-        }
-        setLoadingClearVoiceInstallInfo(true);
-        try {
-            const res = await api.get<ClearVoiceInstallInfo>('/system/clearvoice/install-info');
-            setClearVoiceInstallInfo(res.data);
-        } catch (e) {
-            console.error('Failed to fetch ClearVoice install info:', e);
-        } finally {
-            setLoadingClearVoiceInstallInfo(false);
-        }
-    };
     const fetchFunnyMoments = async () => {
         if (!id) return;
         setLoadingFunnyMoments(true);
@@ -605,20 +562,9 @@ export function VideoDetailPage() {
         useYoutubeStore.getState().resetYoutubeState();
         useSpeakersTabStore.getState().resetSpeakersTabState();
         useClipsStore.getState().resetClipsState();
-        setTranscriptQuality(null);
-        setTranscriptQualityError(null);
-        setTranscriptGoldWindows([]);
-        setTranscriptGoldWindowsError(null);
-        setTranscriptEvaluationSummary(null);
-        setTranscriptEvaluationResults([]);
-        setTranscriptEvaluationError(null);
-        setEvaluationReviewsByResultId({});
-        setGoldWindowLabelDraft('Gold Window');
-        setGoldWindowStartDraft('');
-        setGoldWindowEndDraft('');
-        setGoldWindowReferenceDraft('');
-        setGoldWindowEntitiesDraft('');
-        setGoldWindowNotesDraft('');
+        useWorkbenchStore.getState().resetWorkbenchState();
+        useCleanupStore.getState().resetCleanupState();
+        useTranscriptStore.getState().resetTranscriptState();
         if (id) fetchData();
     }, [id]);
 
@@ -679,15 +625,15 @@ export function VideoDetailPage() {
 
     useEffect(() => {
         if (!isUploadedMedia || !video?.id) {
-            setAuxiliaryJobs([]);
+            useWorkbenchStore.getState().resetWorkbenchState();
             return;
         }
-        void loadAuxiliaryJobs();
+        void useWorkbenchStore.getState().loadAuxiliaryJobs(video.id);
         if (!(voiceFixerBusy || voiceFixerPaused || queueingVoiceFixer || reconstructionBusy || reconstructionPaused || queueingReconstruction)) {
             return;
         }
         const timer = window.setInterval(() => {
-            void loadAuxiliaryJobs();
+            void useWorkbenchStore.getState().loadAuxiliaryJobs(video.id);
         }, 2500);
         return () => window.clearInterval(timer);
     }, [
@@ -705,7 +651,7 @@ export function VideoDetailPage() {
 
     useEffect(() => {
         if (!id || !isUploadedMedia) {
-            setWorkbenchTaskProgress(null);
+            useWorkbenchStore.setState({ workbenchTaskProgress: null });
             return;
         }
         const onWorkbenchTab = activeTab === 'cleanup' || activeTab === 'reconstruction';
@@ -726,10 +672,10 @@ export function VideoDetailPage() {
             return;
         }
 
-        void fetchWorkbenchTaskProgress();
+        void useWorkbenchStore.getState().fetchWorkbenchTaskProgress(Number(id));
         const intervalMs = workbenchTaskIsRunning ? 700 : 1800;
         const timer = window.setInterval(() => {
-            void fetchWorkbenchTaskProgress();
+            void useWorkbenchStore.getState().fetchWorkbenchTaskProgress(Number(id));
         }, intervalMs);
         return () => window.clearInterval(timer);
     }, [
@@ -755,23 +701,9 @@ export function VideoDetailPage() {
         void loadReconstructionWorkbench();
     }, [video?.id, isUploadedMedia, segments.length]);
 
-    useEffect(() => {
-        if (!video || !isUploadedMedia) return;
-        setVoiceFixerModeDraft(Number(video.voicefixer_mode ?? 0));
-        setVoiceFixerMixDraft(Math.max(0, Math.min(1, Number(video.voicefixer_mix_ratio ?? 1))));
-        const leveling = String(video.voicefixer_leveling_mode || 'off').toLowerCase();
-        setVoiceFixerLevelingDraft(
-            leveling === 'gentle' || leveling === 'balanced' || leveling === 'strong' ? leveling : 'off'
-        );
-        const scope = String(video.voicefixer_apply_scope || (video.voicefixer_use_cleaned ? 'both' : 'none')).toLowerCase();
-        setVoiceFixerApplyScopeDraft(
-            scope === 'playback' || scope === 'processing' || scope === 'both' ? scope : 'none'
-        );
-    }, [isUploadedMedia, video]);
 
     useEffect(() => {
-        if (!video || !isUploadedMedia) return;
-        setReconstructionInstructionDraft(String(video.reconstruction_instruction_template || ''));
+        useReconstructionStore.getState().syncInstructionDraftFromVideo(video, isUploadedMedia);
     }, [isUploadedMedia, video]);
 
     useEffect(() => {
@@ -782,39 +714,14 @@ export function VideoDetailPage() {
         setSearchMatchIndex(0);
         setDeepLinkedSegmentId(null);
         setExpandedFunnySummaryIds(new Set());
-        setReconstructionWorkbench(null);
-        setCleanupWorkbench(null);
-        setSelectedReconstructionSpeakerId(null);
-        setReconstructionPreviewAudioUrl('');
-        setReconstructionPreviewText('');
-        setWorkbenchTaskProgress(null);
-        setClearVoiceInstallInfo(null);
-        setClearVoiceTestResult(null);
+        useReconstructionStore.getState().resetReconstructionState();
         previousLocalMediaUrlRef.current = '';
         pendingNativeSourceRestoreRef.current = null;
     }, [id]);
 
     useEffect(() => {
-        if (!reconstructionWorkbench?.speakers?.length) {
-            setSelectedReconstructionSpeakerId(null);
-            return;
-        }
-        setSelectedReconstructionSpeakerId((prev) => {
-            if (prev && reconstructionWorkbench.speakers.some((speaker) => speaker.speaker_id === prev)) return prev;
-            return reconstructionWorkbench.speakers[0].speaker_id;
-        });
-        setReconstructionTestTextDrafts((prev) => {
-            const next = { ...prev };
-            for (const speaker of reconstructionWorkbench.speakers) {
-                if (!next[speaker.speaker_id]) {
-                    next[speaker.speaker_id] =
-                        speaker.latest_test_text ||
-                        defaultReconstructionTestText;
-                }
-            }
-            return next;
-        });
-    }, [defaultReconstructionTestText, reconstructionWorkbench]);
+        useReconstructionStore.getState().syncWorkbenchSelection();
+    }, [reconstructionWorkbench]);
 
     useEffect(() => {
         if (reconstructionWorkbench?.all_speakers_approved) return;
@@ -918,7 +825,7 @@ export function VideoDetailPage() {
                 if (player && typeof player.playVideo === 'function') {
                     player.playVideo();
                 }
-            } catch {}
+            } catch { }
         }
     }, [currentTime, clipPreviewLoop, player]);
 
@@ -949,96 +856,6 @@ export function VideoDetailPage() {
 
         return () => window.clearInterval(loopId);
     }, [editingSegmentId, editingLoopSegment, player, segments]);
-
-    useEffect(() => {
-        if (!clipEditorDragRect) return;
-        const onMove = (evt: PointerEvent) => {
-            if (!cropPreviewRef.current) return;
-            const bounds = cropPreviewRef.current.getBoundingClientRect();
-            if (bounds.width <= 0 || bounds.height <= 0) return;
-            const nx = clampNorm((evt.clientX - bounds.left) / bounds.width);
-            const ny = clampNorm((evt.clientY - bounds.top) / bounds.height);
-            setClipEditorDragRect(prev => prev ? { ...prev, currentX: nx, currentY: ny } : prev);
-        };
-        const onUp = () => {
-            setClipEditorDragRect(prev => {
-                if (!prev) return null;
-                const x = Math.min(prev.startX, prev.currentX);
-                const y = Math.min(prev.startY, prev.currentY);
-                const w = Math.max(0.01, Math.abs(prev.currentX - prev.startX));
-                const h = Math.max(0.01, Math.abs(prev.currentY - prev.startY));
-                setDraftCropRect(prev.target, { x, y, w, h });
-                return null;
-            });
-        };
-        window.addEventListener('pointermove', onMove);
-        window.addEventListener('pointerup', onUp);
-        return () => {
-            window.removeEventListener('pointermove', onMove);
-            window.removeEventListener('pointerup', onUp);
-        };
-    }, [clipEditorDragRect]);
-
-    useEffect(() => {
-        if (!clipTimelineDrag) return;
-        const onMove = (evt: PointerEvent) => {
-            if (!clipEditorDraft) return;
-            const duration = getEditorMediaDuration();
-            const t = timelineEventToTime(evt, duration);
-            const start = Number(clipEditorDraft.start_time ?? 0);
-            const end = Number(clipEditorDraft.end_time ?? 0);
-            if (clipTimelineDrag.handle === 'start') {
-                updateClipDraftField('start_time', Number(Math.max(0, Math.min(end - 0.05, t)).toFixed(3)));
-            } else {
-                updateClipDraftField('end_time', Number(Math.max(start + 0.05, t).toFixed(3)));
-            }
-        };
-        const onUp = () => setClipTimelineDrag(null);
-        window.addEventListener('pointermove', onMove);
-        window.addEventListener('pointerup', onUp);
-        return () => {
-            window.removeEventListener('pointermove', onMove);
-            window.removeEventListener('pointerup', onUp);
-        };
-    }, [clipTimelineDrag, clipEditorDraft]);
-
-    useEffect(() => {
-        const splitEnabled = String(clipEditorDraft?.aspect_ratio || 'source') === '9:16' && !!clipEditorDraft?.portrait_split_enabled;
-        if (!splitEnabled && clipEditorCropTarget !== 'main') {
-            setClipEditorCropTarget('main');
-        }
-    }, [clipEditorDraft?.aspect_ratio, clipEditorDraft?.portrait_split_enabled, clipEditorCropTarget]);
-
-    useEffect(() => {
-        if (!showClipEditorMain) return;
-        const onKeyDown = (evt: KeyboardEvent) => {
-            const target = evt.target as HTMLElement | null;
-            const tag = (target?.tagName || '').toLowerCase();
-            if (tag === 'input' || tag === 'textarea' || tag === 'select' || target?.isContentEditable) return;
-            const frame = 1 / 30;
-            if (evt.key.toLowerCase() === 'i') {
-                evt.preventDefault();
-                setClipBoundaryFromPlayhead('start');
-                return;
-            }
-            if (evt.key.toLowerCase() === 'o') {
-                evt.preventDefault();
-                setClipBoundaryFromPlayhead('end');
-                return;
-            }
-            if (evt.altKey && evt.key === 'ArrowLeft') {
-                evt.preventDefault();
-                nudgeClipBoundary(evt.shiftKey ? 'end' : 'start', -frame);
-                return;
-            }
-            if (evt.altKey && evt.key === 'ArrowRight') {
-                evt.preventDefault();
-                nudgeClipBoundary(evt.shiftKey ? 'end' : 'start', frame);
-            }
-        };
-        window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
-    }, [showClipEditorMain, currentTime, clipEditorDraft]);
 
     const tParam = searchParams.get('t');
     const requestedTabParam = String(searchParams.get('tab') || '').trim().toLowerCase();
@@ -1202,7 +1019,7 @@ export function VideoDetailPage() {
             element.currentTime = Math.max(0, Number(seconds || 0));
         },
         playVideo: () => {
-            void element.play().catch(() => {});
+            void element.play().catch(() => { });
         },
         pauseVideo: () => {
             element.pause();
@@ -1247,7 +1064,7 @@ export function VideoDetailPage() {
                     if (pendingRestore.wasPlaying) {
                         const playAttempt = element.play();
                         if (playAttempt && typeof (playAttempt as Promise<void>).catch === 'function') {
-                            void (playAttempt as Promise<void>).catch(() => {});
+                            void (playAttempt as Promise<void>).catch(() => { });
                         }
                     }
                 } catch (e) {
@@ -1933,195 +1750,21 @@ export function VideoDetailPage() {
         }
     };
 
-    const handleQueueVoiceFixer = async (force = false) => {
-        if (!video || !isUploadedMedia) return;
-        const prompt = hasVoiceFixerCleaned
-            ? 'Rebuild the VoiceFixer-cleaned media for this uploaded episode?'
-            : 'Create a VoiceFixer-cleaned copy of this uploaded episode?';
-        if (!confirm(prompt)) return;
-        setQueueingVoiceFixer(true);
-        try {
-            const res = await api.post<Video>(`/videos/${video.id}/voicefixer/queue`, null, { params: { force } });
-            setVideo(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue VoiceFixer cleanup');
-        } finally {
-            setQueueingVoiceFixer(false);
-        }
-    };
-
-    const handleSaveVoiceFixerSettings = async () => {
-        if (!video || !isUploadedMedia) return;
-        setSavingVoiceFixerSettings(true);
-        try {
-            const res = await api.patch<Video>(`/videos/${video.id}/voicefixer/settings`, {
-                mode: voiceFixerModeDraft,
-                mix_ratio: voiceFixerMixDraft,
-                leveling_mode: voiceFixerLevelingDraft,
-                apply_scope: voiceFixerApplyScopeDraft,
-            });
-            setVideo(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to save VoiceFixer settings');
-        } finally {
-            setSavingVoiceFixerSettings(false);
-        }
-    };
-
-    const handleAnalyzeCleanupWorkbench = async () => {
-        if (!video || !isUploadedMedia) return;
-        setAnalyzingCleanupWorkbench(true);
-        try {
-            const res = await api.post<CleanupWorkbench>(`/videos/${video.id}/cleanup/workbench/analyze`);
-            setCleanupWorkbench(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to analyze the uploaded audio');
-        } finally {
-            setAnalyzingCleanupWorkbench(false);
-        }
-    };
-
-    const handleRunClearVoiceCandidate = async (modelName: string) => {
-        if (!video || !isUploadedMedia) return;
-        setRunningClearVoiceModel(modelName);
-        try {
-            const res = await api.post<CleanupWorkbench>(`/videos/${video.id}/cleanup/workbench/clearvoice-candidate`, {
-                stage: 'enhancement',
-                model_name: modelName,
-            });
-            setCleanupWorkbench(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || `Failed to generate the ${modelName} candidate`);
-        } finally {
-            setRunningClearVoiceModel(null);
-        }
-    };
-
-    const handleSelectCleanupCandidate = async (candidateId: string | null) => {
-        if (!video || !isUploadedMedia) return;
-        setSelectingCleanupCandidateId(candidateId || '__original__');
-        try {
-            const res = await api.patch<CleanupWorkbench>(`/videos/${video.id}/cleanup/workbench/select-candidate`, {
-                candidate_id: candidateId,
-            });
-            setCleanupWorkbench(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to update the selected pre-cleanup candidate');
-        } finally {
-            setSelectingCleanupCandidateId(null);
-        }
-    };
-
-    const handleInstallClearVoice = async () => {
-        if (!isUploadedMedia) return;
-        setInstallingClearVoice(true);
-        try {
-            const res = await api.post<ClearVoiceInstallInfo>('/system/clearvoice/install');
-            setClearVoiceInstallInfo(res.data);
-            setClearVoiceTestResult(null);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to install ClearVoice');
-        } finally {
-            setInstallingClearVoice(false);
-        }
-    };
-
-    const handleTestClearVoice = async () => {
-        if (!isUploadedMedia) return;
-        setTestingClearVoice(true);
-        try {
-            const res = await api.post<ClearVoiceTestResult>('/system/clearvoice/test');
-            setClearVoiceTestResult(res.data);
-        } catch (e: any) {
-            setClearVoiceTestResult({
-                status: 'error',
-                imported: false,
-                class_available: false,
-                torch_imported: false,
-                torchaudio_imported: false,
-                runtime_ready: false,
-                error: e?.response?.data?.detail || 'Failed to test ClearVoice',
-                detail: 'The backend could not validate the local ClearVoice runtime.',
-            });
-        } finally {
-            setTestingClearVoice(false);
-            await fetchClearVoiceInstallInfo();
-        }
-    };
-
-    const handleRepairClearVoice = async () => {
-        if (!isUploadedMedia) return;
-        if (!confirm('Repair the ClearVoice runtime now? This reinstalls torchaudio to match the backend torch build.')) return;
-        setRepairingClearVoice(true);
-        try {
-            await api.post('/system/clearvoice/repair');
-            await fetchClearVoiceInstallInfo();
-            await handleTestClearVoice();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to repair the ClearVoice runtime');
-        } finally {
-            setRepairingClearVoice(false);
-        }
-    };
 
     const handleSetUploadedPlaybackSource = async (source: UploadedPlaybackSource) => {
-        if (!video || !isUploadedMedia || source === currentUploadedPlaybackSource) return;
-        setSwitchingReconstructionPlayback(true);
-        try {
-            const res = await api.patch<Video>(`/videos/${video.id}/playback-source`, { source });
-            setVideo(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to switch playback source');
-        } finally {
-            setSwitchingReconstructionPlayback(false);
-        }
+        await useReconstructionStore.getState().setUploadedPlaybackSource(video, isUploadedMedia, source, currentUploadedPlaybackSource, setVideo);
     };
 
     const handleQueueReconstruction = async (force = false) => {
-        if (!video || !isUploadedMedia) return;
-        const prompt = hasReconstructionAudio
-            ? 'Rebuild the reconstructed conversation audio for this uploaded episode?'
-            : 'Create reconstructed conversation audio for this uploaded episode?';
-        if (!confirm(prompt)) return;
-        setQueueingReconstruction(true);
-        try {
-            const res = await api.post<Video>(`/videos/${video.id}/reconstruct/queue`, null, { params: { force } });
-            setVideo(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue conversation reconstruction');
-        } finally {
-            setQueueingReconstruction(false);
-        }
+        await useReconstructionStore.getState().queueReconstruction(video, isUploadedMedia, hasReconstructionAudio, force, setVideo);
     };
 
     const loadReconstructionWorkbench = async () => {
-        if (!video || !isUploadedMedia || segments.length === 0) return;
-        setLoadingReconstructionWorkbench(true);
-        try {
-            const res = await api.get<ReconstructionWorkbench>(`/videos/${video.id}/reconstruction/workbench`);
-            setReconstructionWorkbench(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to load the reconstruction workbench');
-        } finally {
-            setLoadingReconstructionWorkbench(false);
-        }
+        await useReconstructionStore.getState().loadReconstructionWorkbench(video, isUploadedMedia, segments.length);
     };
 
     const handleSaveReconstructionSettings = async () => {
-        if (!video || !isUploadedMedia) return;
-        setSavingReconstructionSettings(true);
-        try {
-            const res = await api.patch<Video>(`/videos/${video.id}/reconstruction/settings`, {
-                mode: 'performance',
-                instruction_template: reconstructionInstructionDraft,
-            });
-            setVideo(res.data);
-            await loadReconstructionWorkbench();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to save reconstruction settings');
-        } finally {
-            setSavingReconstructionSettings(false);
-        }
+        await useReconstructionStore.getState().saveReconstructionSettings(video, isUploadedMedia, setVideo);
     };
 
     const handleTestReconstructionSpeaker = async (
@@ -2129,27 +1772,7 @@ export function VideoDetailPage() {
         segmentId?: number,
         options?: { performanceMode?: boolean; useSelectedSampleText?: boolean }
     ) => {
-        if (!video || !isUploadedMedia) return;
-        setTestingReconstructionSpeakerId(speakerId);
-        try {
-            const speakerCard = reconstructionWorkbench?.speakers.find(s => s.speaker_id === speakerId) || null;
-            const selectedSegment = speakerCard?.samples.find(seg => seg.segment_id === segmentId) || speakerCard?.samples.find(sample => sample.selected) || speakerCard?.samples[0] || null;
-            const performanceMode = !!options?.performanceMode;
-            const requestedText = options?.useSelectedSampleText
-                ? (selectedSegment?.text || speakerCard?.reference_text || '')
-                : (reconstructionTestTextDrafts[speakerId] || selectedSegment?.text || speakerCard?.reference_text || '');
-            await api.post(`/videos/${video.id}/reconstruction/test-speaker`, {
-                speaker_id: speakerId,
-                segment_id: selectedSegment?.segment_id,
-                text: requestedText,
-                performance_mode: performanceMode,
-            });
-            await loadReconstructionWorkbench();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to generate a reconstruction test for this speaker');
-        } finally {
-            setTestingReconstructionSpeakerId(null);
-        }
+        await useReconstructionStore.getState().testReconstructionSpeaker(video, isUploadedMedia, speakerId, segmentId, options);
     };
 
     const handleSetReconstructionPlayback = async (enabled: boolean) => {
@@ -2157,20 +1780,7 @@ export function VideoDetailPage() {
     };
 
     const handleCleanupReconstructionSample = async (speakerId: number, segmentId: number) => {
-        if (!video || !isUploadedMedia) return;
-        const key = `${speakerId}:${segmentId}`;
-        setCleaningReconstructionSampleKey(key);
-        try {
-            const res = await api.post<ReconstructionWorkbench>(`/videos/${video.id}/reconstruction/workbench/sample-cleanup`, {
-                speaker_id: speakerId,
-                segment_id: segmentId,
-            });
-            setReconstructionWorkbench(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to clean up this performance sample');
-        } finally {
-            setCleaningReconstructionSampleKey(null);
-        }
+        await useReconstructionStore.getState().cleanupReconstructionSample(video, isUploadedMedia, speakerId, segmentId);
     };
 
     const handleUpdateReconstructionSampleState = async (
@@ -2178,73 +1788,19 @@ export function VideoDetailPage() {
         segmentId: number,
         patch: { rejected?: boolean; selected?: boolean; clear_cleaned?: boolean }
     ) => {
-        if (!video || !isUploadedMedia) return;
-        const key = `${speakerId}:${segmentId}`;
-        setUpdatingReconstructionSampleKey(key);
-        try {
-            const res = await api.patch<ReconstructionWorkbench>(`/videos/${video.id}/reconstruction/workbench/sample-state`, {
-                speaker_id: speakerId,
-                segment_id: segmentId,
-                ...patch,
-            });
-            setReconstructionWorkbench(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to update this performance sample');
-        } finally {
-            setUpdatingReconstructionSampleKey(null);
-        }
+        await useReconstructionStore.getState().updateReconstructionSampleState(video, isUploadedMedia, speakerId, segmentId, patch);
     };
 
     const handleAddReconstructionSample = async (speakerId: number) => {
-        if (!video || !isUploadedMedia) return;
-        setAddingReconstructionSampleSpeakerId(speakerId);
-        try {
-            const res = await api.post<ReconstructionWorkbench>(`/videos/${video.id}/reconstruction/workbench/add-sample`, {
-                speaker_id: speakerId,
-            });
-            setReconstructionWorkbench(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to add another performance sample');
-        } finally {
-            setAddingReconstructionSampleSpeakerId(null);
-        }
+        await useReconstructionStore.getState().addReconstructionSample(video, isUploadedMedia, speakerId);
     };
 
     const handleApproveReconstructionSpeaker = async (speakerId: number, approved: boolean) => {
-        if (!video || !isUploadedMedia) return;
-        setApprovingReconstructionSpeakerId(speakerId);
-        try {
-            const res = await api.patch<ReconstructionWorkbench>(`/videos/${video.id}/reconstruction/workbench/speaker-approval`, {
-                speaker_id: speakerId,
-                approved,
-            });
-            setReconstructionWorkbench(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to update voice approval');
-        } finally {
-            setApprovingReconstructionSpeakerId(null);
-        }
+        await useReconstructionStore.getState().approveReconstructionSpeaker(video, isUploadedMedia, speakerId, approved);
     };
 
     const handlePreviewReconstructionSegment = async (segmentId: number) => {
-        if (!video || !isUploadedMedia) return;
-        setPreviewingReconstructionSegment(true);
-        setReconstructionPreviewAudioUrl('');
-        setReconstructionPreviewText('');
-        try {
-            const res = await api.post(`/videos/${video.id}/reconstruction/preview-segment`, {
-                segment_id: segmentId,
-                performance_mode: true,
-            });
-            setReconstructionPreviewAudioUrl(resolveWorkbenchAudioUrl(String(res.data.audio_url || '')));
-            setReconstructionPreviewText(String(res.data.text || ''));
-        } catch (e: any) {
-            setReconstructionPreviewAudioUrl('');
-            setReconstructionPreviewText('');
-            alert(e?.response?.data?.detail || 'Failed to preview this reconstruction segment');
-        } finally {
-            setPreviewingReconstructionSegment(false);
-        }
+        await useReconstructionStore.getState().previewReconstructionSegment(video, isUploadedMedia, segmentId, resolveWorkbenchAudioUrl);
     };
 
     const clampPercent = (value: number) => Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
@@ -2524,337 +2080,6 @@ export function VideoDetailPage() {
         setClipEditorDraft(nextDraft);
         setClipEditorCropTarget('main');
         setClipEditorDragRect(null);
-        hydrateClipEditorText(nextDraft.start_time ?? clip.start_time, nextDraft.end_time ?? clip.end_time, nextDraft.script_edits_json);
-    };
-
-    const cancelClipEdit = () => {
-        useClipsStore.getState().cancelClipEdit();
-    };
-
-    const updateClipDraftField = (field: keyof Clip, value: any) => {
-        setClipEditorDraft(prev => ({ ...(prev || {}), [field]: value }));
-    };
-
-    const parseClipEditorKeptRanges = (raw?: string | null): Array<[number, number]> => {
-        if (!raw) return [];
-        try {
-            const parsed = JSON.parse(raw);
-            if (!parsed || !Array.isArray(parsed.kept_ranges)) return [];
-            const ranges: Array<[number, number]> = [];
-            for (const r of parsed.kept_ranges) {
-                if (!Array.isArray(r) || r.length < 2) continue;
-                const s = Number(r[0]);
-                const e = Number(r[1]);
-                if (Number.isFinite(s) && Number.isFinite(e) && e > s + 0.01) ranges.push([s, e]);
-            }
-            ranges.sort((a, b) => a[0] - b[0]);
-            return ranges;
-        } catch {
-            return [];
-        }
-    };
-
-    const buildClipEditorTokens = (clipStart: number, clipEnd: number) => {
-        const out: Array<{ key: string; start: number; end: number; word: string }> = [];
-        for (const seg of segments) {
-            if (seg.end_time <= clipStart || seg.start_time >= clipEnd) continue;
-            let words: Array<{ start: number; end: number; word: string }> = parseSegmentWords(seg);
-            if (words.length === 0 && seg.text?.trim()) {
-                const textWords = seg.text.trim().split(/\s+/);
-                const duration = Math.max(0.05, seg.end_time - seg.start_time);
-                const step = duration / Math.max(textWords.length, 1);
-                words = textWords.map((w, idx) => ({
-                    start: seg.start_time + (idx * step),
-                    end: seg.start_time + ((idx + 1) * step),
-                    word: w,
-                }));
-            }
-            for (const w of words) {
-                if (w.end <= clipStart || w.start >= clipEnd) continue;
-                const s = Math.max(clipStart, w.start);
-                const e = Math.min(clipEnd, w.end);
-                if (e <= s + 0.005) continue;
-                out.push({
-                    key: `${s.toFixed(3)}-${e.toFixed(3)}-${out.length}`,
-                    start: s,
-                    end: e,
-                    word: w.word,
-                });
-            }
-        }
-        out.sort((a, b) => a.start - b.start);
-        return out;
-    };
-
-    const buildKeptRangesFromTokenState = (
-        tokens: Array<{ key: string; start: number; end: number; word: string }>,
-        removedKeys: Set<string>,
-        clipStart: number,
-        clipEnd: number,
-    ): Array<[number, number]> => {
-        const kept = tokens
-            .filter(t => !removedKeys.has(t.key))
-            .map(t => [Math.max(clipStart, t.start), Math.min(clipEnd, t.end)] as [number, number])
-            .filter(r => r[1] > r[0] + 0.005)
-            .sort((a, b) => a[0] - b[0]);
-        if (kept.length === 0) return [];
-        const merged: Array<[number, number]> = [kept[0]];
-        for (let i = 1; i < kept.length; i++) {
-            const [s, e] = kept[i];
-            const last = merged[merged.length - 1];
-            if (s <= last[1] + 0.22) {
-                last[1] = Math.max(last[1], e);
-            } else {
-                merged.push([s, e]);
-            }
-        }
-        return merged;
-    };
-
-    const hydrateClipEditorText = (clipStart: number, clipEnd: number, scriptEditsJson?: string | null) => {
-        const tokens = buildClipEditorTokens(clipStart, clipEnd);
-        const keptRanges = parseClipEditorKeptRanges(scriptEditsJson);
-        const removed = new Set<string>();
-        if (keptRanges.length > 0) {
-            for (const t of tokens) {
-                const mid = (t.start + t.end) / 2;
-                const inKept = keptRanges.some(([s, e]) => mid >= s && mid <= e);
-                if (!inKept) removed.add(t.key);
-            }
-        }
-        setClipEditorTokens(tokens);
-        setClipEditorRemovedWordKeys(removed);
-    };
-
-    const rebuildClipEditorTextWindow = () => {
-        if (!clipEditorDraft) return;
-        const clipStart = Number(clipEditorDraft.start_time ?? 0);
-        const clipEnd = Number(clipEditorDraft.end_time ?? 0);
-        if (!Number.isFinite(clipStart) || !Number.isFinite(clipEnd) || clipEnd <= clipStart) {
-            alert('Set a valid start/end first, then refresh transcript window.');
-            return;
-        }
-        hydrateClipEditorText(clipStart, clipEnd, clipEditorDraft.script_edits_json);
-    };
-
-    const persistClipEditorRemovedWords = (nextRemoved: Set<string>) => {
-        if (!clipEditorDraft) return;
-        const clipStart = Number(clipEditorDraft.start_time ?? 0);
-        const clipEnd = Number(clipEditorDraft.end_time ?? 0);
-        const keptRanges = buildKeptRangesFromTokenState(clipEditorTokens, nextRemoved, clipStart, clipEnd);
-        if (nextRemoved.size > 0 && keptRanges.length === 0) {
-            alert('Cannot remove every word from the clip. Keep at least one word.');
-            return;
-        }
-        setClipEditorRemovedWordKeys(nextRemoved);
-        if (nextRemoved.size === 0) {
-            updateClipDraftField('script_edits_json', null);
-            return;
-        }
-        updateClipDraftField('script_edits_json', JSON.stringify({
-            version: 1,
-            mode: 'keep_ranges',
-            source: 'text_editor',
-            kept_ranges: keptRanges,
-            removed_word_count: nextRemoved.size,
-            total_word_count: clipEditorTokens.length,
-            updated_at: new Date().toISOString(),
-        }));
-    };
-
-    const toggleClipEditorWord = (tokenKey: string) => {
-        const next = new Set(clipEditorRemovedWordKeys);
-        if (next.has(tokenKey)) next.delete(tokenKey); else next.add(tokenKey);
-        persistClipEditorRemovedWords(next);
-    };
-
-    const restoreAllClipEditorWords = () => {
-        persistClipEditorRemovedWords(new Set());
-    };
-
-    const autoRemoveClipEditorFillers = () => {
-        const filler = new Set(['um', 'uh', 'erm', 'hmm', 'ah', 'like']);
-        const next = new Set(clipEditorRemovedWordKeys);
-        for (const t of clipEditorTokens) {
-            const w = t.word.toLowerCase().replace(/[^\w']/g, '');
-            if (filler.has(w)) next.add(t.key);
-        }
-        persistClipEditorRemovedWords(next);
-    };
-
-    const clampNorm = (val: number) => Math.max(0, Math.min(1, val));
-
-    const normalizeCropRect = (
-        x?: number | null,
-        y?: number | null,
-        w?: number | null,
-        h?: number | null,
-        fallback?: { x: number; y: number; w: number; h: number },
-    ) => {
-        if (x == null || y == null || w == null || h == null) {
-            return fallback || { x: 0, y: 0, w: 1, h: 1 };
-        }
-        const nx = clampNorm(Number(x));
-        const ny = clampNorm(Number(y));
-        const nw = Math.max(0.01, clampNorm(Number(w)));
-        const nh = Math.max(0.01, clampNorm(Number(h)));
-        return {
-            x: nx,
-            y: ny,
-            w: nx + nw > 1 ? Math.max(0.01, 1 - nx) : nw,
-            h: ny + nh > 1 ? Math.max(0.01, 1 - ny) : nh,
-        };
-    };
-
-    const applyPortraitSplitDefaults = () => {
-        setClipEditorDraft(prev => {
-            const next: Partial<Clip> = { ...(prev || {}), portrait_split_enabled: true };
-            if (next.portrait_top_crop_x == null) next.portrait_top_crop_x = 0;
-            if (next.portrait_top_crop_y == null) next.portrait_top_crop_y = 0;
-            if (next.portrait_top_crop_w == null) next.portrait_top_crop_w = 1;
-            if (next.portrait_top_crop_h == null) next.portrait_top_crop_h = 0.5;
-            if (next.portrait_bottom_crop_x == null) next.portrait_bottom_crop_x = 0;
-            if (next.portrait_bottom_crop_y == null) next.portrait_bottom_crop_y = 0.5;
-            if (next.portrait_bottom_crop_w == null) next.portrait_bottom_crop_w = 1;
-            if (next.portrait_bottom_crop_h == null) next.portrait_bottom_crop_h = 0.5;
-            return next;
-        });
-    };
-
-    const getDraftCropRect = (target: 'main' | 'top' | 'bottom') => {
-        if (!clipEditorDraft) return { x: 0, y: 0, w: 1, h: 1 };
-        if (target === 'top') {
-            return normalizeCropRect(
-                clipEditorDraft.portrait_top_crop_x,
-                clipEditorDraft.portrait_top_crop_y,
-                clipEditorDraft.portrait_top_crop_w,
-                clipEditorDraft.portrait_top_crop_h,
-                { x: 0, y: 0, w: 1, h: 0.5 },
-            );
-        }
-        if (target === 'bottom') {
-            return normalizeCropRect(
-                clipEditorDraft.portrait_bottom_crop_x,
-                clipEditorDraft.portrait_bottom_crop_y,
-                clipEditorDraft.portrait_bottom_crop_w,
-                clipEditorDraft.portrait_bottom_crop_h,
-                { x: 0, y: 0.5, w: 1, h: 0.5 },
-            );
-        }
-        return normalizeCropRect(
-            clipEditorDraft.crop_x,
-            clipEditorDraft.crop_y,
-            clipEditorDraft.crop_w,
-            clipEditorDraft.crop_h,
-        );
-    };
-
-    const setDraftCropRect = (target: 'main' | 'top' | 'bottom', rect: { x: number; y: number; w: number; h: number }) => {
-        const x = Number(clampNorm(rect.x).toFixed(4));
-        const y = Number(clampNorm(rect.y).toFixed(4));
-        const w = Number(Math.max(0.01, Math.min(1 - x, rect.w)).toFixed(4));
-        const h = Number(Math.max(0.01, Math.min(1 - y, rect.h)).toFixed(4));
-        if (target === 'top') {
-            updateClipDraftField('portrait_top_crop_x', x);
-            updateClipDraftField('portrait_top_crop_y', y);
-            updateClipDraftField('portrait_top_crop_w', w);
-            updateClipDraftField('portrait_top_crop_h', h);
-            return;
-        }
-        if (target === 'bottom') {
-            updateClipDraftField('portrait_bottom_crop_x', x);
-            updateClipDraftField('portrait_bottom_crop_y', y);
-            updateClipDraftField('portrait_bottom_crop_w', w);
-            updateClipDraftField('portrait_bottom_crop_h', h);
-            return;
-        }
-        updateClipDraftField('crop_x', x);
-        updateClipDraftField('crop_y', y);
-        updateClipDraftField('crop_w', w);
-        updateClipDraftField('crop_h', h);
-    };
-
-    const nudgeClipBoundary = (which: 'start' | 'end', deltaSec: number) => {
-        if (!clipEditorDraft) return;
-        const start = Number(clipEditorDraft.start_time ?? 0);
-        const end = Number(clipEditorDraft.end_time ?? 0);
-        if (!Number.isFinite(start) || !Number.isFinite(end)) return;
-        if (which === 'start') {
-            const next = Math.max(0, Math.min(end - 0.05, start + deltaSec));
-            updateClipDraftField('start_time', Number(next.toFixed(3)));
-        } else {
-            const next = Math.max(start + 0.05, end + deltaSec);
-            updateClipDraftField('end_time', Number(next.toFixed(3)));
-        }
-    };
-
-    const setClipBoundaryFromPlayhead = (which: 'start' | 'end') => {
-        if (!clipEditorDraft || !Number.isFinite(currentTime)) return;
-        const start = Number(clipEditorDraft.start_time ?? 0);
-        const end = Number(clipEditorDraft.end_time ?? 0);
-        if (which === 'start') {
-            updateClipDraftField('start_time', Number(Math.max(0, Math.min(currentTime, end - 0.05)).toFixed(3)));
-        } else {
-            updateClipDraftField('end_time', Number(Math.max(start + 0.05, currentTime).toFixed(3)));
-        }
-    };
-
-    const getEditorMediaDuration = () => {
-        const byVideo = Number(video?.duration || 0);
-        if (Number.isFinite(byVideo) && byVideo > 1) return byVideo;
-        const segMax = segments.reduce((m, s) => Math.max(m, Number(s.end_time || 0)), 0);
-        if (Number.isFinite(segMax) && segMax > 1) return segMax;
-        const clipEnd = Number(clipEditorDraft?.end_time || 0);
-        return Math.max(clipEnd + 1, 60);
-    };
-
-    const timelineTimeToPct = (t: number, duration: number) => {
-        if (!Number.isFinite(duration) || duration <= 0) return 0;
-        return clampNorm(t / duration);
-    };
-
-    const timelineEventToTime = (evt: { clientX: number }, duration: number) => {
-        if (!clipTimelineRef.current) return 0;
-        const bounds = clipTimelineRef.current.getBoundingClientRect();
-        if (bounds.width <= 0) return 0;
-        const ratio = clampNorm((evt.clientX - bounds.left) / bounds.width);
-        return ratio * duration;
-    };
-
-    const beginClipTimelineDrag = (handle: 'start' | 'end', e: any) => {
-        e.preventDefault();
-        e.stopPropagation();
-        setClipTimelineDrag({ handle });
-    };
-
-    const handleTimelineScrub = (e: any) => {
-        if (!clipEditorDraft) return;
-        const duration = getEditorMediaDuration();
-        const t = timelineEventToTime(e, duration);
-        handleSeek(t);
-    };
-
-    const handleCropPreviewPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-        if (!clipEditorDraft || !cropPreviewRef.current) return;
-        if (clipEditorCropTarget !== 'main') {
-            const splitEnabled = String(clipEditorDraft.aspect_ratio || 'source') === '9:16' && !!clipEditorDraft.portrait_split_enabled;
-            if (!splitEnabled) return;
-        }
-        const bounds = cropPreviewRef.current.getBoundingClientRect();
-        if (bounds.width <= 0 || bounds.height <= 0) return;
-        const nx = clampNorm((e.clientX - bounds.left) / bounds.width);
-        const ny = clampNorm((e.clientY - bounds.top) / bounds.height);
-        setClipEditorDragRect({
-            target: clipEditorCropTarget,
-            startX: nx,
-            startY: ny,
-            currentX: nx,
-            currentY: ny,
-        });
-    };
-
-    const saveClipEdit = async (clipId: number) => {
-        await useClipsStore.getState().saveClipEdit(clipId);
     };
 
     const downloadBlobResponse = (blob: Blob, filename: string) => {
@@ -3002,11 +2227,6 @@ export function VideoDetailPage() {
     }, [activeTab, video?.id]);
 
 
-    useEffect(() => {
-        if (activeTab !== 'cleanup' || !id || !isUploadedMedia) return;
-        void fetchCleanupWorkbench();
-        void fetchClearVoiceInstallInfo();
-    }, [activeTab, id, isUploadedMedia]);
     if (loading) {
         return (
             <div className="flex items-center justify-center h-screen bg-slate-50">
@@ -3071,34 +2291,34 @@ export function VideoDetailPage() {
             activeClassName: string;
             inactiveClassName: string;
         }> = [
-            {
-                id: 'original',
-                label: 'Original',
-                detail: 'Uploaded media',
-                icon: PlayCircle,
-                available: true,
-                activeClassName: 'border-slate-300 bg-slate-900 text-white shadow-sm',
-                inactiveClassName: 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50',
-            },
-            {
-                id: 'cleaned',
-                label: 'Cleanup',
-                detail: hasVoiceFixerCleaned ? 'VoiceFixer pass' : 'Run cleanup first',
-                icon: AudioLines,
-                available: hasVoiceFixerCleaned,
-                activeClassName: 'border-sky-200 bg-sky-600 text-white shadow-sm',
-                inactiveClassName: 'border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100',
-            },
-            {
-                id: 'reconstructed',
-                label: 'Rebuild',
-                detail: hasReconstructionAudio ? 'Conversation rebuild' : 'Run reconstruction first',
-                icon: Sparkles,
-                available: hasReconstructionAudio,
-                activeClassName: 'border-violet-200 bg-violet-600 text-white shadow-sm',
-                inactiveClassName: 'border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100',
-            },
-        ];
+                {
+                    id: 'original',
+                    label: 'Original',
+                    detail: 'Uploaded media',
+                    icon: PlayCircle,
+                    available: true,
+                    activeClassName: 'border-slate-300 bg-slate-900 text-white shadow-sm',
+                    inactiveClassName: 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50',
+                },
+                {
+                    id: 'cleaned',
+                    label: 'Cleanup',
+                    detail: hasVoiceFixerCleaned ? 'VoiceFixer pass' : 'Run cleanup first',
+                    icon: AudioLines,
+                    available: hasVoiceFixerCleaned,
+                    activeClassName: 'border-sky-200 bg-sky-600 text-white shadow-sm',
+                    inactiveClassName: 'border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100',
+                },
+                {
+                    id: 'reconstructed',
+                    label: 'Rebuild',
+                    detail: hasReconstructionAudio ? 'Conversation rebuild' : 'Run reconstruction first',
+                    icon: Sparkles,
+                    available: hasReconstructionAudio,
+                    activeClassName: 'border-violet-200 bg-violet-600 text-white shadow-sm',
+                    inactiveClassName: 'border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100',
+                },
+            ];
 
         return (
             <div className="mt-2 rounded-xl border border-slate-200 bg-white px-3 py-3 text-xs shadow-sm">
@@ -3123,9 +2343,8 @@ export function VideoDetailPage() {
                                     onClick={() => void handleSetUploadedPlaybackSource(option.id)}
                                     disabled={!option.available || episodeBusy || switchingReconstructionPlayback}
                                     title={!option.available ? option.detail : `Use ${option.label.toLowerCase()} audio for playback`}
-                                    className={`inline-flex min-w-[122px] items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
-                                        active ? option.activeClassName : option.inactiveClassName
-                                    }`}
+                                    className={`inline-flex min-w-[122px] items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${active ? option.activeClassName : option.inactiveClassName
+                                        }`}
                                 >
                                     {switchingReconstructionPlayback && active ? <Loader2 size={14} className="animate-spin" /> : <Icon size={14} />}
                                     <span className="min-w-0">
@@ -3181,50 +2400,50 @@ export function VideoDetailPage() {
                             </div>
                         </div>
                     ) : (
-                    isUploadedAudio ? (
-                        <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(circle_at_top,rgba(59,130,246,.24),transparent_45%),linear-gradient(135deg,#0f172a,#1e293b)] px-8">
-                            <div className="w-full max-w-2xl rounded-2xl border border-white/10 bg-white/10 p-6 text-white backdrop-blur-sm">
-                                <div className="mb-4 flex items-center gap-3">
-                                    <AudioLines size={18} className="text-blue-200" />
-                                    <div>
-                                        <div className="text-sm font-semibold">Audio Episode</div>
-                                        <div className="text-xs text-blue-100/80">{video?.title}</div>
+                        isUploadedAudio ? (
+                            <div className="flex h-full w-full items-center justify-center bg-[radial-gradient(circle_at_top,rgba(59,130,246,.24),transparent_45%),linear-gradient(135deg,#0f172a,#1e293b)] px-8">
+                                <div className="w-full max-w-2xl rounded-2xl border border-white/10 bg-white/10 p-6 text-white backdrop-blur-sm">
+                                    <div className="mb-4 flex items-center gap-3">
+                                        <AudioLines size={18} className="text-blue-200" />
+                                        <div>
+                                            <div className="text-sm font-semibold">Audio Episode</div>
+                                            <div className="text-xs text-blue-100/80">{video?.title}</div>
+                                        </div>
                                     </div>
+                                    <audio
+                                        ref={(element) => {
+                                            nativeMediaRef.current = element;
+                                        }}
+                                        src={localMediaUrl}
+                                        controls
+                                        preload="metadata"
+                                        className="w-full"
+                                        onLoadedMetadata={(e) => handleNativeMediaReady(e.currentTarget)}
+                                        onTimeUpdate={(e) => syncNativePlayerClock(e.currentTarget)}
+                                        onPlay={(e) => syncNativePlayerClock(e.currentTarget)}
+                                        onPause={(e) => syncNativePlayerClock(e.currentTarget)}
+                                        onRateChange={(e) => syncNativePlayerClock(e.currentTarget)}
+                                        onEnded={(e) => syncNativePlayerClock(e.currentTarget)}
+                                    />
                                 </div>
-                                <audio
-                                    ref={(element) => {
-                                        nativeMediaRef.current = element;
-                                    }}
-                                    src={localMediaUrl}
-                                    controls
-                                    preload="metadata"
-                                    className="w-full"
-                                    onLoadedMetadata={(e) => handleNativeMediaReady(e.currentTarget)}
-                                    onTimeUpdate={(e) => syncNativePlayerClock(e.currentTarget)}
-                                    onPlay={(e) => syncNativePlayerClock(e.currentTarget)}
-                                    onPause={(e) => syncNativePlayerClock(e.currentTarget)}
-                                    onRateChange={(e) => syncNativePlayerClock(e.currentTarget)}
-                                    onEnded={(e) => syncNativePlayerClock(e.currentTarget)}
-                                />
                             </div>
-                        </div>
-                    ) : (
-                        <video
-                            ref={(element) => {
-                                nativeMediaRef.current = element;
-                            }}
-                            src={localMediaUrl}
-                            controls
-                            preload="metadata"
-                            className="h-full w-full bg-black"
-                            onLoadedMetadata={(e) => handleNativeMediaReady(e.currentTarget)}
-                            onTimeUpdate={(e) => syncNativePlayerClock(e.currentTarget)}
-                            onPlay={(e) => syncNativePlayerClock(e.currentTarget)}
-                            onPause={(e) => syncNativePlayerClock(e.currentTarget)}
-                            onRateChange={(e) => syncNativePlayerClock(e.currentTarget)}
-                            onEnded={(e) => syncNativePlayerClock(e.currentTarget)}
-                        />
-                    )
+                        ) : (
+                            <video
+                                ref={(element) => {
+                                    nativeMediaRef.current = element;
+                                }}
+                                src={localMediaUrl}
+                                controls
+                                preload="metadata"
+                                className="h-full w-full bg-black"
+                                onLoadedMetadata={(e) => handleNativeMediaReady(e.currentTarget)}
+                                onTimeUpdate={(e) => syncNativePlayerClock(e.currentTarget)}
+                                onPlay={(e) => syncNativePlayerClock(e.currentTarget)}
+                                onPause={(e) => syncNativePlayerClock(e.currentTarget)}
+                                onRateChange={(e) => syncNativePlayerClock(e.currentTarget)}
+                                onEnded={(e) => syncNativePlayerClock(e.currentTarget)}
+                            />
+                        )
                     )
                 ) : (
                     <YouTube
@@ -3253,593 +2472,8 @@ export function VideoDetailPage() {
         </>
     );
 
-    const renderReconstructionVoiceReview = () => {
-        const selectedSpeaker = selectedReconstructionSpeaker;
-        const selectedSpeakerSamples = selectedSpeaker?.samples ?? [];
-        const selectedSpeakerPerformanceSample =
-            selectedSpeaker?.samples.find((sample) => sample.selected) ||
-            selectedSpeaker?.samples[0] ||
-            null;
-        const selectedSpeakerReferenceAudio = resolveWorkbenchAudioUrl(selectedSpeaker?.reference_audio_url);
-        const selectedSpeakerLatestTestAudio = resolveWorkbenchAudioUrl(selectedSpeaker?.latest_test_audio_url);
-
-        return (
-            <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)]">
-                <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="flex items-center justify-between gap-3">
-                        <div>
-                            <div className="text-sm font-semibold text-slate-900">Voice Queue</div>
-                            <div className="mt-1 text-xs text-slate-500">Work through each speaker until all cloned voices are approved.</div>
-                        </div>
-                        {reconstructionWorkbench && (
-                            <div className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
-                                {reconstructionWorkbench.speaker_count} total
-                            </div>
-                        )}
-                    </div>
-
-                    {!reconstructionWorkbench ? (
-                        <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
-                            {segments.length === 0
-                                ? 'Transcript and diarization are required before the reconstruction workbench can prepare voices.'
-                                : loadingReconstructionWorkbench
-                                    ? 'Preparing speaker references...'
-                                    : 'Load the workbench to inspect diarized voices.'}
-                        </div>
-                    ) : (
-                        <div className="mt-4 space-y-2">
-                            {reconstructionWorkbench.speakers.map((speaker) => (
-                                <button
-                                    key={speaker.speaker_id}
-                                    type="button"
-                                    onClick={() => setSelectedReconstructionSpeakerId(speaker.speaker_id)}
-                                    className={`w-full rounded-2xl border px-4 py-3 text-left transition-colors ${
-                                        selectedReconstructionSpeakerId === speaker.speaker_id
-                                            ? 'border-violet-300 bg-violet-50 shadow-sm'
-                                            : 'border-slate-200 bg-slate-50 hover:border-violet-200 hover:bg-violet-50/70'
-                                    }`}
-                                >
-                                    <div className="flex items-center justify-between gap-3">
-                                        <div className="min-w-0">
-                                            <div className="truncate text-sm font-semibold text-slate-900">{speaker.speaker_name}</div>
-                                            <div className="mt-1 text-xs text-slate-500">{speaker.segment_count} diarized segments</div>
-                                        </div>
-                                        <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${
-                                            speaker.approved
-                                                ? 'bg-emerald-100 text-emerald-700'
-                                                : 'bg-amber-100 text-amber-700'
-                                        }`}>
-                                            {speaker.approved ? 'Approved' : 'Needs review'}
-                                        </span>
-                                    </div>
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </div>
-
-                <div className="space-y-6">
-                    {!selectedSpeaker ? (
-                        <div className="rounded-[24px] border border-dashed border-slate-200 bg-white px-6 py-16 text-center shadow-sm">
-                            <div className="mx-auto max-w-xl">
-                                <div className="text-lg font-semibold text-slate-900">Select a voice to review</div>
-                                <p className="mt-2 text-sm leading-6 text-slate-600">
-                                    Use the voice queue to review source clips, clean noisy performance samples, audition test TTS, and approve each model before reconstruction.
-                                </p>
-                            </div>
-                        </div>
-                    ) : (
-                        <>
-                            <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
-                                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                                    <div>
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <div className="text-xl font-semibold text-slate-900">{selectedSpeaker.speaker_name}</div>
-                                            <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${
-                                                selectedSpeaker.approved
-                                                    ? 'bg-emerald-100 text-emerald-700'
-                                                    : 'bg-amber-100 text-amber-700'
-                                            }`}>
-                                                {selectedSpeaker.approved ? 'Voice approved' : 'Voice review pending'}
-                                            </span>
-                                        </div>
-                                        <div className="mt-2 text-sm text-slate-500">
-                                            {selectedSpeaker.segment_count} diarized segments, {selectedSpeakerSamples.length} active performance sample{selectedSpeakerSamples.length === 1 ? '' : 's'}
-                                        </div>
-                                    </div>
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => void handleAddReconstructionSample(selectedSpeaker.speaker_id)}
-                                            disabled={addingReconstructionSampleSpeakerId === selectedSpeaker.speaker_id || !selectedSpeaker.can_add_sample}
-                                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                                        >
-                                            {addingReconstructionSampleSpeakerId === selectedSpeaker.speaker_id ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
-                                            Add Performance Sample
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => void handleApproveReconstructionSpeaker(selectedSpeaker.speaker_id, !selectedSpeaker.approved)}
-                                            disabled={approvingReconstructionSpeakerId === selectedSpeaker.speaker_id}
-                                            className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50 ${
-                                                selectedSpeaker.approved
-                                                    ? 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                                                    : 'bg-emerald-600 text-white hover:bg-emerald-700'
-                                            }`}
-                                        >
-                                            {approvingReconstructionSpeakerId === selectedSpeaker.speaker_id ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
-                                            {selectedSpeaker.approved ? 'Mark as Needs Review' : 'Approve Voice Model'}
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
-                                <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
-                                    <div className="text-sm font-semibold text-slate-900">Source Material</div>
-                                    <div className="mt-1 text-xs text-slate-500">Preview the clean timbre reference and review candidate performance samples for this speaker.</div>
-
-                                    <div className="mt-5">
-                                        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                                            <div className="mb-2 flex items-center justify-between gap-2">
-                                                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Timbre Reference</div>
-                                                {selectedSpeaker.reference_start_time != null && selectedSpeaker.reference_end_time != null && (
-                                                    <span className="text-[11px] font-medium text-slate-500">
-                                                        {formatTime(selectedSpeaker.reference_start_time)}-{formatTime(selectedSpeaker.reference_end_time)}
-                                                    </span>
-                                                )}
-                                            </div>
-                                            {selectedSpeakerReferenceAudio ? (
-                                                <audio controls preload="none" src={selectedSpeakerReferenceAudio} className="w-full" />
-                                            ) : (
-                                                <div className="rounded-xl border border-dashed border-slate-200 bg-white px-3 py-5 text-center text-xs text-slate-500">
-                                                    No clean reference clip is ready yet.
-                                                </div>
-                                            )}
-                                            {selectedSpeaker.reference_text && (
-                                                <div className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs leading-5 text-slate-600">
-                                                    {selectedSpeaker.reference_text}
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    <div className="mt-5">
-                                        <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Performance Samples</div>
-                                        {selectedSpeakerSamples.length === 0 ? (
-                                            <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
-                                                No active performance samples yet for this speaker.
-                                            </div>
-                                        ) : (
-                                            <div className="space-y-4">
-                                                {selectedSpeakerSamples.map((sample) => {
-                                                    const sampleKey = `${selectedSpeaker.speaker_id}:${sample.segment_id}`;
-                                                    const sampleAudioUrl = resolveWorkbenchAudioUrl(sample.audio_url);
-                                                    const cleanedAudioUrl = resolveWorkbenchAudioUrl(sample.cleaned_audio_url);
-                                                    const sampleBusy = updatingReconstructionSampleKey === sampleKey || cleaningReconstructionSampleKey === sampleKey;
-                                                    return (
-                                                        <div
-                                                            key={sample.segment_id}
-                                                            className={`rounded-2xl border p-4 ${sample.selected ? 'border-violet-300 bg-violet-50/70' : sample.rejected ? 'border-slate-200 bg-slate-50 opacity-85' : 'border-slate-200 bg-white'}`}
-                                                        >
-                                                            <div className="space-y-3">
-                                                                <div className="flex flex-wrap items-center gap-2">
-                                                                    <span className="text-sm font-semibold text-slate-900">Sample {sample.segment_id}</span>
-                                                                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">{formatTime(sample.start_time)}-{formatTime(sample.end_time)}</span>
-                                                                    <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">{sample.duration.toFixed(1)}s</span>
-                                                                    {sample.selected && <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700">Selected</span>}
-                                                                    {sample.rejected && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-700">Rejected</span>}
-                                                                    {cleanedAudioUrl && <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700">Cleaned</span>}
-                                                                </div>
-                                                                <div className="rounded-xl border border-slate-200 bg-white px-3 py-3 text-sm leading-7 text-slate-700 break-words">
-                                                                    {sample.text}
-                                                                </div>
-                                                                <div className="flex flex-wrap items-center gap-2">
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => void handleUpdateReconstructionSampleState(selectedSpeaker.speaker_id, sample.segment_id, { selected: true, rejected: false })}
-                                                                        disabled={sampleBusy || sample.rejected}
-                                                                        className="inline-flex items-center gap-1.5 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50"
-                                                                    >
-                                                                        <CheckCircle2 size={13} />
-                                                                        {sample.selected ? 'Selected Reference' : 'Use for Voice Model'}
-                                                                    </button>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => void handleCleanupReconstructionSample(selectedSpeaker.speaker_id, sample.segment_id)}
-                                                                        disabled={sampleBusy}
-                                                                        className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-medium text-sky-700 hover:bg-sky-100 disabled:opacity-50"
-                                                                    >
-                                                                        {cleaningReconstructionSampleKey === sampleKey ? <Loader2 size={13} className="animate-spin" /> : <Eraser size={13} />}
-                                                                        {cleanedAudioUrl ? 'Re-clean Audio' : 'Clean Audio'}
-                                                                    </button>
-                                                                    {cleanedAudioUrl && (
-                                                                        <button
-                                                                            type="button"
-                                                                            onClick={() => void handleUpdateReconstructionSampleState(selectedSpeaker.speaker_id, sample.segment_id, { clear_cleaned: true })}
-                                                                            disabled={sampleBusy}
-                                                                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                                                                        >
-                                                                            <RotateCcw size={13} />
-                                                                            Remove Cleaned
-                                                                        </button>
-                                                                    )}
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => void handleUpdateReconstructionSampleState(selectedSpeaker.speaker_id, sample.segment_id, sample.rejected ? { rejected: false } : { rejected: true })}
-                                                                        disabled={sampleBusy}
-                                                                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                                                                    >
-                                                                        <XCircle size={13} />
-                                                                        {sample.rejected ? 'Restore Sample' : 'Reject Sample'}
-                                                                    </button>
-                                                                </div>
-                                                            </div>
-
-                                                            <div className="mt-4 grid gap-4 lg:grid-cols-2">
-                                                                <div>
-                                                                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Original Performance Clip</div>
-                                                                    {sampleAudioUrl ? (
-                                                                        <audio controls preload="none" src={sampleAudioUrl} className="w-full" />
-                                                                    ) : (
-                                                                        <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-center text-xs text-slate-500">
-                                                                            Original clip unavailable.
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                                <div>
-                                                                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Cleaned Performance Clip</div>
-                                                                    {cleanedAudioUrl ? (
-                                                                        <audio controls preload="none" src={cleanedAudioUrl} className="w-full" />
-                                                                    ) : (
-                                                                        <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-center text-xs text-slate-500">
-                                                                            Run cleanup if you want a cleaner performance reference for this sample.
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-
-                                <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
-                                    <div className="text-sm font-semibold text-slate-900">Voice Model Test</div>
-                                    <div className="mt-1 text-xs text-slate-500">Compare a plain TTS sample against a performance-guided sample before approving this speaker.</div>
-
-                                    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-6 text-slate-600">
-                                        Basic TTS checks timbre on arbitrary text. Performance-guided testing uses the selected performance sample as the delivery guide, which is usually the better check when cadence or speech rate feels off.
-                                    </div>
-
-                                    <label className="mt-4 block text-xs text-slate-600">
-                                        <div className="mb-2 font-medium text-slate-700">Custom text for Basic TTS</div>
-                                        <textarea
-                                            value={reconstructionTestTextDrafts[selectedSpeaker.speaker_id] || ''}
-                                            onChange={(e) => setReconstructionTestTextDrafts((prev) => ({ ...prev, [selectedSpeaker.speaker_id]: e.target.value }))}
-                                            rows={7}
-                                            disabled={episodeBusy}
-                                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
-                                            placeholder="Enter a short sentence to audition the voice without performance guidance."
-                                        />
-                                    </label>
-
-                                    <div className="mt-3 rounded-2xl border border-violet-200 bg-violet-50/60 px-4 py-3 text-xs leading-6 text-violet-900">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-violet-700">Performance-Guided Source</div>
-                                        {selectedSpeakerPerformanceSample ? (
-                                            <div className="mt-1">
-                                                Sample {selectedSpeakerPerformanceSample.segment_id} at {formatTime(selectedSpeakerPerformanceSample.start_time)}-{formatTime(selectedSpeakerPerformanceSample.end_time)}.
-                                                The performance-guided test uses this sample's original transcript and delivery as the prosody guide.
-                                            </div>
-                                        ) : (
-                                            <div className="mt-1">Select at least one performance sample to unlock the performance-guided voice test.</div>
-                                        )}
-                                    </div>
-
-                                    <div className="mt-4 flex flex-wrap items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => void handleTestReconstructionSpeaker(
-                                                selectedSpeaker.speaker_id,
-                                                selectedSpeakerPerformanceSample?.segment_id,
-                                                { performanceMode: false, useSelectedSampleText: false }
-                                            )}
-                                            disabled={testingReconstructionSpeakerId === selectedSpeaker.speaker_id}
-                                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                                        >
-                                            {testingReconstructionSpeakerId === selectedSpeaker.speaker_id ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
-                                            Run Basic TTS
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => void handleTestReconstructionSpeaker(
-                                                selectedSpeaker.speaker_id,
-                                                selectedSpeakerPerformanceSample?.segment_id,
-                                                { performanceMode: true, useSelectedSampleText: true }
-                                            )}
-                                            disabled={testingReconstructionSpeakerId === selectedSpeaker.speaker_id || !selectedSpeakerPerformanceSample}
-                                            className="inline-flex items-center gap-1.5 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
-                                        >
-                                            {testingReconstructionSpeakerId === selectedSpeaker.speaker_id ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                                            Run Performance-Guided Test
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => void handleApproveReconstructionSpeaker(selectedSpeaker.speaker_id, true)}
-                                            disabled={approvingReconstructionSpeakerId === selectedSpeaker.speaker_id}
-                                            className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
-                                        >
-                                            {approvingReconstructionSpeakerId === selectedSpeaker.speaker_id ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                                            Approve Voice
-                                        </button>
-                                    </div>
-
-                                    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                                        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Latest Voice Test</div>
-                                        {selectedSpeakerLatestTestAudio ? (
-                                            <>
-                                                <audio controls preload="none" src={selectedSpeakerLatestTestAudio} className="mt-3 w-full" />
-                                                <div className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs leading-5 text-slate-600">
-                                                    <div className="font-medium text-slate-700">Last prompt</div>
-                                                    <div className="mt-1 whitespace-pre-wrap">{selectedSpeaker.latest_test_text || 'No prompt saved.'}</div>
-                                                    <div className="mt-2 text-[11px] uppercase tracking-wide text-violet-600">
-                                                        {selectedSpeaker.latest_test_mode === 'performance' ? 'performance guided' : 'basic tts'}
-                                                    </div>
-                                                </div>
-                                            </>
-                                        ) : (
-                                            <div className="mt-3 rounded-xl border border-dashed border-slate-200 bg-white px-3 py-5 text-center text-xs text-slate-500">
-                                                No TTS test has been generated for this speaker yet.
-                                            </div>
-                                        )}
-                                    </div>
-
-                                    <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                                        <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Approval Checklist</div>
-                                        <ul className="mt-3 space-y-2 text-sm text-slate-600">
-                                            <li className="flex items-start gap-2">
-                                                <CheckCircle2 size={14} className={`mt-0.5 ${selectedSpeaker.samples.some((sample) => sample.selected) ? 'text-emerald-600' : 'text-slate-300'}`} />
-                                                <span>A performance sample is selected for this speaker.</span>
-                                            </li>
-                                            <li className="flex items-start gap-2">
-                                                <CheckCircle2 size={14} className={`mt-0.5 ${!!selectedSpeaker.latest_test_audio_url ? 'text-emerald-600' : 'text-slate-300'}`} />
-                                                <span>You have listened to at least one TTS test output.</span>
-                                            </li>
-                                            <li className="flex items-start gap-2">
-                                                <CheckCircle2 size={14} className={`mt-0.5 ${selectedSpeaker.approved ? 'text-emerald-600' : 'text-slate-300'}`} />
-                                                <span>The speaker voice model is approved.</span>
-                                            </li>
-                                        </ul>
-                                    </div>
-                                </div>
-                            </div>
-                        </>
-                    )}
-                </div>
-            </div>
-        );
-    };
-
-    const renderReconstructionBuildSuite = () => {
-        const speakerCount = reconstructionWorkbench?.speaker_count ?? 0;
-        const approvedCount = reconstructionWorkbench?.speakers.filter((speaker) => speaker.approved).length ?? 0;
-        const pendingCount = Math.max(0, speakerCount - approvedCount);
-        const previewCandidates = segments
-            .filter((seg) => seg.speaker_id != null && String(seg.text || '').trim())
-            .slice(0, 120);
-        const selectedPreviewSegment =
-            previewCandidates.find((seg) => seg.id === selectedReconstructionPreviewSegmentId) ||
-            previewCandidates[0] ||
-            null;
-
-        if (!reconstructionWorkbench?.all_speakers_approved) {
-            return (
-                <div className="rounded-[24px] border border-amber-200 bg-amber-50 p-6 shadow-sm">
-                    <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-                        <div>
-                            <div className="text-sm font-semibold text-amber-800">Voice approval required before reconstruction</div>
-                            <div className="mt-2 text-sm leading-6 text-amber-900/80">
-                                Review and approve all speaker voices first. {pendingCount} voice model{pendingCount === 1 ? '' : 's'} still need approval before the reconstruction tab can be used.
-                            </div>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={() => setReconstructionStudioTab('voices')}
-                            className="inline-flex items-center gap-1.5 rounded-xl border border-amber-300 bg-white px-4 py-2.5 text-sm font-medium text-amber-800 hover:bg-amber-100"
-                        >
-                            <Users size={14} />
-                            Go back to Voices
-                        </button>
-                    </div>
-                </div>
-            );
-        }
-
-        return (
-            <div className="grid gap-6 xl:grid-cols-[minmax(0,0.95fr)_minmax(340px,1.05fr)]">
-                <div className="space-y-6">
-                    <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
-                        <div className="flex items-center justify-between gap-3">
-                            <div>
-                                <div className="text-sm font-semibold text-slate-900">Reconstruction Settings</div>
-                                <div className="mt-1 text-xs text-slate-500">Configure cloning mode and performance-driven prosody before previewing or rebuilding.</div>
-                            </div>
-                            <button
-                                type="button"
-                                onClick={() => void handleSaveReconstructionSettings()}
-                                disabled={episodeBusy || savingReconstructionSettings}
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                            >
-                                {savingReconstructionSettings ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                                Save Settings
-                            </button>
-                        </div>
-                        <div className="mt-4 space-y-4">
-                            <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-xs leading-6 text-violet-900">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-violet-700">Mode</div>
-                                <div className="mt-1 text-sm font-medium text-violet-900">Performance-driven reconstruction</div>
-                                <div className="mt-1 text-violet-900/80">
-                                    Reconstruction always uses the original segment as a prosody guide and the approved voice reference for timbre consistency.
-                                </div>
-                            </div>
-                            <label className="block text-xs text-slate-600">
-                                <div className="mb-1 font-medium text-slate-700">Performance Instruction</div>
-                                <textarea
-                                    value={reconstructionInstructionDraft}
-                                    onChange={(e) => setReconstructionInstructionDraft(e.target.value)}
-                                    disabled={episodeBusy}
-                                    rows={7}
-                                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
-                                    placeholder="Speak with the exact same intonation, emotion, rhythm, breathing, pauses, and emphasis as the reference audio..."
-                                />
-                            </label>
-                            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-6 text-slate-600">
-                                Performance mode uses the original utterance as a prosody guide and the approved speaker reference for timbre.
-                            </div>
-                        </div>
-                    </div>
-
-                    {hasReconstructionAudio && reconstructionAudioUrl && (
-                        <div className="rounded-[24px] border border-violet-200 bg-white p-5 shadow-sm">
-                            <div className="flex items-center justify-between gap-3">
-                                <div>
-                                    <div className="text-sm font-semibold text-slate-900">Reconstructed Audio</div>
-                                    <div className="mt-1 text-xs text-slate-500">Preview the current rebuilt WAV and choose whether playback should follow it.</div>
-                                </div>
-                                {video?.reconstruction_model && (
-                                    <span className="inline-flex items-center rounded-full bg-violet-100 px-2.5 py-1 text-[11px] font-medium text-violet-700">
-                                        {video.reconstruction_model}
-                                    </span>
-                                )}
-                            </div>
-                            <audio controls preload="none" src={reconstructionAudioUrl} className="mt-4 w-full" />
-                            <div className="mt-4 flex flex-wrap items-center gap-2">
-                                <button
-                                    type="button"
-                                    onClick={() => void handleSetReconstructionPlayback(!usingReconstructionForPlayback)}
-                                    disabled={episodeBusy || switchingReconstructionPlayback}
-                                    className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50 ${
-                                        usingReconstructionForPlayback
-                                            ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                                            : 'border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100'
-                                    }`}
-                                >
-                                    {switchingReconstructionPlayback ? <Loader2 size={13} className="animate-spin" /> : <PlayCircle size={13} />}
-                                    {usingReconstructionForPlayback ? 'Use Original Media for Playback' : 'Use Reconstruction for Playback'}
-                                </button>
-                                <a
-                                    href={reconstructionAudioUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="inline-flex items-center gap-1.5 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-medium text-violet-700 hover:bg-violet-100"
-                                >
-                                    <Download size={13} />
-                                    Open / Download WAV
-                                </a>
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                <div className="space-y-6">
-                    <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
-                        <div className="flex items-center justify-between gap-3">
-                            <div>
-                                <div className="text-sm font-semibold text-slate-900">Short Segment Preview</div>
-                                <div className="mt-1 text-xs text-slate-500">Render a small sample with the current settings before running the full reconstruction job.</div>
-                            </div>
-                            <button
-                                type="button"
-                                onClick={() => selectedPreviewSegment && void handlePreviewReconstructionSegment(selectedPreviewSegment.id)}
-                                disabled={previewingReconstructionSegment || !selectedPreviewSegment}
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50"
-                            >
-                                {previewingReconstructionSegment ? <Loader2 size={13} className="animate-spin" /> : <PlayCircle size={13} />}
-                                Preview Segment
-                            </button>
-                        </div>
-
-                        <div className="mt-4 grid gap-3 md:grid-cols-2">
-                            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Approved voices</div>
-                                <div className="mt-1 text-2xl font-semibold text-slate-900">{approvedCount}</div>
-                            </div>
-                            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Previewable segments</div>
-                                <div className="mt-1 text-2xl font-semibold text-slate-900">{previewCandidates.length}</div>
-                            </div>
-                        </div>
-
-                        <label className="mt-4 block text-xs text-slate-600">
-                            <div className="mb-1 font-medium text-slate-700">Segment</div>
-                            <select
-                                value={selectedPreviewSegment?.id ?? ''}
-                                onChange={(e) => setSelectedReconstructionPreviewSegmentId(Number(e.target.value))}
-                                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
-                            >
-                                {previewCandidates.map((seg) => (
-                                    <option key={seg.id} value={seg.id}>
-                                        {formatTime(seg.start_time)} - {String(seg.speaker || seg.speaker_id || 'Speaker')} - {String(seg.text || '').slice(0, 64)}
-                                    </option>
-                                ))}
-                            </select>
-                        </label>
-
-                        {selectedPreviewSegment && (
-                            <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-700">
-                                {selectedPreviewSegment.text}
-                            </div>
-                        )}
-
-                        {reconstructionPreviewAudioUrl && (
-                            <div className="mt-4 rounded-2xl border border-violet-200 bg-violet-50/60 p-4">
-                                <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-violet-700">
-                                    <span>Preview Ready</span>
-                                    <span className="rounded-full bg-white px-2 py-0.5 text-violet-700">performance mode</span>
-                                </div>
-                                <audio controls preload="none" src={reconstructionPreviewAudioUrl} className="mt-3 w-full" />
-                                {reconstructionPreviewText && (
-                                    <div className="mt-3 rounded-xl border border-violet-200 bg-white px-3 py-2 text-xs leading-5 text-slate-600">
-                                        {reconstructionPreviewText}
-                                    </div>
-                                )}
-                            </div>
-                        )}
-                    </div>
-
-                    <div className="rounded-[24px] border border-violet-200 bg-violet-50/60 p-5 shadow-sm">
-                        <div className="text-sm font-semibold text-slate-900">Full Reconstruction</div>
-                        <div className="mt-1 text-xs leading-6 text-slate-600">
-                            Once the short preview sounds right, run the full conversation reconstruction across the diarized transcript timeline.
-                        </div>
-                        <div className="mt-4 flex flex-wrap items-center gap-2">
-                            <button
-                                type="button"
-                                onClick={() => void handleQueueReconstruction(hasReconstructionAudio)}
-                                disabled={episodeBusy || segments.length === 0}
-                                className="inline-flex items-center gap-1.5 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
-                            >
-                                {queueingReconstruction || reconstructionBusy ? <Loader2 size={15} className="animate-spin" /> : <Bot size={15} />}
-                                {hasReconstructionAudio ? 'Rebuild Reconstruction' : 'Run Full Reconstruction'}
-                            </button>
-                            <div className="inline-flex items-center gap-1.5 rounded-xl border border-violet-200 bg-white px-3 py-2 text-xs font-medium text-violet-700">
-                                <Clock size={13} />
-                                Preview first, then commit
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        );
-    };
-
     const currentWorkbenchProgress = workbenchTaskProgress && String(workbenchTaskProgress.status || '').toLowerCase() !== 'idle'
         ? workbenchTaskProgress
-        : null;
-    const cleanupWorkbenchProgress = currentWorkbenchProgress && String(currentWorkbenchProgress.area || '').toLowerCase() === 'cleanup'
-        ? currentWorkbenchProgress
         : null;
     const reconstructionWorkbenchProgress = currentWorkbenchProgress && String(currentWorkbenchProgress.area || '').toLowerCase() === 'reconstruction'
         ? currentWorkbenchProgress
@@ -3929,56 +2563,6 @@ export function VideoDetailPage() {
             </div>
         );
     };
-
-    const cleanupWorkbenchActivity: WorkbenchActivity | null = loadingCleanupWorkbench
-        ? {
-            label: 'Loading cleanup workbench',
-            detail: 'Refreshing the ClearVoice prep area and current pre-cleanup candidates.',
-            tone: 'sky',
-        }
-        : analyzingCleanupWorkbench
-            ? {
-                label: 'Analyzing uploaded audio',
-                detail: 'Inspecting the original upload so the pre-cleanup bench can suggest the right enhancement tools.',
-                tone: 'sky',
-            }
-            : runningClearVoiceModel !== null
-                ? {
-                    label: 'Generating ClearVoice candidate',
-                    detail: `Running ${runningClearVoiceModel} before the existing VoiceFixer cleanup step.`,
-                    tone: 'sky',
-                }
-                : selectingCleanupCandidateId !== null
-                    ? {
-                        label: 'Selecting pre-cleanup source',
-                        detail: 'Updating which ClearVoice candidate should feed the existing VoiceFixer cleanup pass.',
-                        tone: 'sky',
-                    }
-                    : installingClearVoice
-                        ? {
-                            label: 'Installing ClearVoice',
-                            detail: 'Adding the ClearVoice runtime to the backend environment.',
-                            tone: 'sky',
-                        }
-                        : testingClearVoice
-                            ? {
-                                label: 'Testing ClearVoice',
-                                detail: 'Verifying the ClearVoice runtime before generating enhancement candidates.',
-                                tone: 'sky',
-                            }
-                            : savingVoiceFixerSettings
-        ? {
-            label: 'Saving cleanup settings',
-            detail: 'Updating the cleanup recipe for this episode before the next rebuild.',
-            tone: 'sky',
-        }
-        : queueingVoiceFixer
-            ? {
-                label: 'Starting cleanup job',
-                detail: 'Queueing the VoiceFixer pass now. The stage breakdown appears below once the job is registered.',
-                tone: 'sky',
-            }
-            : null;
 
     const reconstructionWorkbenchActivity: WorkbenchActivity | null = loadingReconstructionWorkbench
         ? {
@@ -4596,530 +3180,6 @@ export function VideoDetailPage() {
                             </div>
                         </>
                     )}
-                </div>
-            </div>
-        );
-    };
-
-    const renderCleanupStudio = () => {
-        const clearVoiceEnhancementModels = [
-            { model: 'FRCRN_SE_16K', label: 'FRCRN 16k', detail: 'Focused on rough, narrowband speech cleanup.' },
-            { model: 'MossFormerGAN_SE_16K', label: 'MossFormerGAN 16k', detail: 'Stronger denoising pass for difficult speech.' },
-            { model: 'MossFormer2_SE_48K', label: 'MossFormer2 48k', detail: 'Full-band enhancement for higher fidelity sources.' },
-        ];
-        const clearVoiceInstalled = !!clearVoiceInstallInfo?.installed;
-        const clearVoiceNeedsRestart = !!clearVoiceInstallInfo?.restart_required;
-        const clearVoiceRuntimeReady = !!clearVoiceInstallInfo?.runtime_ready;
-        const selectedPreCleanupLabel = cleanupWorkbench?.selected_source_label || 'Original upload';
-        const desiredApplyScopeLabel = voiceFixerApplyScopeDraft === 'both'
-            ? 'Playback + processing'
-            : voiceFixerApplyScopeDraft === 'playback'
-                ? 'Playback only'
-                : voiceFixerApplyScopeDraft === 'processing'
-                    ? 'Processing only'
-                    : 'Original only';
-
-        return (
-            <div className="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_top,rgba(14,165,233,.12),transparent_38%),linear-gradient(180deg,#f8fafc,#eff6ff)] p-6">
-                <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
-                    <div className="rounded-[28px] border border-sky-200 bg-white/90 p-6 shadow-[0_24px_60px_rgba(14,116,144,0.08)] backdrop-blur-sm">
-                        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                            <div className="max-w-3xl">
-                                <div className="text-xs font-semibold uppercase tracking-[0.28em] text-sky-600">Cleanup Workbench</div>
-                                <h2 className="mt-2 text-2xl font-semibold text-slate-900">Tune, rebuild, and route the cleaned pass</h2>
-                                <p className="mt-2 text-sm leading-6 text-slate-600">
-                                    VoiceFixer cleanup now lives in its own studio. Dial in the pass, rebuild the cleaned media, then decide whether playback and downstream processing should use it.
-                                </p>
-                            </div>
-                            <div className="flex flex-wrap items-center gap-2">
-                                <button
-                                    type="button"
-                                    onClick={() => void handleSaveVoiceFixerSettings()}
-                                    disabled={episodeBusy || savingVoiceFixerSettings}
-                                    className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm font-medium text-sky-700 hover:bg-sky-100 disabled:opacity-50"
-                                >
-                                    {savingVoiceFixerSettings ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}
-                                    Save Settings
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={() => void handleQueueVoiceFixer(hasVoiceFixerCleaned)}
-                                    disabled={episodeBusy}
-                                    className="inline-flex items-center gap-1.5 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-                                >
-                                    {queueingVoiceFixer || voiceFixerBusy ? <Loader2 size={15} className="animate-spin" /> : <AudioLines size={15} />}
-                                    {hasVoiceFixerCleaned ? 'Rebuild Cleanup' : 'Run Cleanup'}
-                                </button>
-                            </div>
-                        </div>
-                        <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${voiceFixerStatusTone}`}>
-                            {voiceFixerStatusMessage}
-                        </div>
-                        {cleanupWorkbenchActivity && (
-                            <div className="mt-4">
-                                {renderWorkbenchActivityCard(cleanupWorkbenchActivity)}
-                            </div>
-                        )}
-                        {voiceFixerJob && renderAuxiliaryProgressCard('voicefixer', voiceFixerJob, { className: 'mt-4 border-sky-200 bg-sky-50/50' })}
-                        <div className="mt-4 grid gap-3 md:grid-cols-3">
-                            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Cleanup mode</div>
-                                <div className="mt-1 text-2xl font-semibold text-slate-900">Mode {voiceFixerModeDraft}</div>
-                            </div>
-                            <div className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Playback route</div>
-                                <div className="mt-1 text-2xl font-semibold text-sky-900">{usingVoiceFixerForPlayback ? 'Cleaned' : 'Original'}</div>
-                            </div>
-                            <div className="rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-indigo-700">Processing route</div>
-                                <div className="mt-1 text-2xl font-semibold text-indigo-900">{usingVoiceFixerForProcessing ? 'Cleaned' : 'Original'}</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="grid gap-6 xl:grid-cols-[minmax(0,1.08fr)_380px]">
-                        <div className="space-y-6">
-                            <div className="rounded-[24px] border border-sky-200 bg-white p-5 shadow-sm">
-                                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                                    <div className="max-w-3xl">
-                                        <div className="text-sm font-semibold text-slate-900">Pre-Cleanup Bench</div>
-                                        <div className="mt-1 text-xs leading-6 text-slate-500">
-                                            Run ClearVoice enhancement passes before the existing VoiceFixer cleanup. The selected candidate becomes the input source for the next VoiceFixer rebuild.
-                                        </div>
-                                    </div>
-                                    <div className="flex flex-wrap items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => void handleAnalyzeCleanupWorkbench()}
-                                            disabled={episodeBusy || analyzingCleanupWorkbench}
-                                            className="inline-flex items-center gap-1.5 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs font-medium text-sky-700 hover:bg-sky-100 disabled:opacity-50"
-                                        >
-                                            {analyzingCleanupWorkbench ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-                                            Analyze Upload
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => void fetchCleanupWorkbench()}
-                                            disabled={loadingCleanupWorkbench}
-                                            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                                        >
-                                            {loadingCleanupWorkbench ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-                                            Refresh Bench
-                                        </button>
-                                    </div>
-                                </div>
-
-                                <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                                    <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">VoiceFixer input source</div>
-                                    <div className="mt-1 text-lg font-semibold text-slate-900">{selectedPreCleanupLabel}</div>
-                                    <div className="mt-1 text-xs text-slate-500">
-                                        Use a ClearVoice candidate here when the original upload needs denoising before the existing VoiceFixer cleanup pass.
-                                    </div>
-                                </div>
-
-                                {cleanupWorkbenchProgress ? (
-                                    <div className="mt-4">
-                                        {renderWorkbenchTaskProgressCard(cleanupWorkbenchProgress)}
-                                    </div>
-                                ) : cleanupWorkbenchActivity ? (
-                                    <div className="mt-4">
-                                        {renderWorkbenchActivityCard(cleanupWorkbenchActivity)}
-                                    </div>
-                                ) : null}
-
-                                <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm leading-6 text-slate-700 ${clearVoiceInstalled && !clearVoiceNeedsRestart && clearVoiceRuntimeReady ? 'border-emerald-200 bg-emerald-50/70' : 'border-amber-200 bg-amber-50/70'}`}>
-                                    <div className="flex flex-wrap items-center justify-between gap-3">
-                                        <div>
-                                            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">ClearVoice Runtime</div>
-                                            <div className="mt-1">
-                                                {clearVoiceInstalled
-                                                    ? (clearVoiceNeedsRestart
-                                                        ? (clearVoiceInstallInfo?.message || 'ClearVoice is installed but the backend needs a restart before it can use it.')
-                                                        : (clearVoiceInstallInfo?.message || (clearVoiceInstallInfo?.runtime_ready ? 'ClearVoice is ready for pre-cleanup candidate generation.' : 'ClearVoice is installed, but its runtime still needs repair.')))
-                                                    : (loadingClearVoiceInstallInfo
-                                                        ? 'Checking ClearVoice availability...'
-                                                        : (clearVoiceInstallInfo?.message || 'ClearVoice is not installed yet. Install it to generate enhancement candidates before VoiceFixer.'))}
-                                            </div>
-                                            {clearVoiceInstalled && (
-                                                <div className="mt-1 text-[11px] text-slate-500">
-                                                    Torch: {clearVoiceInstallInfo?.torch_version || 'not detected'} | Torchaudio: {clearVoiceInstallInfo?.torchaudio_version || 'not detected'}
-                                                </div>
-                                            )}
-                                        </div>
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <button
-                                                type="button"
-                                                onClick={() => void handleInstallClearVoice()}
-                                                disabled={installingClearVoice || clearVoiceInstalled || loadingClearVoiceInstallInfo}
-                                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                                            >
-                                                {installingClearVoice ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
-                                                {clearVoiceInstalled ? 'Installed' : 'Install ClearVoice'}
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => void handleTestClearVoice()}
-                                                disabled={testingClearVoice || !clearVoiceInstalled || clearVoiceNeedsRestart || loadingClearVoiceInstallInfo}
-                                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                                            >
-                                                {testingClearVoice ? <Loader2 size={13} className="animate-spin" /> : <CheckCircle2 size={13} />}
-                                                Self-Test
-                                            </button>
-                                            <button
-                                                type="button"
-                                                onClick={() => void handleRepairClearVoice()}
-                                                disabled={repairingClearVoice || !clearVoiceInstalled || loadingClearVoiceInstallInfo}
-                                                className="inline-flex items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
-                                            >
-                                                {repairingClearVoice ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-                                                Repair Runtime
-                                            </button>
-                                        </div>
-                                    </div>
-                                    {clearVoiceTestResult && (
-                                        <div className={`mt-3 rounded-xl border px-3 py-2 text-xs ${clearVoiceTestResult.status === 'ok' ? 'border-emerald-200 bg-white text-emerald-700' : 'border-red-200 bg-white text-red-700'}`}>
-                                            <div>{clearVoiceTestResult.detail || clearVoiceTestResult.error || 'ClearVoice test finished.'}</div>
-                                            {(clearVoiceTestResult.torch_version || clearVoiceTestResult.torchaudio_version) && (
-                                                <div className="mt-1 text-[11px]">
-                                                    Torch: {clearVoiceTestResult.torch_version || 'not detected'} | Torchaudio: {clearVoiceTestResult.torchaudio_version || 'not detected'}
-                                                </div>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-
-                                <div className="mt-4 grid gap-3 md:grid-cols-4">
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Analyzed source</div>
-                                        <div className="mt-1 text-sm font-semibold text-slate-900">{cleanupWorkbench?.analysis?.source_label || 'Original upload'}</div>
-                                    </div>
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Duration</div>
-                                        <div className="mt-1 text-sm font-semibold text-slate-900">
-                                            {cleanupWorkbench?.analysis?.duration_seconds != null ? `${cleanupWorkbench.analysis.duration_seconds.toFixed(1)}s` : 'Not analyzed'}
-                                        </div>
-                                    </div>
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Sample rate</div>
-                                        <div className="mt-1 text-sm font-semibold text-slate-900">
-                                            {cleanupWorkbench?.analysis?.sample_rate != null ? `${cleanupWorkbench.analysis.sample_rate} Hz` : 'Not analyzed'}
-                                        </div>
-                                    </div>
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Channels</div>
-                                        <div className="mt-1 text-sm font-semibold text-slate-900">
-                                            {cleanupWorkbench?.analysis?.channels != null ? cleanupWorkbench.analysis.channels : 'Not analyzed'}
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="mt-5">
-                                    <div className="flex items-center justify-between gap-3">
-                                        <div>
-                                            <div className="text-sm font-semibold text-slate-900">Enhancement Candidates</div>
-                                            <div className="mt-1 text-xs text-slate-500">Generate one or more ClearVoice candidates, audition them, then choose the one that should feed the existing VoiceFixer cleanup step.</div>
-                                        </div>
-                                    </div>
-                                    <div className="mt-3 grid gap-3 md:grid-cols-3">
-                                        {clearVoiceEnhancementModels.map((entry) => (
-                                            <button
-                                                key={entry.model}
-                                                type="button"
-                                                onClick={() => void handleRunClearVoiceCandidate(entry.model)}
-                                                disabled={!clearVoiceInstalled || clearVoiceNeedsRestart || !clearVoiceRuntimeReady || runningClearVoiceModel !== null}
-                                                className="rounded-2xl border border-sky-200 bg-sky-50/70 p-4 text-left transition-colors hover:bg-sky-100 disabled:opacity-50"
-                                            >
-                                                <div className="flex items-center gap-2 text-sky-700">
-                                                    {runningClearVoiceModel === entry.model ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                                                    <span className="text-sm font-semibold">{entry.label}</span>
-                                                </div>
-                                                <div className="mt-2 text-xs leading-6 text-slate-600">{entry.detail}</div>
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-
-                                <div className="mt-5 space-y-3">
-                                    {cleanupWorkbench?.candidates?.length ? cleanupWorkbench.candidates.map((candidate) => (
-                                        <div key={candidate.candidate_id} className={`rounded-2xl border p-4 ${candidate.selected_for_processing ? 'border-sky-300 bg-sky-50/70' : 'border-slate-200 bg-white'}`}>
-                                            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                                                <div className="min-w-0">
-                                                    <div className="flex flex-wrap items-center gap-2">
-                                                        <div className="text-sm font-semibold text-slate-900">{candidate.model_name}</div>
-                                                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">{candidate.stage}</span>
-                                                        {candidate.selected_for_processing && <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700">Feeds VoiceFixer</span>}
-                                                    </div>
-                                                    <div className="mt-1 text-xs text-slate-500">Source: {candidate.source_label || 'Original upload'}</div>
-                                                </div>
-                                                <div className="flex flex-wrap items-center gap-2">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => void handleSelectCleanupCandidate(candidate.selected_for_processing ? null : candidate.candidate_id)}
-                                                        disabled={selectingCleanupCandidateId !== null}
-                                                        className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-medium transition-colors disabled:opacity-50 ${candidate.selected_for_processing ? 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50' : 'border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100'}`}
-                                                    >
-                                                        {selectingCleanupCandidateId === candidate.candidate_id ? <Loader2 size={13} className="animate-spin" /> : <AudioLines size={13} />}
-                                                        {candidate.selected_for_processing ? 'Use Original Upload' : 'Use Before VoiceFixer'}
-                                                    </button>
-                                                </div>
-                                            </div>
-                                            {candidate.audio_url && (
-                                                <audio controls preload="none" src={candidate.audio_url} className="mt-3 w-full" />
-                                            )}
-                                            <div className="mt-3 grid gap-2 sm:grid-cols-4">
-                                                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">Duration: {candidate.duration_seconds != null ? `${candidate.duration_seconds.toFixed(1)}s` : 'n/a'}</div>
-                                                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">Sample rate: {candidate.sample_rate != null ? `${candidate.sample_rate} Hz` : 'n/a'}</div>
-                                                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">Peak: {candidate.peak != null ? candidate.peak.toFixed(3) : 'n/a'}</div>
-                                                <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">RMS: {candidate.rms != null ? candidate.rms.toFixed(4) : 'n/a'}</div>
-                                            </div>
-                                        </div>
-                                    )) : (
-                                        <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
-                                            No ClearVoice candidates yet. Analyze the upload, then generate one or more enhancement passes before VoiceFixer.
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-
-                            <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
-                                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                                    <div>
-                                        <div className="text-sm font-semibold text-slate-900">Audition Current Episode Media</div>
-                                        <div className="mt-1 text-xs text-slate-500">
-                                            Use the player source switcher below to compare the original upload, cleanup pass, and reconstruction without leaving the workbench.
-                                        </div>
-                                    </div>
-                                    <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-[11px] font-medium text-slate-600">
-                                        Draft route: {desiredApplyScopeLabel}
-                                    </span>
-                                </div>
-                                <div className="mt-4 overflow-hidden rounded-[24px] border border-slate-200 bg-black">
-                                    {renderMainPlayer('h-[360px] w-full')}
-                                </div>
-                                <div className="mt-4 grid gap-3 md:grid-cols-3">
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">1. Prep</div>
-                                        <div className="mt-1">Generate ClearVoice candidates first when the raw upload needs denoising before VoiceFixer.</div>
-                                    </div>
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">2. Rebuild</div>
-                                        <div className="mt-1">Run the existing VoiceFixer cleanup after you choose which pre-cleanup source should feed it.</div>
-                                    </div>
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">3. Route</div>
-                                        <div className="mt-1">Choose whether playback, downstream processing, or both should use the final cleaned pass.</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="space-y-6">
-                            <div className="rounded-[24px] border border-slate-200 bg-white p-5 shadow-sm">
-                                <div className="flex items-center justify-between gap-3">
-                                    <div>
-                                        <div className="text-sm font-semibold text-slate-900">VoiceFixer Tuning</div>
-                                        <div className="mt-1 text-xs text-slate-500">These settings are saved on the episode and used for the next rebuild.</div>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => void handleSaveVoiceFixerSettings()}
-                                        disabled={episodeBusy || savingVoiceFixerSettings}
-                                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                                    >
-                                        {savingVoiceFixerSettings ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                                        Save
-                                    </button>
-                                </div>
-
-                                <div className="mt-4 space-y-4">
-                                    <label className="text-xs text-slate-600">
-                                        <div className="font-medium text-slate-700 mb-1">Cleanup Mode</div>
-                                        <select
-                                            value={voiceFixerModeDraft}
-                                            onChange={(e) => setVoiceFixerModeDraft(Number(e.target.value))}
-                                            disabled={episodeBusy}
-                                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
-                                        >
-                                            <option value={0}>Mode 0: Balanced</option>
-                                            <option value={1}>Mode 1: Smoother / darker</option>
-                                            <option value={2}>Mode 2: Aggressive repair</option>
-                                        </select>
-                                    </label>
-                                    <label className="text-xs text-slate-600">
-                                        <div className="mb-1 flex items-center justify-between gap-2">
-                                            <span className="font-medium text-slate-700">Clean Mix</span>
-                                            <span>{Math.round(voiceFixerMixDraft * 100)}%</span>
-                                        </div>
-                                        <input
-                                            type="range"
-                                            min={0}
-                                            max={100}
-                                            step={5}
-                                            value={Math.round(voiceFixerMixDraft * 100)}
-                                            onChange={(e) => setVoiceFixerMixDraft(Number(e.target.value) / 100)}
-                                            disabled={episodeBusy}
-                                            className="w-full accent-sky-600"
-                                        />
-                                        <div className="mt-1 text-[11px] text-slate-500">Lower values keep more of the original natural tone.</div>
-                                    </label>
-                                    <label className="text-xs text-slate-600">
-                                        <div className="font-medium text-slate-700 mb-1">Voice Leveling</div>
-                                        <select
-                                            value={voiceFixerLevelingDraft}
-                                            onChange={(e) => setVoiceFixerLevelingDraft(e.target.value as 'off' | 'gentle' | 'balanced' | 'strong')}
-                                            disabled={episodeBusy}
-                                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
-                                        >
-                                            <option value="off">Off</option>
-                                            <option value="gentle">Gentle</option>
-                                            <option value="balanced">Balanced</option>
-                                            <option value="strong">Strong</option>
-                                        </select>
-                                    </label>
-                                    <label className="text-xs text-slate-600">
-                                        <div className="font-medium text-slate-700 mb-1">Apply Cleaned Audio To</div>
-                                        <select
-                                            value={voiceFixerApplyScopeDraft}
-                                            onChange={(e) => setVoiceFixerApplyScopeDraft(e.target.value as 'none' | 'playback' | 'processing' | 'both')}
-                                            disabled={episodeBusy || (!hasVoiceFixerCleaned && voiceFixerApplyScopeDraft !== 'none')}
-                                            className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
-                                        >
-                                            <option value="none">Original only</option>
-                                            <option value="playback">Playback only</option>
-                                            <option value="processing">Processing only</option>
-                                            <option value="both">Playback + processing</option>
-                                        </select>
-                                    </label>
-                                </div>
-                            </div>
-
-                            <div className="rounded-[24px] border border-sky-200 bg-sky-50/70 p-5 shadow-sm">
-                                <div className="text-sm font-semibold text-slate-900">Cleanup Workflow</div>
-                                <div className="mt-1 text-xs leading-6 text-slate-600">
-                                    The player on this page always reflects the saved routing, not the unsaved draft. Save settings first, then rebuild if you changed the repair recipe.
-                                </div>
-                                <div className="mt-4 space-y-3">
-                                    <div className="rounded-2xl border border-white/70 bg-white/80 px-4 py-3 text-sm text-slate-700">
-                                        <div className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Saved routing</div>
-                                        <div className="mt-1">Playback: {usingVoiceFixerForPlayback ? 'Cleaned media' : 'Original upload'}</div>
-                                        <div className="mt-1">Processing: {usingVoiceFixerForProcessing ? 'Cleaned media' : 'Original upload'}</div>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={() => void handleQueueVoiceFixer(hasVoiceFixerCleaned)}
-                                        disabled={episodeBusy}
-                                        className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-sky-200 bg-white px-4 py-2.5 text-sm font-medium text-sky-700 hover:bg-sky-100 disabled:opacity-50"
-                                    >
-                                        {queueingVoiceFixer || voiceFixerBusy ? <Loader2 size={15} className="animate-spin" /> : <AudioLines size={15} />}
-                                        {hasVoiceFixerCleaned ? 'Rebuild Cleaned Pass' : 'Create Cleaned Pass'}
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setActiveTab('transcript')}
-                                        className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                                    >
-                                        <FileText size={15} />
-                                        Return to Transcript
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        );
-    };
-
-    const renderReconstructionStudio = () => {
-        const speakerCount = reconstructionWorkbench?.speaker_count ?? 0;
-        const approvedCount = reconstructionWorkbench?.speakers.filter((speaker) => speaker.approved).length ?? 0;
-        const pendingCount = Math.max(0, speakerCount - approvedCount);
-
-        return (
-            <div className="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_top,rgba(139,92,246,.12),transparent_38%),linear-gradient(180deg,#f8fafc,#f1f5f9)] p-6">
-                <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
-                    <div className="rounded-[28px] border border-violet-200 bg-white/90 p-6 shadow-[0_24px_60px_rgba(88,28,135,0.08)] backdrop-blur-sm">
-                        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                            <div className="max-w-3xl">
-                                <div className="text-xs font-semibold uppercase tracking-[0.28em] text-violet-600">Reconstruction Studio</div>
-                                <h2 className="mt-2 text-2xl font-semibold text-slate-900">Voice review before full rebuild</h2>
-                                <p className="mt-2 text-sm leading-6 text-slate-600">
-                                    Approve each diarized speaker voice first, then move into reconstruction mode for short previews and the final studio-quality conversation rebuild.
-                                </p>
-                            </div>
-                            <div className="flex flex-wrap items-center gap-2">
-                                <button
-                                    type="button"
-                                    onClick={() => void loadReconstructionWorkbench()}
-                                    disabled={loadingReconstructionWorkbench || segments.length === 0}
-                                    className="inline-flex items-center gap-1.5 rounded-xl border border-violet-200 bg-violet-50 px-4 py-2.5 text-sm font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50"
-                                >
-                                    {loadingReconstructionWorkbench ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
-                                    Refresh Workbench
-                                </button>
-                                <div className="inline-flex rounded-2xl border border-violet-200 bg-violet-50 p-1">
-                                    <button
-                                        type="button"
-                                        onClick={() => setReconstructionStudioTab('voices')}
-                                        className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-medium transition-colors ${reconstructionStudioTab === 'voices' ? 'bg-white text-violet-700 shadow-sm' : 'text-violet-700/80 hover:text-violet-800'}`}
-                                    >
-                                        <Users size={15} />
-                                        Voices
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setReconstructionStudioTab('reconstruction')}
-                                        disabled={!reconstructionWorkbench?.all_speakers_approved}
-                                        className={`inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${reconstructionStudioTab === 'reconstruction' ? 'bg-white text-violet-700 shadow-sm' : 'text-violet-700/80 hover:text-violet-800'}`}
-                                    >
-                                        <Bot size={15} />
-                                        Reconstruction
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                        <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${reconstructionStatus === 'failed' ? 'border-red-200 bg-red-50 text-red-700' : reconstructionPaused ? 'border-amber-200 bg-amber-50 text-amber-700' : hasReconstructionAudio ? 'border-violet-200 bg-violet-50/70 text-violet-900' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
-                            {reconstructionBusy
-                                ? `Conversation reconstruction is ${reconstructionStatus === 'queued' ? 'queued' : 'building the reconstructed audio'}...`
-                                : reconstructionPaused
-                                    ? 'Conversation reconstruction is paused.'
-                                    : reconstructionStatus === 'failed'
-                                        ? String(video?.reconstruction_error || 'Conversation reconstruction failed.').slice(0, 240)
-                                        : usingReconstructionForPlayback
-                                            ? 'Reconstructed audio is currently driving local playback, so transcript-follow uses the rebuilt conversation track.'
-                                            : hasReconstructionAudio
-                                                ? 'Reconstructed audio is ready for preview, download, and optional playback handoff.'
-                                                : 'Approve each voice model first, then move into the reconstruction tab for short previews and the final full build.'}
-                        </div>
-                        {reconstructionWorkbenchProgress ? (
-                            <div className="mt-4">
-                                {renderWorkbenchTaskProgressCard(reconstructionWorkbenchProgress)}
-                            </div>
-                        ) : reconstructionWorkbenchActivity ? (
-                            <div className="mt-4">
-                                {renderWorkbenchActivityCard(reconstructionWorkbenchActivity)}
-                            </div>
-                        ) : null}
-                        {reconstructionJob && renderAuxiliaryProgressCard('reconstruction', reconstructionJob, { className: 'mt-4 border-violet-200 bg-violet-50/50' })}
-                        <div className="mt-4 grid gap-3 md:grid-cols-3">
-                            <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Voices</div>
-                                <div className="mt-1 text-2xl font-semibold text-slate-900">{speakerCount}</div>
-                            </div>
-                            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">Approved</div>
-                                <div className="mt-1 text-2xl font-semibold text-emerald-800">{approvedCount}</div>
-                            </div>
-                            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Still to review</div>
-                                <div className="mt-1 text-2xl font-semibold text-amber-800">{pendingCount}</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    {reconstructionStudioTab === 'voices'
-                        ? renderReconstructionVoiceReview()
-                        : renderReconstructionBuildSuite()}
                 </div>
             </div>
         );
@@ -5766,9 +3826,9 @@ export function VideoDetailPage() {
                                                     ? 'bg-yellow-50 border-yellow-300 ring-1 ring-yellow-200 shadow-sm'
                                                     : isDeepLinkedSegment
                                                         ? 'bg-amber-50 border-amber-300 ring-1 ring-amber-200 shadow-sm'
-                                                    : isActiveSegment
-                                                        ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100'
-                                                        : 'bg-white border-transparent hover:border-slate-200 hover:bg-white'}`}
+                                                        : isActiveSegment
+                                                            ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100'
+                                                            : 'bg-white border-transparent hover:border-slate-200 hover:bg-white'}`}
                                                 onClick={() => {
                                                     // Seek to segment start on click (word spans use stopPropagation so they won't trigger this)
                                                     if (window.getSelection()?.toString().length === 0) {
@@ -6002,65 +4062,19 @@ export function VideoDetailPage() {
                         />
                     )}
                     {activeTab === 'reconstruction' && isUploadedMedia && (
-                        <div className="h-full overflow-y-auto p-4">
-                            <div className="space-y-4">
-                                <div className="rounded-2xl border border-violet-200 bg-gradient-to-br from-violet-50 via-white to-fuchsia-50 p-4">
-                                    <div className="text-xs font-semibold uppercase tracking-[0.24em] text-violet-600">Reconstruction Studio</div>
-                                    <div className="mt-2 text-lg font-semibold text-slate-900">Central rebuild workspace</div>
-                                    <p className="mt-2 text-sm leading-6 text-slate-600">
-                                        The main stage now becomes a dedicated reconstruction workbench, separate from transcript review. Use this tab when you want to audition speakers and rebuild the conversation.
-                                    </p>
-                                </div>
-                                <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Current State</div>
-                                    <div className="mt-3 space-y-2 text-sm text-slate-600">
-                                        <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
-                                            <span>Transcript segments</span>
-                                            <span className="font-semibold text-slate-800">{segments.length}</span>
-                                        </div>
-                                        <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
-                                            <span>Workbench speakers</span>
-                                            <span className="font-semibold text-slate-800">{reconstructionWorkbench?.speaker_count ?? 0}</span>
-                                        </div>
-                                        <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-50 px-3 py-2">
-                                            <span>Mode</span>
-                                            <span className="font-semibold text-slate-800">Performance-driven</span>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-                                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Actions</div>
-                                    <div className="mt-3 flex flex-col gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => void loadReconstructionWorkbench()}
-                                            disabled={loadingReconstructionWorkbench || segments.length === 0}
-                                            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50"
-                                        >
-                                            {loadingReconstructionWorkbench ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                                            Refresh Workbench
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => void handleQueueReconstruction(hasReconstructionAudio)}
-                                            disabled={episodeBusy || segments.length === 0}
-                                            className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-violet-600 px-3 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50"
-                                        >
-                                            {queueingReconstruction || reconstructionBusy ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
-                                            {hasReconstructionAudio ? 'Rebuild Reconstruction' : 'Reconstruct Audio'}
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => setActiveTab('transcript')}
-                                            className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                                        >
-                                            <FileText size={14} />
-                                            Back to Transcript
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
+                        <ReconstructionSidebarTab
+                            isActive={activeTab === 'reconstruction'}
+                            segmentsCount={segments.length}
+                            reconstructionWorkbench={reconstructionWorkbench}
+                            loadingReconstructionWorkbench={loadingReconstructionWorkbench}
+                            episodeBusy={episodeBusy}
+                            hasReconstructionAudio={hasReconstructionAudio}
+                            queueingReconstruction={queueingReconstruction}
+                            reconstructionBusy={reconstructionBusy}
+                            onRefreshWorkbench={() => void loadReconstructionWorkbench()}
+                            onQueueReconstruction={() => void handleQueueReconstruction(hasReconstructionAudio)}
+                            onNavigateToTranscript={() => setActiveTab('transcript')}
+                        />
                     )}
                     {activeTab === 'youtube' && video && (
                         <YoutubeTab
@@ -6137,78 +4151,78 @@ export function VideoDetailPage() {
                         return (
                             <div className="flex flex-col gap-2 w-full">
                                 <div className="flex flex-wrap items-stretch gap-2 w-full">
-                                {transcriptJobActive && (
-                                    <span className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-500 bg-slate-100 rounded-lg sm:min-h-9">
-                                        <Loader2 size={14} className="animate-spin" />
-                                        {video.status.charAt(0).toUpperCase() + video.status.slice(1)}...
-                                    </span>
-                                )}
-                                <button
-                                    onClick={handleExportEpisodeScript}
-                                    disabled={segments.length === 0}
-                                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
-                                    title={segments.length === 0 ? 'Transcript required before exporting a script' : 'Export a plain-text script with speaker labels'}
-                                >
-                                    <Download size={14} />
-                                    Export Script
-                                </button>
-                                <button
-                                    onClick={handleRedoDiarization}
-                                    disabled={episodeBusy}
-                                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
-                                    title={transcriptJobActive ? `Cannot redo while ${video.status}` : "Re-run speaker diarization using improved speaker profiles"}
-                                >
+                                    {transcriptJobActive && (
+                                        <span className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-500 bg-slate-100 rounded-lg sm:min-h-9">
+                                            <Loader2 size={14} className="animate-spin" />
+                                            {video.status.charAt(0).toUpperCase() + video.status.slice(1)}...
+                                        </span>
+                                    )}
+                                    <button
+                                        onClick={handleExportEpisodeScript}
+                                        disabled={segments.length === 0}
+                                        className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
+                                        title={segments.length === 0 ? 'Transcript required before exporting a script' : 'Export a plain-text script with speaker labels'}
+                                    >
+                                        <Download size={14} />
+                                        Export Script
+                                    </button>
+                                    <button
+                                        onClick={handleRedoDiarization}
+                                        disabled={episodeBusy}
+                                        className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
+                                        title={transcriptJobActive ? `Cannot redo while ${video.status}` : "Re-run speaker diarization using improved speaker profiles"}
+                                    >
                                         {redoingDiarization ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
-                                    Redo Diarization
-                                </button>
-                                <button
-                                    onClick={handleConsolidateTranscript}
-                                    disabled={episodeBusy}
-                                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
-                                    title={transcriptJobActive ? `Cannot consolidate while ${video.status}` : "Merge same-speaker transcript fragments without re-running ASR or diarization"}
-                                >
-                                    {consolidatingTranscript ? <Loader2 size={14} className="animate-spin" /> : <GitMerge size={14} />}
-                                    Consolidate Transcript
-                                </button>
-                                <button
-                                    onClick={handleRedoTranscript}
-                                    disabled={episodeBusy}
-                                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
-                                    title={transcriptJobActive ? `Cannot redo while ${video.status}` : "Re-run transcription and then diarization"}
-                                >
-                                    {redoing ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
-                                    Redo Transcription
-                                </button>
-                                <button
-                                    onClick={handlePurgeTranscript}
-                                    disabled={episodeBusy}
-                                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
-                                    title={transcriptJobActive ? `Cannot purge while ${video.status}` : "Purge transcript & diarization data"}
-                                >
-                                    {purging ? <Loader2 size={14} className="animate-spin" /> : <Eraser size={14} />}
-                                    Purge
-                                </button>
-                                {isUploadedMedia && (
-                                    <>
-                                        <button
-                                            onClick={() => setActiveTab('cleanup')}
-                                            className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-lg transition-colors min-h-9 max-sm:flex-1"
-                                            title="Open the cleanup workbench"
-                                        >
-                                            <AudioLines size={14} />
-                                            Cleanup Studio
-                                        </button>
-                                        <button
-                                            onClick={() => setActiveTab('reconstruction')}
-                                            disabled={segments.length === 0}
-                                            className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-violet-700 bg-violet-50 hover:bg-violet-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
-                                            title={segments.length === 0 ? 'Transcript and diarization are required before reconstruction.' : 'Open the reconstruction studio'}
-                                        >
-                                            <Bot size={14} />
-                                            Rebuild Studio
-                                        </button>
-                                    </>
-                                )}
+                                        Redo Diarization
+                                    </button>
+                                    <button
+                                        onClick={handleConsolidateTranscript}
+                                        disabled={episodeBusy}
+                                        className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
+                                        title={transcriptJobActive ? `Cannot consolidate while ${video.status}` : "Merge same-speaker transcript fragments without re-running ASR or diarization"}
+                                    >
+                                        {consolidatingTranscript ? <Loader2 size={14} className="animate-spin" /> : <GitMerge size={14} />}
+                                        Consolidate Transcript
+                                    </button>
+                                    <button
+                                        onClick={handleRedoTranscript}
+                                        disabled={episodeBusy}
+                                        className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
+                                        title={transcriptJobActive ? `Cannot redo while ${video.status}` : "Re-run transcription and then diarization"}
+                                    >
+                                        {redoing ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                                        Redo Transcription
+                                    </button>
+                                    <button
+                                        onClick={handlePurgeTranscript}
+                                        disabled={episodeBusy}
+                                        className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
+                                        title={transcriptJobActive ? `Cannot purge while ${video.status}` : "Purge transcript & diarization data"}
+                                    >
+                                        {purging ? <Loader2 size={14} className="animate-spin" /> : <Eraser size={14} />}
+                                        Purge
+                                    </button>
+                                    {isUploadedMedia && (
+                                        <>
+                                            <button
+                                                onClick={() => setActiveTab('cleanup')}
+                                                className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-lg transition-colors min-h-9 max-sm:flex-1"
+                                                title="Open the cleanup workbench"
+                                            >
+                                                <AudioLines size={14} />
+                                                Cleanup Studio
+                                            </button>
+                                            <button
+                                                onClick={() => setActiveTab('reconstruction')}
+                                                disabled={segments.length === 0}
+                                                className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-violet-700 bg-violet-50 hover:bg-violet-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-9 max-sm:flex-1"
+                                                title={segments.length === 0 ? 'Transcript and diarization are required before reconstruction.' : 'Open the reconstruction studio'}
+                                            >
+                                                <Bot size={14} />
+                                                Rebuild Studio
+                                            </button>
+                                        </>
+                                    )}
                                 </div>
                             </div>
                         );
@@ -6217,9 +4231,22 @@ export function VideoDetailPage() {
 
                 {/* Video Container / Cleanup / Reconstruction / Clip Editor Workspace */}
                 {activeTab === 'cleanup' && isUploadedMedia ? (
-                    renderCleanupStudio()
+                    <CleanupTab
+                        video={video}
+                        videoId={Number(id)}
+                        isActive={activeTab === 'cleanup'}
+                        onVideoUpdated={setVideo}
+                        episodeBusy={episodeBusy}
+                        renderMainPlayer={renderMainPlayer}
+                        onNavigateToTranscript={() => setActiveTab('transcript')}
+                    />
                 ) : activeTab === 'optimize' ? (
-                    renderTranscriptOptimizationWorkbench()
+                    <OptimizeTab
+                        hasTranscript={segments.length > 0}
+                        renderWorkbench={renderTranscriptOptimizationWorkbench}
+                        renderSnapshot={() => renderTranscriptOptimizationSnapshotCard('optimize')}
+                        onNavigateToTranscript={() => setActiveTab('transcript')}
+                    />
                 ) : activeTab === 'clone' ? (
                     <CloneTab
                         video={video}
@@ -6257,451 +4284,72 @@ export function VideoDetailPage() {
                         }}
                     />
                 ) : activeTab === 'reconstruction' && isUploadedMedia ? (
-                    renderReconstructionStudio()
+                    <ReconstructionTab
+                        isActive={activeTab === 'reconstruction'}
+                        reconstructionWorkbench={reconstructionWorkbench}
+                        loadingReconstructionWorkbench={loadingReconstructionWorkbench}
+                        segmentsCount={segments.length}
+                        reconstructionStudioTab={reconstructionStudioTab}
+                        reconstructionStatus={reconstructionStatus}
+                        reconstructionPaused={reconstructionPaused}
+                        reconstructionBusy={reconstructionBusy}
+                        hasReconstructionAudio={hasReconstructionAudio}
+                        usingReconstructionForPlayback={usingReconstructionForPlayback}
+                        reconstructionError={video?.reconstruction_error}
+                        reconstructionWorkbenchProgressNode={reconstructionWorkbenchProgress ? renderWorkbenchTaskProgressCard(reconstructionWorkbenchProgress) : null}
+                        reconstructionWorkbenchActivityNode={reconstructionWorkbenchActivity ? renderWorkbenchActivityCard(reconstructionWorkbenchActivity) : null}
+                        reconstructionJobNode={reconstructionJob ? renderAuxiliaryProgressCard('reconstruction', reconstructionJob, { className: 'mt-4 border-violet-200 bg-violet-50/50' }) : null}
+                        ctx={{
+                            selectedReconstructionSpeaker,
+                            resolveWorkbenchAudioUrl,
+                            segments,
+                            setSelectedReconstructionSpeakerId,
+                            selectedReconstructionSpeakerId,
+                            handleAddReconstructionSample,
+                            addingReconstructionSampleSpeakerId,
+                            handleApproveReconstructionSpeaker,
+                            approvingReconstructionSpeakerId,
+                            handleUpdateReconstructionSampleState,
+                            updatingReconstructionSampleKey,
+                            cleaningReconstructionSampleKey,
+                            handleCleanupReconstructionSample,
+                            reconstructionTestTextDrafts,
+                            setReconstructionTestTextDrafts,
+                            episodeBusy,
+                            handleTestReconstructionSpeaker,
+                            testingReconstructionSpeakerId,
+                            hasReconstructionAudio,
+                            reconstructionAudioUrl,
+                            video,
+                            handleSetReconstructionPlayback,
+                            usingReconstructionForPlayback,
+                            switchingReconstructionPlayback,
+                            selectedReconstructionPreviewSegmentId,
+                            setSelectedReconstructionPreviewSegmentId,
+                            reconstructionPreviewAudioUrl,
+                            reconstructionPreviewText,
+                            handlePreviewReconstructionSegment,
+                            queueingReconstruction,
+                            reconstructionBusy,
+                            handleQueueReconstruction,
+                            reconstructionInstructionDraft,
+                            setReconstructionInstructionDraft,
+                            savingReconstructionSettings,
+                            handleSaveReconstructionSettings,
+                            setReconstructionStudioTab,
+                        }}
+                        onRefreshWorkbench={() => void loadReconstructionWorkbench()}
+                        onSetStudioTab={setReconstructionStudioTab}
+                    />
                 ) : showClipEditorMain && activeEditingClip && clipEditorDraft ? (
-                    <div className="flex-1 overflow-y-auto p-6">
-                        <div className="mx-auto max-w-6xl grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-6">
-                            <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm space-y-3">
-                                <div className="flex items-center justify-between gap-2">
-                                    <div>
-                                        <div className="text-sm font-semibold text-slate-800">Clip Editor</div>
-                                        <div className="text-xs text-slate-500">Editing: {activeEditingClip.title || `Clip #${activeEditingClip.id}`}</div>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <button onClick={cancelClipEdit} className="px-3 py-2 text-xs font-medium rounded-lg bg-white border border-slate-300 text-slate-600 hover:bg-slate-50">Close</button>
-                                        <button
-                                            onClick={() => void saveClipEdit(activeEditingClip.id)}
-                                            disabled={savingClipEdit}
-                                            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-                                        >
-                                            {savingClipEdit ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                                            Save
-                                        </button>
-                                    </div>
-                                </div>
-
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                    <div>
-                                        <label className="block text-[11px] font-medium text-slate-600 mb-1">Title</label>
-                                        <input
-                                            type="text"
-                                            value={String(clipEditorDraft.title || '')}
-                                            onChange={(e) => updateClipDraftField('title', e.target.value)}
-                                            className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-[11px] font-medium text-slate-600 mb-1">Aspect Ratio</label>
-                                        <select value={String(clipEditorDraft.aspect_ratio || 'source')} onChange={(e) => updateClipDraftField('aspect_ratio', e.target.value)} className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white">
-                                            <option value="source">Source</option>
-                                            <option value="16:9">16:9</option>
-                                            <option value="9:16">9:16</option>
-                                            <option value="1:1">1:1</option>
-                                            <option value="4:5">4:5</option>
-                                        </select>
-                                    </div>
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label className="block text-[11px] font-medium text-slate-600 mb-1">Start (sec)</label>
-                                        <input type="number" step="0.1" value={Number(clipEditorDraft.start_time ?? activeEditingClip.start_time)} onChange={(e) => updateClipDraftField('start_time', Number(e.target.value))} className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-[11px] font-medium text-slate-600 mb-1">End (sec)</label>
-                                        <input type="number" step="0.1" value={Number(clipEditorDraft.end_time ?? activeEditingClip.end_time)} onChange={(e) => updateClipDraftField('end_time', Number(e.target.value))} className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white" />
-                                    </div>
-                                </div>
-
-                                <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5 space-y-2">
-                                    <div className="text-[11px] font-semibold text-slate-600">Fast Trim Controls</div>
-                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                        <button onClick={() => setClipBoundaryFromPlayhead('start')} className="px-2 py-1.5 text-[11px] rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50">Set In @ Playhead (I)</button>
-                                        <button onClick={() => setClipBoundaryFromPlayhead('end')} className="px-2 py-1.5 text-[11px] rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50">Set Out @ Playhead (O)</button>
-                                        <button onClick={() => handleSeek(Number(clipEditorDraft.start_time ?? activeEditingClip.start_time))} className="px-2 py-1.5 text-[11px] rounded-md border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100">Jump In</button>
-                                        <button onClick={() => handleSeek(Number(clipEditorDraft.end_time ?? activeEditingClip.end_time))} className="px-2 py-1.5 text-[11px] rounded-md border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100">Jump Out</button>
-                                    </div>
-                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                                        <button onClick={() => nudgeClipBoundary('start', -(1 / 30))} className="px-2 py-1.5 text-[11px] rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50">In -1f</button>
-                                        <button onClick={() => nudgeClipBoundary('start', (1 / 30))} className="px-2 py-1.5 text-[11px] rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50">In +1f</button>
-                                        <button onClick={() => nudgeClipBoundary('end', -(1 / 30))} className="px-2 py-1.5 text-[11px] rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50">Out -1f</button>
-                                        <button onClick={() => nudgeClipBoundary('end', (1 / 30))} className="px-2 py-1.5 text-[11px] rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50">Out +1f</button>
-                                    </div>
-                                    <div className="text-[10px] text-slate-500">Keyboard: `I`/`O` set in/out at playhead, `Alt+←/→` nudges In, `Shift+Alt+←/→` nudges Out.</div>
-                                </div>
-
-                                <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-2.5 space-y-2">
-                                    <div className="flex items-center justify-between gap-2">
-                                        <div className="text-[11px] font-semibold text-blue-700">Mini Timeline</div>
-                                        <div className="text-[10px] text-blue-700/80">Drag handles or click timeline to seek</div>
-                                    </div>
-                                    {(() => {
-                                        const duration = getEditorMediaDuration();
-                                        const startSec = Number(clipEditorDraft.start_time ?? activeEditingClip.start_time);
-                                        const endSec = Number(clipEditorDraft.end_time ?? activeEditingClip.end_time);
-                                        const startPct = timelineTimeToPct(startSec, duration) * 100;
-                                        const endPct = timelineTimeToPct(endSec, duration) * 100;
-                                        const playPct = timelineTimeToPct(currentTime, duration) * 100;
-                                        return (
-                                            <>
-                                                <div className="flex items-center justify-between text-[10px] text-blue-700/80 font-mono">
-                                                    <span>0:00</span>
-                                                    <span>{formatTime(duration / 4)}</span>
-                                                    <span>{formatTime(duration / 2)}</span>
-                                                    <span>{formatTime((duration * 3) / 4)}</span>
-                                                    <span>{formatTime(duration)}</span>
-                                                </div>
-                                                <div
-                                                    ref={clipTimelineRef}
-                                                    onClick={handleTimelineScrub}
-                                                    className="relative h-10 rounded-md border border-blue-200 bg-white cursor-pointer overflow-hidden"
-                                                >
-                                                    <div className="absolute inset-y-0 left-0 w-full bg-gradient-to-r from-slate-100 via-blue-50 to-slate-100" />
-                                                    <div
-                                                        className="absolute inset-y-1 rounded bg-blue-500/25 border border-blue-300"
-                                                        style={{ left: `${startPct}%`, width: `${Math.max(0.2, endPct - startPct)}%` }}
-                                                    />
-                                                    <div
-                                                        className="absolute top-0 bottom-0 w-[2px] bg-red-500/80"
-                                                        style={{ left: `${playPct}%` }}
-                                                    />
-                                                    <button
-                                                        type="button"
-                                                        onPointerDown={(e) => beginClipTimelineDrag('start', e)}
-                                                        className="absolute top-0 bottom-0 -ml-1 w-2 rounded bg-blue-700 hover:bg-blue-800 cursor-ew-resize"
-                                                        style={{ left: `${startPct}%` }}
-                                                        title="Drag In point"
-                                                    />
-                                                    <button
-                                                        type="button"
-                                                        onPointerDown={(e) => beginClipTimelineDrag('end', e)}
-                                                        className="absolute top-0 bottom-0 -ml-1 w-2 rounded bg-blue-700 hover:bg-blue-800 cursor-ew-resize"
-                                                        style={{ left: `${endPct}%` }}
-                                                        title="Drag Out point"
-                                                    />
-                                                </div>
-                                                <div className="flex items-center justify-between text-[10px] text-blue-700/80 font-mono">
-                                                    <span>IN {formatTime(startSec)}</span>
-                                                    <span>{(Math.max(0, endSec - startSec)).toFixed(2)}s</span>
-                                                    <span>OUT {formatTime(endSec)}</span>
-                                                </div>
-                                            </>
-                                        );
-                                    })()}
-                                </div>
-
-                                <div>
-                                    <div className="flex items-center justify-between mb-1">
-                                        <label className="block text-[11px] font-medium text-slate-600">Main Crop / Reframe (x y w h, 0-1)</label>
-                                        <button
-                                            onClick={() => {
-                                                updateClipDraftField('crop_x', null);
-                                                updateClipDraftField('crop_y', null);
-                                                updateClipDraftField('crop_w', null);
-                                                updateClipDraftField('crop_h', null);
-                                            }}
-                                            className="px-2.5 py-1 text-[11px] rounded-md bg-white border border-slate-300 text-slate-600 hover:bg-slate-50"
-                                        >
-                                            Reset Main Crop
-                                        </button>
-                                    </div>
-                                    <div className="grid grid-cols-4 gap-2">
-                                        {(['crop_x', 'crop_y', 'crop_w', 'crop_h'] as const).map((field) => (
-                                            <input
-                                                key={field}
-                                                type="number"
-                                                min={0}
-                                                max={1}
-                                                step={0.01}
-                                                value={clipEditorDraft[field] == null ? '' : Number(clipEditorDraft[field])}
-                                                placeholder={field.replace('crop_', '')}
-                                                onChange={(e) => updateClipDraftField(field, e.target.value === '' ? null : Number(e.target.value))}
-                                                className="px-2 py-2 text-xs border border-slate-300 rounded-lg bg-white"
-                                            />
-                                        ))}
-                                    </div>
-                                </div>
-
-                                {String(clipEditorDraft.aspect_ratio || 'source') === '9:16' && (
-                                    <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-2.5 space-y-2">
-                                        <label className="inline-flex items-center gap-2 text-xs text-indigo-700 font-medium">
-                                            <input
-                                                type="checkbox"
-                                                checked={!!clipEditorDraft.portrait_split_enabled}
-                                                onChange={(e) => {
-                                                    if (e.target.checked) {
-                                                        applyPortraitSplitDefaults();
-                                                    } else {
-                                                        updateClipDraftField('portrait_split_enabled', false);
-                                                    }
-                                                }}
-                                                className="h-4 w-4 rounded border-indigo-300 text-indigo-600"
-                                            />
-                                            Portrait split mode (top/lower stacked)
-                                        </label>
-                                        {!!clipEditorDraft.portrait_split_enabled && (
-                                            <>
-                                                <div className="grid grid-cols-4 gap-2">
-                                                    {(['portrait_top_crop_x', 'portrait_top_crop_y', 'portrait_top_crop_w', 'portrait_top_crop_h'] as const).map((field) => (
-                                                        <input
-                                                            key={field}
-                                                            type="number"
-                                                            min={0}
-                                                            max={1}
-                                                            step={0.01}
-                                                            value={clipEditorDraft[field] == null ? '' : Number(clipEditorDraft[field])}
-                                                            placeholder={field.replace('portrait_top_crop_', 'top_')}
-                                                            onChange={(e) => updateClipDraftField(field, e.target.value === '' ? null : Number(e.target.value))}
-                                                            className="px-2 py-2 text-xs border border-indigo-200 rounded-lg bg-white"
-                                                        />
-                                                    ))}
-                                                </div>
-                                                <div className="grid grid-cols-4 gap-2">
-                                                    {(['portrait_bottom_crop_x', 'portrait_bottom_crop_y', 'portrait_bottom_crop_w', 'portrait_bottom_crop_h'] as const).map((field) => (
-                                                        <input
-                                                            key={field}
-                                                            type="number"
-                                                            min={0}
-                                                            max={1}
-                                                            step={0.01}
-                                                            value={clipEditorDraft[field] == null ? '' : Number(clipEditorDraft[field])}
-                                                            placeholder={field.replace('portrait_bottom_crop_', 'low_')}
-                                                            onChange={(e) => updateClipDraftField(field, e.target.value === '' ? null : Number(e.target.value))}
-                                                            className="px-2 py-2 text-xs border border-indigo-200 rounded-lg bg-white"
-                                                        />
-                                                    ))}
-                                                </div>
-                                            </>
-                                        )}
-                                    </div>
-                                )}
-
-                                <div className="grid grid-cols-2 gap-3">
-                                    <label className="inline-flex items-center gap-2 text-xs text-slate-600">
-                                        <input type="checkbox" checked={!!clipEditorDraft.burn_captions} onChange={(e) => updateClipDraftField('burn_captions', e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-purple-600" />
-                                        Burn captions into MP4
-                                    </label>
-                                    <label className="inline-flex items-center gap-2 text-xs text-slate-600">
-                                        <input type="checkbox" checked={!!clipEditorDraft.caption_speaker_labels} onChange={(e) => updateClipDraftField('caption_speaker_labels', e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-purple-600" />
-                                        Speaker labels in captions
-                                    </label>
-                                </div>
-
-                                <div className="grid grid-cols-2 gap-3">
-                                    <div>
-                                        <label className="block text-[11px] font-medium text-slate-600 mb-1">Fade In (sec)</label>
-                                        <input
-                                            type="number"
-                                            min={0}
-                                            step={0.05}
-                                            value={Number(clipEditorDraft.fade_in_sec ?? 0)}
-                                            onChange={(e) => updateClipDraftField('fade_in_sec', Math.max(0, Number(e.target.value || 0)))}
-                                            className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="block text-[11px] font-medium text-slate-600 mb-1">Fade Out (sec)</label>
-                                        <input
-                                            type="number"
-                                            min={0}
-                                            step={0.05}
-                                            value={Number(clipEditorDraft.fade_out_sec ?? 0)}
-                                            onChange={(e) => updateClipDraftField('fade_out_sec', Math.max(0, Number(e.target.value || 0)))}
-                                            className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg bg-white"
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="rounded-lg border border-violet-200 bg-violet-50/50 p-2.5 space-y-1.5">
-                                    <div className="text-[11px] font-semibold text-violet-700">Composable Export Stack</div>
-                                    <div className="flex flex-wrap gap-1.5 text-[10px]">
-                                        <span className="px-1.5 py-0.5 rounded bg-white border border-violet-200 text-violet-700">Source Ranges</span>
-                                        {clipEditorDraft.script_edits_json && <span className="px-1.5 py-0.5 rounded bg-emerald-100 border border-emerald-200 text-emerald-700">Text Keep-Ranges</span>}
-                                        {(clipEditorDraft.crop_x != null || clipEditorDraft.crop_y != null || clipEditorDraft.crop_w != null || clipEditorDraft.crop_h != null) && (
-                                            <span className="px-1.5 py-0.5 rounded bg-cyan-100 border border-cyan-200 text-cyan-700">Crop/Reframe</span>
-                                        )}
-                                        {String(clipEditorDraft.aspect_ratio || 'source') === '9:16' && !!clipEditorDraft.portrait_split_enabled && (
-                                            <span className="px-1.5 py-0.5 rounded bg-indigo-100 border border-indigo-200 text-indigo-700">Portrait Split</span>
-                                        )}
-                                        <span className="px-1.5 py-0.5 rounded bg-white border border-violet-200 text-violet-700">Aspect {String(clipEditorDraft.aspect_ratio || 'source').toUpperCase()}</span>
-                                        {!!clipEditorDraft.burn_captions && <span className="px-1.5 py-0.5 rounded bg-amber-100 border border-amber-200 text-amber-700">Burn Captions</span>}
-                                        <span className="px-1.5 py-0.5 rounded bg-white border border-violet-200 text-violet-700">H264/AAC Render</span>
-                                    </div>
-                                </div>
-
-                                <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3 space-y-2.5">
-                                    <div className="flex items-center justify-between gap-2">
-                                        <div>
-                                            <div className="text-xs font-semibold text-emerald-800">Text-Based Edit (Phase 1)</div>
-                                            <div className="text-[11px] text-emerald-700/80">Click words to remove/restore. Export stitches only kept transcript ranges.</div>
-                                        </div>
-                                        <div className="flex items-center gap-1.5">
-                                            <button
-                                                onClick={rebuildClipEditorTextWindow}
-                                                className="px-2 py-1 text-[11px] rounded-md border border-emerald-300 bg-white text-emerald-700 hover:bg-emerald-50"
-                                            >
-                                                Refresh Window
-                                            </button>
-                                            <button
-                                                onClick={autoRemoveClipEditorFillers}
-                                                disabled={clipEditorTokens.length === 0}
-                                                className="px-2 py-1 text-[11px] rounded-md border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-50"
-                                            >
-                                                Remove Fillers
-                                            </button>
-                                            <button
-                                                onClick={restoreAllClipEditorWords}
-                                                disabled={clipEditorRemovedWordKeys.size === 0}
-                                                className="px-2 py-1 text-[11px] rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                                            >
-                                                Restore All
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <div className="text-[11px] text-emerald-900/80">
-                                        {(() => {
-                                            const clipStart = Number(clipEditorDraft.start_time ?? activeEditingClip.start_time);
-                                            const clipEnd = Number(clipEditorDraft.end_time ?? activeEditingClip.end_time);
-                                            const kept = buildKeptRangesFromTokenState(clipEditorTokens, clipEditorRemovedWordKeys, clipStart, clipEnd);
-                                            const dur = kept.reduce((acc, [s, e]) => acc + (e - s), 0);
-                                            return `${clipEditorTokens.length} words • ${clipEditorRemovedWordKeys.size} removed • ${kept.length} kept ranges • est. ${dur.toFixed(1)}s output`;
-                                        })()}
-                                    </div>
-                                    <div className="max-h-48 overflow-y-auto rounded-lg border border-emerald-100 bg-white p-2">
-                                        {clipEditorTokens.length === 0 ? (
-                                            <div className="text-[11px] text-slate-500">
-                                                No word-level transcript tokens in this trim window. Adjust start/end and click Refresh Window.
-                                            </div>
-                                        ) : (
-                                            <div className="flex flex-wrap gap-1.5">
-                                                {clipEditorTokens.map((tok) => {
-                                                    const removed = clipEditorRemovedWordKeys.has(tok.key);
-                                                    return (
-                                                        <button
-                                                            key={tok.key}
-                                                            type="button"
-                                                            onClick={() => toggleClipEditorWord(tok.key)}
-                                                            className={`px-1.5 py-0.5 rounded text-[11px] border transition-colors ${removed
-                                                                ? 'bg-rose-50 border-rose-200 text-rose-700 line-through'
-                                                                : 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
-                                                                }`}
-                                                            title={`${formatTime(tok.start)} - ${formatTime(tok.end)}`}
-                                                        >
-                                                            {tok.word}
-                                                        </button>
-                                                    );
-                                                })}
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="space-y-4">
-                                {renderMainPlayer("w-full bg-black rounded-2xl overflow-hidden shadow-2xl aspect-video")}
-                                <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
-                                    <div className="flex items-center justify-between gap-2 mb-2">
-                                        <div className="text-[11px] font-semibold tracking-wide text-slate-600">Burn/Crop Preview (draw to set crop)</div>
-                                        <div className="flex items-center gap-1">
-                                            <button
-                                                onClick={() => setClipEditorCropTarget('main')}
-                                                className={`px-2 py-1 rounded text-[10px] border ${clipEditorCropTarget === 'main' ? 'bg-cyan-100 border-cyan-300 text-cyan-700' : 'bg-white border-slate-300 text-slate-600'}`}
-                                            >
-                                                Main
-                                            </button>
-                                            {String(clipEditorDraft.aspect_ratio || 'source') === '9:16' && !!clipEditorDraft.portrait_split_enabled && (
-                                                <>
-                                                    <button
-                                                        onClick={() => setClipEditorCropTarget('top')}
-                                                        className={`px-2 py-1 rounded text-[10px] border ${clipEditorCropTarget === 'top' ? 'bg-amber-100 border-amber-300 text-amber-700' : 'bg-white border-slate-300 text-slate-600'}`}
-                                                    >
-                                                        Top
-                                                    </button>
-                                                    <button
-                                                        onClick={() => setClipEditorCropTarget('bottom')}
-                                                        className={`px-2 py-1 rounded text-[10px] border ${clipEditorCropTarget === 'bottom' ? 'bg-lime-100 border-lime-300 text-lime-700' : 'bg-white border-slate-300 text-slate-600'}`}
-                                                    >
-                                                        Lower
-                                                    </button>
-                                                </>
-                                            )}
-                                        </div>
-                                    </div>
-                                    <div
-                                        className="relative w-full rounded-lg overflow-hidden border border-slate-300 bg-slate-900 cursor-crosshair"
-                                        ref={cropPreviewRef}
-                                        onPointerDown={handleCropPreviewPointerDown}
-                                        style={{
-                                            aspectRatio:
-                                                String(clipEditorDraft.aspect_ratio || 'source') === '1:1'
-                                                    ? '1 / 1'
-                                                    : String(clipEditorDraft.aspect_ratio || 'source') === '4:5'
-                                                        ? '4 / 5'
-                                                        : String(clipEditorDraft.aspect_ratio || 'source') === '9:16'
-                                                            ? '9 / 16'
-                                                            : '16 / 9',
-                                        }}
-                                    >
-                                        {video?.thumbnail_url ? (
-                                            <img src={video?.thumbnail_url || ''} alt="" className="absolute inset-0 w-full h-full object-cover opacity-70" />
-                                        ) : (
-                                            <div className="absolute inset-0 bg-gradient-to-br from-slate-700 via-slate-800 to-slate-900" />
-                                        )}
-                                        {!(String(clipEditorDraft.aspect_ratio || 'source') === '9:16' && !!clipEditorDraft.portrait_split_enabled) && (
-                                            <div
-                                                className="absolute border-2 border-cyan-300/90 bg-cyan-300/10"
-                                                style={{
-                                                    left: `${getDraftCropRect('main').x * 100}%`,
-                                                    top: `${getDraftCropRect('main').y * 100}%`,
-                                                    width: `${getDraftCropRect('main').w * 100}%`,
-                                                    height: `${getDraftCropRect('main').h * 100}%`,
-                                                }}
-                                            />
-                                        )}
-                                        {String(clipEditorDraft.aspect_ratio || 'source') === '9:16' && !!clipEditorDraft.portrait_split_enabled && (
-                                            <>
-                                                <div
-                                                    className="absolute border-2 border-amber-300/90 bg-amber-300/15"
-                                                    style={{
-                                                        left: `${getDraftCropRect('top').x * 100}%`,
-                                                        top: `${getDraftCropRect('top').y * 100}%`,
-                                                        width: `${getDraftCropRect('top').w * 100}%`,
-                                                        height: `${getDraftCropRect('top').h * 100}%`,
-                                                    }}
-                                                />
-                                                <div
-                                                    className="absolute border-2 border-lime-300/90 bg-lime-300/15"
-                                                    style={{
-                                                        left: `${getDraftCropRect('bottom').x * 100}%`,
-                                                        top: `${getDraftCropRect('bottom').y * 100}%`,
-                                                        width: `${getDraftCropRect('bottom').w * 100}%`,
-                                                        height: `${getDraftCropRect('bottom').h * 100}%`,
-                                                    }}
-                                                />
-                                                <div className="absolute inset-x-0 top-1/2 border-t border-white/70 border-dashed" />
-                                            </>
-                                        )}
-                                        {clipEditorDragRect && (
-                                            <div
-                                                className="absolute border-2 border-white border-dashed bg-white/10 pointer-events-none"
-                                                style={{
-                                                    left: `${Math.min(clipEditorDragRect.startX, clipEditorDragRect.currentX) * 100}%`,
-                                                    top: `${Math.min(clipEditorDragRect.startY, clipEditorDragRect.currentY) * 100}%`,
-                                                    width: `${Math.max(0.01, Math.abs(clipEditorDragRect.currentX - clipEditorDragRect.startX)) * 100}%`,
-                                                    height: `${Math.max(0.01, Math.abs(clipEditorDragRect.currentY - clipEditorDragRect.startY)) * 100}%`,
-                                                }}
-                                            />
-                                        )}
-                                        {!!clipEditorDraft.burn_captions && (
-                                            <div className="absolute inset-x-2 bottom-2 px-2 py-1.5 rounded bg-black/55 text-[11px] text-white text-center">
-                                                [Speaker] Sample burned caption preview
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                    <ClipEditorWorkspace
+                        activeEditingClip={activeEditingClip}
+                        currentTime={currentTime}
+                        video={video}
+                        segments={segments}
+                        renderMainPlayer={renderMainPlayer}
+                        onSeek={handleSeek}
+                    />
                 ) : (
                     <div className="flex-1 flex items-center justify-center p-8 overflow-y-auto">
                         <div className="w-full max-w-5xl">
@@ -6711,268 +4359,269 @@ export function VideoDetailPage() {
                 )}
 
                 {!showClipEditorMain && activeTab === 'transcript' && (
-                <>
-                <button
-                    onClick={() => setFunnyDrawerOpen(v => !v)}
-                    className="absolute right-4 bottom-4 z-20 flex items-center gap-2 px-3 py-2 rounded-xl border border-amber-200 bg-white/95 hover:bg-white shadow-lg text-amber-800 text-sm font-medium"
-                    title="Open funny moments drawer"
-                >
-                    <Smile size={15} className="text-amber-600" />
-                    {funnyDrawerOpen ? 'Hide Funny Moments' : 'Funny Moments'}
-                </button>
+                    <>
+                        <button
+                            onClick={() => setFunnyDrawerOpen(v => !v)}
+                            className="absolute right-4 bottom-4 z-20 flex items-center gap-2 px-3 py-2 rounded-xl border border-amber-200 bg-white/95 hover:bg-white shadow-lg text-amber-800 text-sm font-medium"
+                            title="Open funny moments drawer"
+                        >
+                            <Smile size={15} className="text-amber-600" />
+                            {funnyDrawerOpen ? 'Hide Funny Moments' : 'Funny Moments'}
+                        </button>
 
-                <div
-                    className={`absolute right-4 top-4 bottom-20 z-20 w-[380px] max-w-[calc(100%-2rem)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur-sm shadow-2xl overflow-hidden transition-transform duration-200 ${funnyDrawerOpen ? 'translate-x-0' : 'translate-x-[110%]'}`}
-                >
-                    <div className="h-full flex flex-col">
-                        <div className="px-4 py-3 border-b border-slate-200 bg-gradient-to-r from-amber-50 to-yellow-50">
-                            <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                    <div className="flex items-center gap-2 text-amber-800 font-semibold text-sm">
-                                        <Smile size={15} className="text-amber-600" />
-                                        Funny Moments
-                                    </div>
-                                    <p className="text-xs text-amber-700/80 mt-0.5">
-                                        Click to jump video and transcript to the laugh moment.
-                                    </p>
-                                </div>
-                                <button
-                                    onClick={() => setFunnyDrawerOpen(false)}
-                                    className="p-1.5 rounded-lg text-slate-500 hover:text-slate-700 hover:bg-white/80"
-                                >
-                                    <X size={14} />
-                                </button>
-                            </div>
-                            <div className="mt-3 flex items-center gap-2">
-                                <div className="grid grid-cols-2 gap-2 w-full">
-                                    <button
-                                        onClick={() => handleDetectFunnyMoments(true)}
-                                        disabled={detectingFunnyMoments || !video?.processed}
-                                        className="h-10 px-2 rounded-lg text-xs font-medium bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
-                                        title={video?.processed ? 'Analyze transcript/audio for funny moments' : 'Transcribe the episode first'}
-                                    >
-                                        {detectingFunnyMoments ? <Loader2 size={13} className="animate-spin" /> : <Smile size={13} />}
-                                        {funnyMoments.length > 0 ? 'Rescan' : 'Find'}
-                                    </button>
-                                    <button
-                                        onClick={() => handleExplainFunnyMoments(true)}
-                                        disabled={explainingFunnyMoments || funnyMoments.length === 0}
-                                        className="h-10 px-2 rounded-lg text-xs font-medium bg-purple-100 text-purple-700 hover:bg-purple-200 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
-                                        title="Force-regenerate global humor context and moment explanations with the current LLM provider/model"
-                                    >
-                                        {explainingFunnyMoments ? <Loader2 size={13} className="animate-spin" /> : (hasExistingFunnyExplanations ? <RefreshCw size={13} /> : <Search size={13} />)}
-                                        {hasExistingFunnyExplanations ? 'Re-explain' : 'Explain'}
-                                    </button>
-                                </div>
-                            </div>
-                            {funnyDrawerTaskLabel && (
-                                <div className="mt-2 rounded-lg border border-slate-200/80 bg-white/80 px-2.5 py-2">
-                                    <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
-                                        <div className="flex items-center gap-2 min-w-0">
-                                        <Loader2 size={12} className="animate-spin text-amber-600 shrink-0" />
-                                            <span className="truncate">{funnyDrawerTaskLabel}</span>
-                                        </div>
-                                        {funnyTaskCurrent != null && funnyTaskTotal != null && funnyTaskTotal > 0 && (
-                                            <span className="shrink-0 font-mono text-slate-500">
-                                                {funnyTaskCurrent}/{funnyTaskTotal}
-                                            </span>
-                                        )}
-                                    </div>
-                                    <div className="mt-2 h-1.5 bg-slate-100 rounded-full overflow-hidden relative">
-                                        {funnyTaskPercent != null ? (
-                                            <div
-                                                className="h-full bg-amber-500 transition-all duration-300"
-                                                style={{ width: `${funnyTaskPercent}%` }}
-                                            />
-                                        ) : (
-                                            <div className="absolute inset-0 bg-amber-500/15">
-                                                <div className="h-full w-1/3 bg-amber-500 animate-[shimmer_1.5s_infinite] relative overflow-hidden">
-                                                    <div className="absolute inset-0 bg-white/35 skew-x-12" />
-                                                </div>
+                        <div
+                            className={`absolute right-4 top-4 bottom-20 z-20 w-[380px] max-w-[calc(100%-2rem)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur-sm shadow-2xl overflow-hidden transition-transform duration-200 ${funnyDrawerOpen ? 'translate-x-0' : 'translate-x-[110%]'}`}
+                        >
+                            <div className="h-full flex flex-col">
+                                <div className="px-4 py-3 border-b border-slate-200 bg-gradient-to-r from-amber-50 to-yellow-50">
+                                    <div className="flex items-start justify-between gap-3">
+                                        <div className="min-w-0">
+                                            <div className="flex items-center gap-2 text-amber-800 font-semibold text-sm">
+                                                <Smile size={15} className="text-amber-600" />
+                                                Funny Moments
                                             </div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-                            <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                                <span className="px-2 py-0.5 rounded bg-white/80 border border-amber-200 text-amber-800">
-                                    {funnyMoments.length > 0 ? `${funnyMoments.length} saved moments` : 'No saved moments'}
-                                </span>
-                                {funnyExplainHeaderModelLabel && (
-                                    <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200">
-                                        {funnyExplainHeaderModelLabel}
-                                    </span>
-                                )}
-                                {latestFunnyExplainAt > 0 && (
-                                    <span className="text-slate-600">
-                                        {new Date(latestFunnyExplainAt).toLocaleString()}
-                                    </span>
-                                )}
-                                {explainedFunnyMoments.length > 0 && (
-                                    <span className="text-slate-500">
-                                        {explainedFunnyMoments.length} explained
-                                    </span>
-                                )}
-                            </div>
-                        </div>
-
-                        <div className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50/50">
-                            {segments.length > 0 && (
-                                <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
-                                    <div className="flex items-center justify-between gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => setShowGlobalHumorContext(v => !v)}
-                                            className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-slate-600 font-semibold hover:text-slate-800"
-                                            title={showGlobalHumorContext ? 'Hide global humor context' : 'Show global humor context'}
-                                        >
-                                            {showGlobalHumorContext ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                                            Global Humor Context
-                                        </button>
-                                        <div className="flex items-center gap-1.5">
-                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
-                                                Stage 1
-                                            </span>
-                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-50 text-slate-500 border border-slate-200">
-                                                Episode-wide context
-                                            </span>
-                                        </div>
-                                    </div>
-                                    {showGlobalHumorContext ? (
-                                        video?.humor_context_summary ? (
-                                            <div className="mt-1.5">
-                                                <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
-                                                    {getDisplayHumorSummary(video.humor_context_summary)}
-                                                </p>
-                                                <div className="mt-2 text-[10px] text-slate-500 flex flex-wrap items-center gap-x-2 gap-y-1">
-                                                    {video.humor_context_model && (
-                                                        <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700">
-                                                            {video.humor_context_model}
-                                                        </span>
-                                                    )}
-                                                    {video.humor_context_generated_at && (
-                                                        <span>
-                                                            {new Date(video.humor_context_generated_at).toLocaleString()}
-                                                        </span>
-                                                    )}
-                                                    <span>Used to inform per-moment explanations</span>
-                                                </div>
-                                            </div>
-                                        ) : explainingFunnyMoments ? (
-                                            <div className="mt-1.5 text-xs text-slate-600 flex items-center gap-2">
-                                                <Loader2 size={13} className="animate-spin" />
-                                                Building episode-wide humor context summary...
-                                            </div>
-                                        ) : (
-                                            <p className="mt-1.5 text-xs text-slate-500">
-                                                Run <span className="font-medium">Explain</span> to generate an episode-wide humor context summary, then per-moment joke summaries.
+                                            <p className="text-xs text-amber-700/80 mt-0.5">
+                                                Click to jump video and transcript to the laugh moment.
                                             </p>
-                                        )
-                                    ) : (
-                                        <p className="mt-1.5 text-xs text-slate-500">
-                                            Optional episode-wide context for callbacks/running bits. Expand if you want extra background while reviewing individual moments.
-                                        </p>
-                                    )}
-                                </div>
-                            )}
-
-                            {funnyMoments.length > 0 && (
-                                <div className="px-1 pt-1 pb-0.5 flex items-center justify-between">
-                                    <div className="text-[10px] uppercase tracking-wide text-slate-600 font-semibold">
-                                        Moment Explanations
-                                    </div>
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
-                                        Stage 2
-                                    </span>
-                                </div>
-                            )}
-
-                            {(loadingFunnyMoments || detectingFunnyMoments) && funnyMoments.length === 0 ? (
-                                <div className="text-xs text-slate-600 flex items-center gap-2 py-2 px-2">
-                                    <Loader2 size={13} className="animate-spin" />
-                                    Analyzing episode for laughter...
-                                </div>
-                            ) : funnyMoments.length > 0 ? (
-                                funnyMoments.map((moment) => {
-                                    const summaryText = moment.humor_summary ? getDisplayHumorSummary(moment.humor_summary) : '';
-                                    const isExpanded = expandedFunnySummaryIds.has(moment.id);
-                                    const canExpand = summaryText.length > 220;
-                                    return (
-                                    <button
-                                        key={moment.id}
-                                        onClick={() => handleFunnyMomentJump(moment)}
-                                        className="w-full text-left rounded-xl border border-amber-200/60 bg-white hover:bg-amber-50/40 px-3 py-2.5 transition-colors shadow-sm"
-                                    >
-                                        <div className="flex items-center justify-between gap-2">
-                                            <div className="font-mono text-xs text-amber-900">
-                                                {formatTime(moment.start_time)} - {formatTime(moment.end_time)}
-                                            </div>
-                                            <div className="flex items-center gap-2 shrink-0">
-                                                <span className="text-[10px] uppercase tracking-wide text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">
-                                                    {moment.source}
-                                                </span>
-                                                <span className="text-[10px] text-amber-700 font-semibold">
-                                                    {(moment.score * 100).toFixed(0)}
-                                                </span>
-                                            </div>
                                         </div>
-                                        {moment.humor_summary ? (
-                                            <div className="mt-1.5">
-                                                <div className="flex items-center gap-2 mb-1">
-                                                    <span className="text-[10px] uppercase tracking-wide text-slate-600">Likely joke</span>
-                                                    {moment.humor_confidence && (
-                                                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${moment.humor_confidence === 'high'
-                                                            ? 'bg-emerald-100 text-emerald-700'
-                                                            : moment.humor_confidence === 'medium'
-                                                                ? 'bg-blue-100 text-blue-700'
-                                                                : 'bg-slate-100 text-slate-600'
-                                                            }`}>
-                                                            {moment.humor_confidence}
-                                                        </span>
-                                                    )}
+                                        <button
+                                            onClick={() => setFunnyDrawerOpen(false)}
+                                            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-700 hover:bg-white/80"
+                                        >
+                                            <X size={14} />
+                                        </button>
+                                    </div>
+                                    <div className="mt-3 flex items-center gap-2">
+                                        <div className="grid grid-cols-2 gap-2 w-full">
+                                            <button
+                                                onClick={() => handleDetectFunnyMoments(true)}
+                                                disabled={detectingFunnyMoments || !video?.processed}
+                                                className="h-10 px-2 rounded-lg text-xs font-medium bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+                                                title={video?.processed ? 'Analyze transcript/audio for funny moments' : 'Transcribe the episode first'}
+                                            >
+                                                {detectingFunnyMoments ? <Loader2 size={13} className="animate-spin" /> : <Smile size={13} />}
+                                                {funnyMoments.length > 0 ? 'Rescan' : 'Find'}
+                                            </button>
+                                            <button
+                                                onClick={() => handleExplainFunnyMoments(true)}
+                                                disabled={explainingFunnyMoments || funnyMoments.length === 0}
+                                                className="h-10 px-2 rounded-lg text-xs font-medium bg-purple-100 text-purple-700 hover:bg-purple-200 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+                                                title="Force-regenerate global humor context and moment explanations with the current LLM provider/model"
+                                            >
+                                                {explainingFunnyMoments ? <Loader2 size={13} className="animate-spin" /> : (hasExistingFunnyExplanations ? <RefreshCw size={13} /> : <Search size={13} />)}
+                                                {hasExistingFunnyExplanations ? 'Re-explain' : 'Explain'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                    {funnyDrawerTaskLabel && (
+                                        <div className="mt-2 rounded-lg border border-slate-200/80 bg-white/80 px-2.5 py-2">
+                                            <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                    <Loader2 size={12} className="animate-spin text-amber-600 shrink-0" />
+                                                    <span className="truncate">{funnyDrawerTaskLabel}</span>
                                                 </div>
-                                                <p className={`text-xs text-slate-700 ${isExpanded ? '' : 'line-clamp-4'}`}>
-                                                    {summaryText}
-                                                </p>
-                                                {canExpand && (
-                                                    <span
-                                                        role="button"
-                                                        tabIndex={0}
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            toggleFunnySummaryExpanded(moment.id);
-                                                        }}
-                                                        onKeyDown={(e) => {
-                                                            if (e.key === 'Enter' || e.key === ' ') {
-                                                                e.preventDefault();
-                                                                e.stopPropagation();
-                                                                toggleFunnySummaryExpanded(moment.id);
-                                                            }
-                                                        }}
-                                                        className="mt-1 inline-flex text-[11px] font-medium text-amber-700 hover:text-amber-800 underline underline-offset-2 cursor-pointer"
-                                                    >
-                                                        {isExpanded ? 'Show less' : 'Show more'}
+                                                {funnyTaskCurrent != null && funnyTaskTotal != null && funnyTaskTotal > 0 && (
+                                                    <span className="shrink-0 font-mono text-slate-500">
+                                                        {funnyTaskCurrent}/{funnyTaskTotal}
                                                     </span>
                                                 )}
                                             </div>
-                                        ) : moment.snippet ? (
-                                            <p className="mt-1.5 text-xs text-slate-700 line-clamp-3">
-                                                {moment.snippet}
-                                            </p>
-                                        ) : null}
-                                    </button>
-                                )})
-                            ) : (
-                                <div className="rounded-lg border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-500">
-                                    {segments.length === 0
-                                        ? 'Transcript required first. Start transcription to analyze funny moments.'
-                                        : 'No funny moments detected yet. Click Find to analyze this episode.'}
+                                            <div className="mt-2 h-1.5 bg-slate-100 rounded-full overflow-hidden relative">
+                                                {funnyTaskPercent != null ? (
+                                                    <div
+                                                        className="h-full bg-amber-500 transition-all duration-300"
+                                                        style={{ width: `${funnyTaskPercent}%` }}
+                                                    />
+                                                ) : (
+                                                    <div className="absolute inset-0 bg-amber-500/15">
+                                                        <div className="h-full w-1/3 bg-amber-500 animate-[shimmer_1.5s_infinite] relative overflow-hidden">
+                                                            <div className="absolute inset-0 bg-white/35 skew-x-12" />
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                                        <span className="px-2 py-0.5 rounded bg-white/80 border border-amber-200 text-amber-800">
+                                            {funnyMoments.length > 0 ? `${funnyMoments.length} saved moments` : 'No saved moments'}
+                                        </span>
+                                        {funnyExplainHeaderModelLabel && (
+                                            <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200">
+                                                {funnyExplainHeaderModelLabel}
+                                            </span>
+                                        )}
+                                        {latestFunnyExplainAt > 0 && (
+                                            <span className="text-slate-600">
+                                                {new Date(latestFunnyExplainAt).toLocaleString()}
+                                            </span>
+                                        )}
+                                        {explainedFunnyMoments.length > 0 && (
+                                            <span className="text-slate-500">
+                                                {explainedFunnyMoments.length} explained
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
-                            )}
+
+                                <div className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50/50">
+                                    {segments.length > 0 && (
+                                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
+                                            <div className="flex items-center justify-between gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setShowGlobalHumorContext(v => !v)}
+                                                    className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-slate-600 font-semibold hover:text-slate-800"
+                                                    title={showGlobalHumorContext ? 'Hide global humor context' : 'Show global humor context'}
+                                                >
+                                                    {showGlobalHumorContext ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                    Global Humor Context
+                                                </button>
+                                                <div className="flex items-center gap-1.5">
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
+                                                        Stage 1
+                                                    </span>
+                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-50 text-slate-500 border border-slate-200">
+                                                        Episode-wide context
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            {showGlobalHumorContext ? (
+                                                video?.humor_context_summary ? (
+                                                    <div className="mt-1.5">
+                                                        <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
+                                                            {getDisplayHumorSummary(video.humor_context_summary)}
+                                                        </p>
+                                                        <div className="mt-2 text-[10px] text-slate-500 flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                            {video.humor_context_model && (
+                                                                <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700">
+                                                                    {video.humor_context_model}
+                                                                </span>
+                                                            )}
+                                                            {video.humor_context_generated_at && (
+                                                                <span>
+                                                                    {new Date(video.humor_context_generated_at).toLocaleString()}
+                                                                </span>
+                                                            )}
+                                                            <span>Used to inform per-moment explanations</span>
+                                                        </div>
+                                                    </div>
+                                                ) : explainingFunnyMoments ? (
+                                                    <div className="mt-1.5 text-xs text-slate-600 flex items-center gap-2">
+                                                        <Loader2 size={13} className="animate-spin" />
+                                                        Building episode-wide humor context summary...
+                                                    </div>
+                                                ) : (
+                                                    <p className="mt-1.5 text-xs text-slate-500">
+                                                        Run <span className="font-medium">Explain</span> to generate an episode-wide humor context summary, then per-moment joke summaries.
+                                                    </p>
+                                                )
+                                            ) : (
+                                                <p className="mt-1.5 text-xs text-slate-500">
+                                                    Optional episode-wide context for callbacks/running bits. Expand if you want extra background while reviewing individual moments.
+                                                </p>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {funnyMoments.length > 0 && (
+                                        <div className="px-1 pt-1 pb-0.5 flex items-center justify-between">
+                                            <div className="text-[10px] uppercase tracking-wide text-slate-600 font-semibold">
+                                                Moment Explanations
+                                            </div>
+                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
+                                                Stage 2
+                                            </span>
+                                        </div>
+                                    )}
+
+                                    {(loadingFunnyMoments || detectingFunnyMoments) && funnyMoments.length === 0 ? (
+                                        <div className="text-xs text-slate-600 flex items-center gap-2 py-2 px-2">
+                                            <Loader2 size={13} className="animate-spin" />
+                                            Analyzing episode for laughter...
+                                        </div>
+                                    ) : funnyMoments.length > 0 ? (
+                                        funnyMoments.map((moment) => {
+                                            const summaryText = moment.humor_summary ? getDisplayHumorSummary(moment.humor_summary) : '';
+                                            const isExpanded = expandedFunnySummaryIds.has(moment.id);
+                                            const canExpand = summaryText.length > 220;
+                                            return (
+                                                <button
+                                                    key={moment.id}
+                                                    onClick={() => handleFunnyMomentJump(moment)}
+                                                    className="w-full text-left rounded-xl border border-amber-200/60 bg-white hover:bg-amber-50/40 px-3 py-2.5 transition-colors shadow-sm"
+                                                >
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <div className="font-mono text-xs text-amber-900">
+                                                            {formatTime(moment.start_time)} - {formatTime(moment.end_time)}
+                                                        </div>
+                                                        <div className="flex items-center gap-2 shrink-0">
+                                                            <span className="text-[10px] uppercase tracking-wide text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">
+                                                                {moment.source}
+                                                            </span>
+                                                            <span className="text-[10px] text-amber-700 font-semibold">
+                                                                {(moment.score * 100).toFixed(0)}
+                                                            </span>
+                                                        </div>
+                                                    </div>
+                                                    {moment.humor_summary ? (
+                                                        <div className="mt-1.5">
+                                                            <div className="flex items-center gap-2 mb-1">
+                                                                <span className="text-[10px] uppercase tracking-wide text-slate-600">Likely joke</span>
+                                                                {moment.humor_confidence && (
+                                                                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${moment.humor_confidence === 'high'
+                                                                        ? 'bg-emerald-100 text-emerald-700'
+                                                                        : moment.humor_confidence === 'medium'
+                                                                            ? 'bg-blue-100 text-blue-700'
+                                                                            : 'bg-slate-100 text-slate-600'
+                                                                        }`}>
+                                                                        {moment.humor_confidence}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <p className={`text-xs text-slate-700 ${isExpanded ? '' : 'line-clamp-4'}`}>
+                                                                {summaryText}
+                                                            </p>
+                                                            {canExpand && (
+                                                                <span
+                                                                    role="button"
+                                                                    tabIndex={0}
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        toggleFunnySummaryExpanded(moment.id);
+                                                                    }}
+                                                                    onKeyDown={(e) => {
+                                                                        if (e.key === 'Enter' || e.key === ' ') {
+                                                                            e.preventDefault();
+                                                                            e.stopPropagation();
+                                                                            toggleFunnySummaryExpanded(moment.id);
+                                                                        }
+                                                                    }}
+                                                                    className="mt-1 inline-flex text-[11px] font-medium text-amber-700 hover:text-amber-800 underline underline-offset-2 cursor-pointer"
+                                                                >
+                                                                    {isExpanded ? 'Show less' : 'Show more'}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    ) : moment.snippet ? (
+                                                        <p className="mt-1.5 text-xs text-slate-700 line-clamp-3">
+                                                            {moment.snippet}
+                                                        </p>
+                                                    ) : null}
+                                                </button>
+                                            )
+                                        })
+                                    ) : (
+                                        <div className="rounded-lg border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-500">
+                                            {segments.length === 0
+                                                ? 'Transcript required first. Start transcription to analyze funny moments.'
+                                                : 'No funny moments detected yet. Click Find to analyze this episode.'}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
                         </div>
-                    </div>
-                </div>
-                </>
+                    </>
                 )}
             </div>
 
