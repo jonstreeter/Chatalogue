@@ -129,13 +129,9 @@ export function VideoDetailPage() {
     const setDeepLinkedSegmentId = useTranscriptStore((s) => s.setDeepLinkedSegmentId);
     const setSearchMatchIndex = useTranscriptStore((s) => s.setSearchMatchIndex);
     const setFollowPlayback = useTranscriptStore((s) => s.setFollowPlayback);
-    const setLoadingFunnyMoments = useTranscriptStore((s) => s.setLoadingFunnyMoments);
-    const setDetectingFunnyMoments = useTranscriptStore((s) => s.setDetectingFunnyMoments);
     const setFunnyDrawerOpen = useTranscriptStore((s) => s.setFunnyDrawerOpen);
-    const setExplainingFunnyMoments = useTranscriptStore((s) => s.setExplainingFunnyMoments);
     const setShowGlobalHumorContext = useTranscriptStore((s) => s.setShowGlobalHumorContext);
     const setExpandedFunnySummaryIds = useTranscriptStore((s) => s.setExpandedFunnySummaryIds);
-    const setFunnyTaskProgress = useTranscriptStore((s) => s.setFunnyTaskProgress);
 
     // Clone store — only the values VideoDetailPage itself needs (chat sidebar + EpisodeChatWorkbench).
     const cloneEngines = useCloneStore((s) => s.cloneEngines);
@@ -150,7 +146,6 @@ export function VideoDetailPage() {
     const setEditingSegmentId = useTranscriptStore((s) => s.setEditingSegmentId);
     const setEditingSegmentWords = useTranscriptStore((s) => s.setEditingSegmentWords);
     const setEditingLoopSegment = useTranscriptStore((s) => s.setEditingLoopSegment);
-    const setSavingSegmentEdit = useTranscriptStore((s) => s.setSavingSegmentEdit);
     const editingClipId = useClipsStore((s) => s.editingClipId);
     const clipEditorDraft = useClipsStore((s) => s.clipEditorDraft);
     const clipPreviewLoop = useClipsStore((s) => s.clipPreviewLoop);
@@ -249,6 +244,9 @@ export function VideoDetailPage() {
     const fetchStoreTranscriptGoldWindows = useTranscriptStore((s) => s.fetchTranscriptGoldWindows);
     const fetchStoreTranscriptEvaluationResults = useTranscriptStore((s) => s.fetchTranscriptEvaluationResults);
     const fetchStoreEvaluationReviews = useTranscriptStore((s) => s.fetchEvaluationReviews);
+    const saveStoreSegmentEdit = useTranscriptStore((s) => s.saveSegmentEdit);
+    const detectStoreFunnyMoments = useTranscriptStore((s) => s.detectFunnyMoments);
+    const explainStoreFunnyMoments = useTranscriptStore((s) => s.explainFunnyMoments);
     const queueingVoiceFixer = useCleanupStore((s) => s.queueingVoiceFixer);
     const queueingReconstruction = useReconstructionStore((s) => s.queueingReconstruction);
     const auxiliaryJobs = useWorkbenchStore((s) => s.auxiliaryJobs);
@@ -1979,29 +1977,17 @@ export function VideoDetailPage() {
     };
 
     const saveSegmentEdit = async (segmentId: number) => {
-        const words = editingSegmentWords.map(w => w.trim()).filter(Boolean);
-        const text = words.join(' ').trim();
-        if (!text) {
-            alert('Transcript text cannot be empty');
-            return;
-        }
-        setSavingSegmentEdit(true);
-        try {
-            const res = await api.patch<TranscriptSegment>(`/segments/${segmentId}/text`, { text, words });
-            setSegments(prev => prev.map(s => (
-                s.id === segmentId
-                    ? { ...s, text: res.data.text, words: res.data.words ?? s.words }
-                    : s
-            )));
-            setEditingLoopSegment(false);
-            pauseMainPreview();
-            setEditingSegmentId(null);
-            setEditingSegmentWords([]);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to save transcript correction');
-        } finally {
-            setSavingSegmentEdit(false);
-        }
+        await saveStoreSegmentEdit(
+            segmentId,
+            (updatedSegment) => {
+                setSegments(prev => prev.map(s => (
+                    s.id === segmentId
+                        ? { ...s, text: updatedSegment.text, words: updatedSegment.words ?? s.words }
+                        : s
+                )));
+            },
+            pauseMainPreview,
+        );
     };
 
     const startClipEdit = (clip: Clip) => {
@@ -2093,57 +2079,12 @@ export function VideoDetailPage() {
 
     const handleDetectFunnyMoments = async (force = true) => {
         if (!id) return;
-        setDetectingFunnyMoments(true);
-        setFunnyTaskProgress(prev => ({
-            video_id: Number(id),
-            status: 'running',
-            task: 'detect',
-            stage: prev?.stage ?? 'loading',
-            message: 'Starting funny-moment scan...',
-            percent: 1,
-            current: null,
-            total: null,
-        }));
-        try {
-            const res = await api.post<FunnyMoment[]>(`/videos/${id}/funny-moments/detect`, null, {
-                params: { force }
-            });
-            setFunnyMoments(res.data);
-        } catch (e: any) {
-            console.error('Failed to detect funny moments', e);
-            alert(e?.response?.data?.detail || 'Failed to detect funny moments');
-        } finally {
-            void fetchFunnyTaskProgress();
-            setDetectingFunnyMoments(false);
-        }
+        await detectStoreFunnyMoments(Number(id), force);
     };
 
     const handleExplainFunnyMoments = async (force = false) => {
         if (!id) return;
-        setExplainingFunnyMoments(true);
-        setFunnyTaskProgress(prev => ({
-            video_id: Number(id),
-            status: 'running',
-            task: 'explain',
-            stage: prev?.stage ?? 'loading',
-            message: force ? 'Starting re-explain...' : 'Starting explain...',
-            percent: 1,
-            current: 0,
-            total: null,
-        }));
-        try {
-            const res = await api.post<FunnyMoment[]>(`/videos/${id}/funny-moments/explain`, null, {
-                params: { force }
-            });
-            setFunnyMoments(res.data);
-            await fetchVideoMeta();
-        } catch (e: any) {
-            console.error('Failed to explain funny moments', e);
-            alert(e?.response?.data?.detail || 'Failed to generate AI explanations');
-        } finally {
-            void fetchFunnyTaskProgress();
-            setExplainingFunnyMoments(false);
-        }
+        await explainStoreFunnyMoments(Number(id), force, fetchVideoMeta);
     };
 
 
@@ -3163,759 +3104,759 @@ export function VideoDetailPage() {
                         <TranscriptTab
                             renderSidebar={() => (
                                 <div className="h-full flex flex-col">
-                            {/* Search Bar */}
-                            {segments.length > 0 && (
-                                <div className="p-2 border-b border-slate-100 bg-white/80 backdrop-blur-sm shrink-0">
-                                    <div className="relative flex items-center">
-                                        <Search size={14} className="absolute left-2.5 text-slate-400" />
-                                        <input
-                                            type="text"
-                                            value={searchQuery}
-                                            onChange={(e) => setSearchQuery(e.target.value)}
-                                            placeholder="Search transcript..."
-                                            className="w-full pl-8 pr-24 py-1.5 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-colors"
-                                        />
-                                        {searchQuery && (
-                                            <div className="absolute right-1 flex items-center gap-0.5">
-                                                <span className="text-[10px] text-slate-400 font-mono mr-1">
-                                                    {totalMatches > 0 ? `${searchMatchIndex + 1}/${totalMatches}` : '0'}
-                                                </span>
-                                                <button
-                                                    onClick={() => setSearchMatchIndex(prev => (prev - 1 + totalMatches) % totalMatches)}
-                                                    disabled={totalMatches === 0}
-                                                    className="p-0.5 text-slate-400 hover:text-slate-600 disabled:opacity-30 rounded"
-                                                ><ChevronUp size={14} /></button>
-                                                <button
-                                                    onClick={() => setSearchMatchIndex(prev => (prev + 1) % totalMatches)}
-                                                    disabled={totalMatches === 0}
-                                                    className="p-0.5 text-slate-400 hover:text-slate-600 disabled:opacity-30 rounded"
-                                                ><ChevronDown size={14} /></button>
-                                                <button
-                                                    onClick={() => setSearchQuery('')}
-                                                    className="p-0.5 text-slate-400 hover:text-slate-600 rounded"
-                                                ><X size={14} /></button>
-                                            </div>
-                                        )}
-                                    </div>
-                                    <div className="mt-2 flex items-center justify-end">
-                                        <label className="inline-flex items-center gap-2.5 text-xs text-slate-600 select-none cursor-pointer">
-                                            <span className="font-medium">Follow playback</span>
-                                            <span className="relative inline-flex items-center">
-                                                <input
-                                                    type="checkbox"
-                                                    checked={followPlayback}
-                                                    onChange={(e) => setFollowPlayback(e.target.checked)}
-                                                    className="sr-only peer"
-                                                />
-                                                <span className="w-10 h-5 bg-slate-200 rounded-full transition-colors peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300/40 peer-checked:bg-blue-500" />
-                                                <span className="absolute left-[2px] top-[2px] h-4 w-4 rounded-full bg-white border border-slate-300 shadow-sm transition-transform peer-checked:translate-x-5 peer-checked:border-white" />
-                                            </span>
-                                        </label>
-                                    </div>
-                                    {isPlaceholderTranscript && (
-                                        <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                            <Clock size={14} className="mt-0.5 shrink-0 text-amber-600" />
-                                            <div>
-                                                <div className="font-semibold">
-                                                    {placeholderTranscriptSourceLabel}
-                                                    {placeholderTranscriptLanguage ? ` (${placeholderTranscriptLanguage})` : ''}
-                                                </div>
-                                                <div className="mt-0.5 text-amber-800/90">
-                                                    This searchable transcript is a temporary placeholder and will be replaced automatically after local transcription and diarization finish.
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
+                                    {/* Search Bar */}
                                     {segments.length > 0 && (
-                                        <div className="mt-3">
-                                            {renderTranscriptOptimizationSnapshotCard('transcript')}
-                                        </div>
-                                    )}
-                                    {false && segments.length > 0 && (
-                                        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/90 px-3 py-3">
-                                            <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                                                <div className="min-w-0">
-                                                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Transcript Optimization</div>
-                                                    {loadingTranscriptQuality ? (
-                                                        <div className="mt-2 inline-flex items-center gap-2 text-sm text-slate-500">
-                                                            <Loader2 size={14} className="animate-spin" />
-                                                            Evaluating transcript quality...
+                                        <div className="p-2 border-b border-slate-100 bg-white/80 backdrop-blur-sm shrink-0">
+                                            <div className="relative flex items-center">
+                                                <Search size={14} className="absolute left-2.5 text-slate-400" />
+                                                <input
+                                                    type="text"
+                                                    value={searchQuery}
+                                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                                    placeholder="Search transcript..."
+                                                    className="w-full pl-8 pr-24 py-1.5 text-sm bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-colors"
+                                                />
+                                                {searchQuery && (
+                                                    <div className="absolute right-1 flex items-center gap-0.5">
+                                                        <span className="text-[10px] text-slate-400 font-mono mr-1">
+                                                            {totalMatches > 0 ? `${searchMatchIndex + 1}/${totalMatches}` : '0'}
+                                                        </span>
+                                                        <button
+                                                            onClick={() => setSearchMatchIndex(prev => (prev - 1 + totalMatches) % totalMatches)}
+                                                            disabled={totalMatches === 0}
+                                                            className="p-0.5 text-slate-400 hover:text-slate-600 disabled:opacity-30 rounded"
+                                                        ><ChevronUp size={14} /></button>
+                                                        <button
+                                                            onClick={() => setSearchMatchIndex(prev => (prev + 1) % totalMatches)}
+                                                            disabled={totalMatches === 0}
+                                                            className="p-0.5 text-slate-400 hover:text-slate-600 disabled:opacity-30 rounded"
+                                                        ><ChevronDown size={14} /></button>
+                                                        <button
+                                                            onClick={() => setSearchQuery('')}
+                                                            className="p-0.5 text-slate-400 hover:text-slate-600 rounded"
+                                                        ><X size={14} /></button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="mt-2 flex items-center justify-end">
+                                                <label className="inline-flex items-center gap-2.5 text-xs text-slate-600 select-none cursor-pointer">
+                                                    <span className="font-medium">Follow playback</span>
+                                                    <span className="relative inline-flex items-center">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={followPlayback}
+                                                            onChange={(e) => setFollowPlayback(e.target.checked)}
+                                                            className="sr-only peer"
+                                                        />
+                                                        <span className="w-10 h-5 bg-slate-200 rounded-full transition-colors peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300/40 peer-checked:bg-blue-500" />
+                                                        <span className="absolute left-[2px] top-[2px] h-4 w-4 rounded-full bg-white border border-slate-300 shadow-sm transition-transform peer-checked:translate-x-5 peer-checked:border-white" />
+                                                    </span>
+                                                </label>
+                                            </div>
+                                            {isPlaceholderTranscript && (
+                                                <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                                    <Clock size={14} className="mt-0.5 shrink-0 text-amber-600" />
+                                                    <div>
+                                                        <div className="font-semibold">
+                                                            {placeholderTranscriptSourceLabel}
+                                                            {placeholderTranscriptLanguage ? ` (${placeholderTranscriptLanguage})` : ''}
                                                         </div>
-                                                    ) : transcriptQuality ? (
-                                                        <>
-                                                            <div className="mt-1 flex flex-wrap items-center gap-2">
-                                                                <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
-                                                                    {recommendedOptimizationLabel}
-                                                                </span>
-                                                                <span className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-600 ring-1 ring-slate-200">
-                                                                    Score {transcriptQuality?.quality_score?.toFixed(1) ?? '0.0'}
-                                                                </span>
-                                                                <span className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-600 ring-1 ring-slate-200">
-                                                                    {String(transcriptQuality?.quality_profile || 'unknown').replaceAll('_', ' ')}
-                                                                </span>
-                                                            </div>
-                                                            <div className="mt-2 grid gap-2 text-xs text-slate-600 sm:grid-cols-3">
-                                                                <div className="rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
-                                                                    Unknown speaker rate: {Number(transcriptQuality?.metrics?.unknown_speaker_rate || 0).toFixed(2)}
+                                                        <div className="mt-0.5 text-amber-800/90">
+                                                            This searchable transcript is a temporary placeholder and will be replaced automatically after local transcription and diarization finish.
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {segments.length > 0 && (
+                                                <div className="mt-3">
+                                                    {renderTranscriptOptimizationSnapshotCard('transcript')}
+                                                </div>
+                                            )}
+                                            {false && segments.length > 0 && (
+                                                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/90 px-3 py-3">
+                                                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                                                        <div className="min-w-0">
+                                                            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Transcript Optimization</div>
+                                                            {loadingTranscriptQuality ? (
+                                                                <div className="mt-2 inline-flex items-center gap-2 text-sm text-slate-500">
+                                                                    <Loader2 size={14} className="animate-spin" />
+                                                                    Evaluating transcript quality...
                                                                 </div>
-                                                                <div className="rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
-                                                                    Micro segments: {Number(transcriptQuality?.metrics?.micro_segment_count || 0)}
-                                                                </div>
-                                                                <div className="rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
-                                                                    Interruptions: {Number(transcriptQuality?.metrics?.same_speaker_interruptions || 0)}
-                                                                </div>
-                                                            </div>
-                                                            {Boolean(transcriptQuality?.reasons?.length) && (
-                                                                <div className="mt-2 text-xs leading-5 text-slate-500">
-                                                                    {transcriptQuality?.reasons?.[0]}
+                                                            ) : transcriptQuality ? (
+                                                                <>
+                                                                    <div className="mt-1 flex flex-wrap items-center gap-2">
+                                                                        <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                                                                            {recommendedOptimizationLabel}
+                                                                        </span>
+                                                                        <span className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-600 ring-1 ring-slate-200">
+                                                                            Score {transcriptQuality?.quality_score?.toFixed(1) ?? '0.0'}
+                                                                        </span>
+                                                                        <span className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-600 ring-1 ring-slate-200">
+                                                                            {String(transcriptQuality?.quality_profile || 'unknown').replaceAll('_', ' ')}
+                                                                        </span>
+                                                                    </div>
+                                                                    <div className="mt-2 grid gap-2 text-xs text-slate-600 sm:grid-cols-3">
+                                                                        <div className="rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
+                                                                            Unknown speaker rate: {Number(transcriptQuality?.metrics?.unknown_speaker_rate || 0).toFixed(2)}
+                                                                        </div>
+                                                                        <div className="rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
+                                                                            Micro segments: {Number(transcriptQuality?.metrics?.micro_segment_count || 0)}
+                                                                        </div>
+                                                                        <div className="rounded-lg bg-white px-3 py-2 ring-1 ring-slate-200">
+                                                                            Interruptions: {Number(transcriptQuality?.metrics?.same_speaker_interruptions || 0)}
+                                                                        </div>
+                                                                    </div>
+                                                                    {Boolean(transcriptQuality?.reasons?.length) && (
+                                                                        <div className="mt-2 text-xs leading-5 text-slate-500">
+                                                                            {transcriptQuality?.reasons?.[0]}
+                                                                        </div>
+                                                                    )}
+                                                                </>
+                                                            ) : (
+                                                                <div className="mt-2 text-sm text-slate-500">
+                                                                    {transcriptQualityError || 'Transcript quality has not been evaluated yet.'}
                                                                 </div>
                                                             )}
-                                                        </>
-                                                    ) : (
-                                                        <div className="mt-2 text-sm text-slate-500">
-                                                            {transcriptQualityError || 'Transcript quality has not been evaluated yet.'}
                                                         </div>
-                                                    )}
-                                                </div>
-                                                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
-                                                    <button
-                                                        onClick={() => {
-                                                            if (!id) return;
-                                                            void fetchTranscriptQuality(Number(id));
-                                                        }}
-                                                        disabled={loadingTranscriptQuality}
-                                                        className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                                                    >
-                                                        {loadingTranscriptQuality ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                                                        Refresh Assessment
-                                                    </button>
-                                                    <div className="group relative">
-                                                        <button
-                                                            onClick={queueTranscriptRepairJob}
-                                                            disabled={episodeBusy || recommendedOptimizationTier !== 'low_risk_repair'}
-                                                            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-                                                        >
-                                                            {queueingTranscriptRepair ? <Loader2 size={14} className="animate-spin" /> : <GitMerge size={14} />}
-                                                            Queue Repair
-                                                            <CircleHelp size={13} className="opacity-80" />
-                                                        </button>
-                                                        <div className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-72 -translate-x-1/2 rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 text-[11px] leading-5 text-white shadow-xl group-hover:block">
-                                                            {transcriptOptimizationHelp.repair}
-                                                        </div>
-                                                    </div>
-                                                    <div className="group relative">
-                                                        <button
-                                                            onClick={queueTranscriptDiarizationRebuildJob}
-                                                            disabled={episodeBusy || recommendedOptimizationTier !== 'diarization_rebuild'}
-                                                            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                                                        >
-                                                            {queueingDiarizationRebuild ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
-                                                            Queue Rebuild
-                                                            <CircleHelp size={13} className="opacity-80" />
-                                                        </button>
-                                                        <div className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-72 -translate-x-1/2 rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 text-[11px] leading-5 text-white shadow-xl group-hover:block">
-                                                            {transcriptOptimizationHelp.rebuild}
-                                                        </div>
-                                                    </div>
-                                                    <div className="group relative">
-                                                        <button
-                                                            onClick={queueTranscriptRetranscriptionJob}
-                                                            disabled={episodeBusy || recommendedOptimizationTier !== 'full_retranscription'}
-                                                            className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
-                                                        >
-                                                            {queueingFullRetranscription ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
-                                                            Queue Retranscribe
-                                                            <CircleHelp size={13} className="opacity-80" />
-                                                        </button>
-                                                        <div className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-72 -translate-x-1/2 rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 text-[11px] leading-5 text-white shadow-xl group-hover:block">
-                                                            {transcriptOptimizationHelp.retranscribe}
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(260px,0.9fr)]">
-                                                <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
-                                                    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Diarization Benchmark</div>
-                                                    <div className="mt-1 text-xs leading-5 text-slate-500">
-                                                        Queue a one-off benchmark variant with explicit diarization sensitivity and speaker-match threshold so you can compare results in the benchmark dashboard.
-                                                    </div>
-                                                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                                                        <label className="text-xs text-slate-600">
-                                                            <span className="mb-1 block font-medium">Sensitivity</span>
-                                                            <select
-                                                                value={diarizationBenchmarkSensitivity}
-                                                                onChange={(e) => setDiarizationBenchmarkSensitivity(e.target.value as 'aggressive' | 'balanced' | 'conservative')}
-                                                                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+                                                            <button
+                                                                onClick={() => {
+                                                                    if (!id) return;
+                                                                    void fetchTranscriptQuality(Number(id));
+                                                                }}
+                                                                disabled={loadingTranscriptQuality}
+                                                                className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
                                                             >
-                                                                <option value="aggressive">Aggressive</option>
-                                                                <option value="balanced">Balanced</option>
-                                                                <option value="conservative">Conservative</option>
-                                                            </select>
-                                                        </label>
-                                                        <label className="text-xs text-slate-600">
-                                                            <span className="mb-1 block font-medium">Match Threshold</span>
-                                                            <input
-                                                                value={diarizationBenchmarkThreshold}
-                                                                onChange={(e) => setDiarizationBenchmarkThreshold(e.target.value)}
-                                                                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                placeholder="0.35"
-                                                            />
-                                                        </label>
-                                                    </div>
-                                                    <button
-                                                        onClick={queueTranscriptDiarizationBenchmarkJob}
-                                                        disabled={episodeBusy}
-                                                        className="mt-3 inline-flex items-center justify-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50"
-                                                    >
-                                                        {queueingDiarizationBenchmark ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
-                                                        Queue Benchmark Variant
-                                                    </button>
-                                                </div>
-                                                <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
-                                                    <div className="flex items-center justify-between gap-2">
-                                                        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Rollback</div>
-                                                        {loadingTranscriptRollbackOptions && <Loader2 size={14} className="animate-spin text-slate-400" />}
-                                                    </div>
-                                                    <div className="mt-1 text-xs leading-5 text-slate-500">
-                                                        Restore a prior optimization run if a repair, rebuild, or retranscription regresses quality. The current transcript is backed up before restore.
-                                                    </div>
-                                                    <div className="mt-3 space-y-2">
-                                                        {transcriptRollbackOptions.length === 0 ? (
-                                                            <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-xs text-slate-500">
-                                                                No rollback snapshots recorded for this episode yet.
+                                                                {loadingTranscriptQuality ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                                                                Refresh Assessment
+                                                            </button>
+                                                            <div className="group relative">
+                                                                <button
+                                                                    onClick={queueTranscriptRepairJob}
+                                                                    disabled={episodeBusy || recommendedOptimizationTier !== 'low_risk_repair'}
+                                                                    className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                                                                >
+                                                                    {queueingTranscriptRepair ? <Loader2 size={14} className="animate-spin" /> : <GitMerge size={14} />}
+                                                                    Queue Repair
+                                                                    <CircleHelp size={13} className="opacity-80" />
+                                                                </button>
+                                                                <div className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-72 -translate-x-1/2 rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 text-[11px] leading-5 text-white shadow-xl group-hover:block">
+                                                                    {transcriptOptimizationHelp.repair}
+                                                                </div>
                                                             </div>
-                                                        ) : transcriptRollbackOptions.slice(0, 4).map((option) => (
-                                                            <div key={option.run_id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                                                <div className="flex items-start justify-between gap-3">
-                                                                    <div className="min-w-0">
-                                                                        <div className="text-sm font-medium text-slate-800">
-                                                                            Run {option.run_id} · {option.mode.replaceAll('_', ' ')}
-                                                                        </div>
-                                                                        <div className="mt-0.5 text-[11px] text-slate-500">
-                                                                            {new Date(option.created_at).toLocaleString()} · {option.pipeline_version}
-                                                                        </div>
-                                                                        {option.note && (
-                                                                            <div className="mt-1 text-xs text-slate-600 line-clamp-2">{option.note}</div>
-                                                                        )}
-                                                                    </div>
-                                                                    <button
-                                                                        onClick={() => restoreTranscriptFromRun(option.run_id)}
-                                                                        disabled={!option.rollback_available || episodeBusy}
-                                                                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                                                            <div className="group relative">
+                                                                <button
+                                                                    onClick={queueTranscriptDiarizationRebuildJob}
+                                                                    disabled={episodeBusy || recommendedOptimizationTier !== 'diarization_rebuild'}
+                                                                    className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                                                                >
+                                                                    {queueingDiarizationRebuild ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
+                                                                    Queue Rebuild
+                                                                    <CircleHelp size={13} className="opacity-80" />
+                                                                </button>
+                                                                <div className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-72 -translate-x-1/2 rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 text-[11px] leading-5 text-white shadow-xl group-hover:block">
+                                                                    {transcriptOptimizationHelp.rebuild}
+                                                                </div>
+                                                            </div>
+                                                            <div className="group relative">
+                                                                <button
+                                                                    onClick={queueTranscriptRetranscriptionJob}
+                                                                    disabled={episodeBusy || recommendedOptimizationTier !== 'full_retranscription'}
+                                                                    className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-amber-600 px-3 py-2 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+                                                                >
+                                                                    {queueingFullRetranscription ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                                                                    Queue Retranscribe
+                                                                    <CircleHelp size={13} className="opacity-80" />
+                                                                </button>
+                                                                <div className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-72 -translate-x-1/2 rounded-lg border border-slate-200 bg-slate-900 px-3 py-2 text-[11px] leading-5 text-white shadow-xl group-hover:block">
+                                                                    {transcriptOptimizationHelp.retranscribe}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="mt-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(260px,0.9fr)]">
+                                                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
+                                                            <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Diarization Benchmark</div>
+                                                            <div className="mt-1 text-xs leading-5 text-slate-500">
+                                                                Queue a one-off benchmark variant with explicit diarization sensitivity and speaker-match threshold so you can compare results in the benchmark dashboard.
+                                                            </div>
+                                                            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                                                                <label className="text-xs text-slate-600">
+                                                                    <span className="mb-1 block font-medium">Sensitivity</span>
+                                                                    <select
+                                                                        value={diarizationBenchmarkSensitivity}
+                                                                        onChange={(e) => setDiarizationBenchmarkSensitivity(e.target.value as 'aggressive' | 'balanced' | 'conservative')}
+                                                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
                                                                     >
-                                                                        {restoringTranscriptRunId === option.run_id ? 'Restoring...' : 'Restore'}
+                                                                        <option value="aggressive">Aggressive</option>
+                                                                        <option value="balanced">Balanced</option>
+                                                                        <option value="conservative">Conservative</option>
+                                                                    </select>
+                                                                </label>
+                                                                <label className="text-xs text-slate-600">
+                                                                    <span className="mb-1 block font-medium">Match Threshold</span>
+                                                                    <input
+                                                                        value={diarizationBenchmarkThreshold}
+                                                                        onChange={(e) => setDiarizationBenchmarkThreshold(e.target.value)}
+                                                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                        placeholder="0.35"
+                                                                    />
+                                                                </label>
+                                                            </div>
+                                                            <button
+                                                                onClick={queueTranscriptDiarizationBenchmarkJob}
+                                                                disabled={episodeBusy}
+                                                                className="mt-3 inline-flex items-center justify-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-50"
+                                                            >
+                                                                {queueingDiarizationBenchmark ? <Loader2 size={14} className="animate-spin" /> : <AudioLines size={14} />}
+                                                                Queue Benchmark Variant
+                                                            </button>
+                                                        </div>
+                                                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-3">
+                                                            <div className="flex items-center justify-between gap-2">
+                                                                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Rollback</div>
+                                                                {loadingTranscriptRollbackOptions && <Loader2 size={14} className="animate-spin text-slate-400" />}
+                                                            </div>
+                                                            <div className="mt-1 text-xs leading-5 text-slate-500">
+                                                                Restore a prior optimization run if a repair, rebuild, or retranscription regresses quality. The current transcript is backed up before restore.
+                                                            </div>
+                                                            <div className="mt-3 space-y-2">
+                                                                {transcriptRollbackOptions.length === 0 ? (
+                                                                    <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-xs text-slate-500">
+                                                                        No rollback snapshots recorded for this episode yet.
+                                                                    </div>
+                                                                ) : transcriptRollbackOptions.slice(0, 4).map((option) => (
+                                                                    <div key={option.run_id} className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                                                                        <div className="flex items-start justify-between gap-3">
+                                                                            <div className="min-w-0">
+                                                                                <div className="text-sm font-medium text-slate-800">
+                                                                                    Run {option.run_id} · {option.mode.replaceAll('_', ' ')}
+                                                                                </div>
+                                                                                <div className="mt-0.5 text-[11px] text-slate-500">
+                                                                                    {new Date(option.created_at).toLocaleString()} · {option.pipeline_version}
+                                                                                </div>
+                                                                                {option.note && (
+                                                                                    <div className="mt-1 text-xs text-slate-600 line-clamp-2">{option.note}</div>
+                                                                                )}
+                                                                            </div>
+                                                                            <button
+                                                                                onClick={() => restoreTranscriptFromRun(option.run_id)}
+                                                                                disabled={!option.rollback_available || episodeBusy}
+                                                                                className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                                                                            >
+                                                                                {restoringTranscriptRunId === option.run_id ? 'Restoring...' : 'Restore'}
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {false && segments.length > 0 && (
+                                                <div className="mt-3 rounded-xl border border-slate-200 bg-white/95 px-3 py-3">
+                                                    <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                                                        <div className="min-w-0">
+                                                            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Transcript Benchmark</div>
+                                                            <div className="mt-1 text-sm text-slate-600">
+                                                                Define hand-corrected gold windows for this episode, run deterministic scoring, then attach reviewer verdicts.
+                                                            </div>
+                                                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                                                                <span className="rounded-full bg-slate-100 px-2.5 py-1 ring-1 ring-slate-200">
+                                                                    {transcriptGoldWindows.length} gold window{transcriptGoldWindows.length === 1 ? '' : 's'}
+                                                                </span>
+                                                                <span className="rounded-full bg-slate-100 px-2.5 py-1 ring-1 ring-slate-200">
+                                                                    {transcriptEvaluationResults.length} evaluation result{transcriptEvaluationResults.length === 1 ? '' : 's'}
+                                                                </span>
+                                                                {transcriptEvaluationSummary && (
+                                                                    <>
+                                                                        <span className="rounded-full bg-slate-100 px-2.5 py-1 ring-1 ring-slate-200">
+                                                                            Avg WER {transcriptEvaluationSummary?.average_wer?.toFixed(3) ?? '0.000'}
+                                                                        </span>
+                                                                        <span className="rounded-full bg-slate-100 px-2.5 py-1 ring-1 ring-slate-200">
+                                                                            Avg CER {transcriptEvaluationSummary?.average_cer?.toFixed(3) ?? '0.000'}
+                                                                        </span>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        <div className="grid gap-2 sm:grid-cols-2">
+                                                            <button
+                                                                onClick={useCurrentSelectionForGoldWindow}
+                                                                disabled={!selection}
+                                                                className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                                                                title="Use the current transcript or clip selection as the benchmark window range"
+                                                            >
+                                                                <Scissors size={14} />
+                                                                Use Selection Range
+                                                            </button>
+                                                            <button
+                                                                onClick={runTranscriptEvaluation}
+                                                                disabled={evaluatingTranscript || transcriptGoldWindows.length === 0}
+                                                                className="inline-flex items-center justify-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+                                                            >
+                                                                {evaluatingTranscript ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                                                                Run Evaluation
+                                                            </button>
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(320px,0.95fr)_minmax(0,1.35fr)]">
+                                                        <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+                                                            <div className="text-sm font-semibold text-slate-800">Gold Windows</div>
+                                                            <div className="grid gap-2 sm:grid-cols-2">
+                                                                <div className="sm:col-span-2">
+                                                                    <label className="mb-1 block text-xs font-medium text-slate-600">Label</label>
+                                                                    <input
+                                                                        value={goldWindowLabelDraft}
+                                                                        onChange={(e) => setGoldWindowLabelDraft(e.target.value)}
+                                                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                        placeholder="Window label"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="mb-1 block text-xs font-medium text-slate-600">Start</label>
+                                                                    <input
+                                                                        value={goldWindowStartDraft}
+                                                                        onChange={(e) => setGoldWindowStartDraft(e.target.value)}
+                                                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                        placeholder="0.00"
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="mb-1 block text-xs font-medium text-slate-600">End</label>
+                                                                    <input
+                                                                        value={goldWindowEndDraft}
+                                                                        onChange={(e) => setGoldWindowEndDraft(e.target.value)}
+                                                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                        placeholder="15.00"
+                                                                    />
+                                                                </div>
+                                                                <div className="sm:col-span-2">
+                                                                    <label className="mb-1 block text-xs font-medium text-slate-600">Reference Transcript</label>
+                                                                    <textarea
+                                                                        value={goldWindowReferenceDraft}
+                                                                        onChange={(e) => setGoldWindowReferenceDraft(e.target.value)}
+                                                                        rows={5}
+                                                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                        placeholder="Paste the hand-corrected reference transcript for this window."
+                                                                    />
+                                                                </div>
+                                                                <div className="sm:col-span-2">
+                                                                    <label className="mb-1 block text-xs font-medium text-slate-600">Entities</label>
+                                                                    <input
+                                                                        value={goldWindowEntitiesDraft}
+                                                                        onChange={(e) => setGoldWindowEntitiesDraft(e.target.value)}
+                                                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                        placeholder="Comma-separated entities to track"
+                                                                    />
+                                                                </div>
+                                                                <div className="sm:col-span-2">
+                                                                    <label className="mb-1 block text-xs font-medium text-slate-600">Notes</label>
+                                                                    <textarea
+                                                                        value={goldWindowNotesDraft}
+                                                                        onChange={(e) => setGoldWindowNotesDraft(e.target.value)}
+                                                                        rows={2}
+                                                                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                        placeholder="Speaker boundaries, entity focus, overlap risk, punctuation notes..."
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                            <button
+                                                                onClick={createTranscriptGoldWindow}
+                                                                disabled={savingTranscriptGoldWindow}
+                                                                className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                                                            >
+                                                                {savingTranscriptGoldWindow ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                                                                Save Gold Window
+                                                            </button>
+                                                            {loadingTranscriptGoldWindows ? (
+                                                                <div className="inline-flex items-center gap-2 text-xs text-slate-500">
+                                                                    <Loader2 size={14} className="animate-spin" />
+                                                                    Loading benchmark windows...
+                                                                </div>
+                                                            ) : transcriptGoldWindowsError ? (
+                                                                <div className="text-xs text-rose-600">{transcriptGoldWindowsError}</div>
+                                                            ) : transcriptGoldWindows.length === 0 ? (
+                                                                <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-3 text-xs text-slate-500">
+                                                                    No gold windows yet. Create one from a selected range or enter a benchmark window manually.
+                                                                </div>
+                                                            ) : (
+                                                                <div className="space-y-2">
+                                                                    {transcriptGoldWindows.map((window) => (
+                                                                        <div key={window.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                                                                            <div className="flex items-start justify-between gap-2">
+                                                                                <div className="min-w-0">
+                                                                                    <div className="text-sm font-medium text-slate-800">{window.label}</div>
+                                                                                    <div className="mt-0.5 text-xs text-slate-500">
+                                                                                        {window.start_time.toFixed(2)}s to {window.end_time.toFixed(2)}s
+                                                                                        {window.language ? ` • ${window.language}` : ''}
+                                                                                    </div>
+                                                                                </div>
+                                                                                <button
+                                                                                    onClick={() => handleSeek(window.start_time)}
+                                                                                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+                                                                                >
+                                                                                    Jump
+                                                                                </button>
+                                                                            </div>
+                                                                            <div className="mt-2 line-clamp-3 text-xs leading-5 text-slate-600">
+                                                                                {window.reference_text}
+                                                                            </div>
+                                                                            {window.entities.length > 0 && (
+                                                                                <div className="mt-2 flex flex-wrap gap-1">
+                                                                                    {window.entities.map((entity) => (
+                                                                                        <span key={`${window.id}-${entity}`} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600 ring-1 ring-slate-200">
+                                                                                            {entity}
+                                                                                        </span>
+                                                                                    ))}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                        </div>
+
+                                                        <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+                                                            <div className="flex items-center justify-between gap-3">
+                                                                <div>
+                                                                    <div className="text-sm font-semibold text-slate-800">Evaluation Results</div>
+                                                                    <div className="text-xs text-slate-500">
+                                                                        WER and CER come from the stored reference windows. Reviewer verdicts capture the human judgment layer.
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                            {loadingTranscriptEvaluationResults ? (
+                                                                <div className="inline-flex items-center gap-2 text-xs text-slate-500">
+                                                                    <Loader2 size={14} className="animate-spin" />
+                                                                    Loading evaluation results...
+                                                                </div>
+                                                            ) : transcriptEvaluationError ? (
+                                                                <div className="text-xs text-rose-600">{transcriptEvaluationError}</div>
+                                                            ) : transcriptEvaluationResults.length === 0 ? (
+                                                                <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-3 text-xs text-slate-500">
+                                                                    No evaluation results yet. Run evaluation after defining at least one gold window.
+                                                                </div>
+                                                            ) : (
+                                                                <div className="space-y-3">
+                                                                    {transcriptEvaluationResults.map((result) => {
+                                                                        const reviews = evaluationReviewsByResultId[result.id] || [];
+                                                                        const verdict = evaluationReviewVerdictDrafts[result.id] || 'same';
+                                                                        const reviewNotes = evaluationReviewNotesDrafts[result.id] || '';
+                                                                        const reviewer = evaluationReviewReviewerDrafts[result.id] || '';
+                                                                        return (
+                                                                            <div key={result.id} className="rounded-lg border border-slate-200 bg-white p-3">
+                                                                                <div className="flex flex-wrap items-center gap-2">
+                                                                                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-700 ring-1 ring-slate-200">
+                                                                                        WER {result.wer.toFixed(3)}
+                                                                                    </span>
+                                                                                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 ring-1 ring-slate-200">
+                                                                                        CER {result.cer.toFixed(3)}
+                                                                                    </span>
+                                                                                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 ring-1 ring-slate-200">
+                                                                                        Unknown {result.unknown_speaker_rate.toFixed(2)}
+                                                                                    </span>
+                                                                                    {result.entity_accuracy != null && (
+                                                                                        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 ring-1 ring-slate-200">
+                                                                                            Entity {result.entity_accuracy.toFixed(2)}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </div>
+                                                                                <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                                                                                    <div>
+                                                                                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Reference</div>
+                                                                                        <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-700 ring-1 ring-slate-200">
+                                                                                            {result.reference_text}
+                                                                                        </div>
+                                                                                    </div>
+                                                                                    <div>
+                                                                                        <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Candidate</div>
+                                                                                        <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-700 ring-1 ring-slate-200">
+                                                                                            {result.candidate_text}
+                                                                                        </div>
+                                                                                    </div>
+                                                                                </div>
+                                                                                <div className="mt-3 grid gap-2 lg:grid-cols-[140px_140px_minmax(0,1fr)_auto]">
+                                                                                    <input
+                                                                                        value={reviewer}
+                                                                                        onChange={(e) => setEvaluationReviewReviewerDrafts((current) => ({ ...current, [result.id]: e.target.value }))}
+                                                                                        className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                                        placeholder="Reviewer"
+                                                                                    />
+                                                                                    <select
+                                                                                        value={verdict}
+                                                                                        onChange={(e) => setEvaluationReviewVerdictDrafts((current) => ({ ...current, [result.id]: e.target.value }))}
+                                                                                        className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                                    >
+                                                                                        <option value="better">Better</option>
+                                                                                        <option value="same">Same</option>
+                                                                                        <option value="worse">Worse</option>
+                                                                                        <option value="bad_merge">Bad merge</option>
+                                                                                        <option value="bad_speaker_reassignment">Bad speaker reassignment</option>
+                                                                                        <option value="bad_entity_repair">Bad entity repair</option>
+                                                                                        <option value="language_regression">Language regression</option>
+                                                                                    </select>
+                                                                                    <input
+                                                                                        value={reviewNotes}
+                                                                                        onChange={(e) => setEvaluationReviewNotesDrafts((current) => ({ ...current, [result.id]: e.target.value }))}
+                                                                                        className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
+                                                                                        placeholder="Review notes"
+                                                                                    />
+                                                                                    <button
+                                                                                        onClick={() => submitTranscriptEvaluationReview(result.id)}
+                                                                                        disabled={reviewingEvaluationResultId === result.id}
+                                                                                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                                                                                    >
+                                                                                        {reviewingEvaluationResultId === result.id ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                                                                                        Save Review
+                                                                                    </button>
+                                                                                </div>
+                                                                                {reviews.length > 0 && (
+                                                                                    <div className="mt-3 space-y-2">
+                                                                                        {reviews.slice(0, 3).map((review) => (
+                                                                                            <div key={review.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600 ring-1 ring-slate-200">
+                                                                                                <span className="font-semibold text-slate-700">{review.verdict.replaceAll('_', ' ')}</span>
+                                                                                                {review.reviewer ? ` by ${review.reviewer}` : ''}
+                                                                                                {review.notes ? ` • ${review.notes}` : ''}
+                                                                                            </div>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                    <div
+                                        ref={transcriptRef}
+                                        className="flex-1 overflow-y-auto p-4 space-y-2 select-text pb-40"
+                                        onMouseUp={handleMouseUp}
+                                    >
+                                        {segments.length === 0 ? (
+                                            <div className="flex flex-col items-center justify-center mt-16 px-6">
+                                                <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-4">
+                                                    <FileText size={28} className="text-slate-300" />
+                                                </div>
+                                                <h3 className="text-sm font-semibold text-slate-600 mb-1">No transcript available</h3>
+                                                {video?.access_restricted ? (
+                                                    <div className="w-full max-w-md rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-left text-sm text-slate-700">
+                                                        <div className="font-semibold text-slate-800">{accessRestrictionLabel}</div>
+                                                        <div className="mt-1 text-xs leading-relaxed text-slate-500">
+                                                            {accessRestrictionReason || 'This episode is not accessible with the current YouTube session, so it will be skipped instead of being downloaded or processed.'}
+                                                        </div>
+                                                    </div>
+                                                ) : video && !video.processed && video.status !== 'queued' && video.status !== 'running' && video.status !== 'downloading' && video.status !== 'transcribing' && video.status !== 'diarizing' ? (
+                                                    <>
+                                                        <p className="text-xs text-slate-400 mb-5 text-center">Start a transcription job to generate the transcript for this episode.</p>
+                                                        <button
+                                                            onClick={async () => {
+                                                                setStartingTranscription(true);
+                                                                try {
+                                                                    await api.post(`/videos/${video.id}/process`);
+                                                                    setVideo({ ...video, status: 'queued' });
+                                                                } catch (e: any) {
+                                                                    console.error('Failed to start transcription:', e);
+                                                                    alert(e?.response?.data?.detail || 'Failed to start transcription');
+                                                                } finally {
+                                                                    setStartingTranscription(false);
+                                                                }
+                                                            }}
+                                                            disabled={startingTranscription}
+                                                            className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-xl hover:shadow-lg hover:shadow-blue-500/25 transition-all font-medium text-sm disabled:opacity-50"
+                                                        >
+                                                            {startingTranscription ? <Loader2 size={16} className="animate-spin" /> : <Mic size={16} />}
+                                                            {startingTranscription ? 'Starting...' : 'Start Transcription'}
+                                                        </button>
+                                                    </>
+                                                ) : video && (video.status === 'queued' || video.status === 'running' || video.status === 'downloading' || video.status === 'transcribing' || video.status === 'diarizing') ? (
+                                                    <div className="flex items-center gap-2 mt-2 text-xs text-blue-500">
+                                                        <Loader2 size={14} className="animate-spin" />
+                                                        <span>{video.status === 'queued' ? 'Transcription queued' : video.status === 'diarizing' ? 'Diarization in progress' : 'Transcription in progress'}...</span>
+                                                    </div>
+                                                ) : (
+                                                    <p className="text-xs text-slate-400">This episode has not been transcribed yet.</p>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            filteredSegments.map((seg, filteredIdx) => {
+                                                // Highlight logic
+                                                const isActiveSegment =
+                                                    transcriptPlaybackTime >= seg.start_time &&
+                                                    transcriptPlaybackTime < seg.end_time + TRANSCRIPT_SEGMENT_TRAIL_SECONDS;
+                                                const isActiveMatch = searchLower && filteredIdx === searchMatchIndex;
+                                                const isDeepLinkedSegment = !searchLower && deepLinkedSegmentId === seg.id;
+                                                const wordsFn = typeof seg.id === 'number'
+                                                    ? (normalizedWordsBySegmentId.get(seg.id) || [])
+                                                    : parseSegmentWords(seg);
+
+                                                return (
+                                                    <div
+                                                        key={seg.id}
+                                                        id={`seg-${seg.id}`}
+                                                        data-start={seg.start_time}
+                                                        data-end={seg.end_time}
+                                                        className={`p-3 rounded-lg text-sm transition-colors cursor-pointer border relative group ${isActiveMatch
+                                                            ? 'bg-yellow-50 border-yellow-300 ring-1 ring-yellow-200 shadow-sm'
+                                                            : isDeepLinkedSegment
+                                                                ? 'bg-amber-50 border-amber-300 ring-1 ring-amber-200 shadow-sm'
+                                                                : isActiveSegment
+                                                                    ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100'
+                                                                    : 'bg-white border-transparent hover:border-slate-200 hover:bg-white'}`}
+                                                        onClick={() => {
+                                                            // Seek to segment start on click (word spans use stopPropagation so they won't trigger this)
+                                                            if (window.getSelection()?.toString().length === 0) {
+                                                                handleSeek(seg.start_time);
+                                                            }
+                                                        }}
+                                                    >
+                                                        <div className="flex justify-between items-center mb-1 text-xs text-slate-400 select-none">
+                                                            <div className="flex items-center gap-2 min-w-0">
+                                                                <span
+                                                                    className="font-medium text-slate-500 hover:text-blue-600 hover:underline cursor-pointer truncate"
+                                                                    onClick={(e) => {
+                                                                        if (seg.speaker_id) {
+                                                                            e.stopPropagation();
+                                                                            handleSpeakerClick(seg.speaker_id, seg);
+                                                                        } else {
+                                                                            handleUnknownSpeakerClick(seg.id, e);
+                                                                        }
+                                                                    }}
+                                                                >
+                                                                    {seg.speaker || "Unknown"}
+                                                                </span>
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        beginSegmentEdit(seg);
+                                                                    }}
+                                                                    className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 p-1 rounded text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition"
+                                                                    title="Edit transcript text"
+                                                                >
+                                                                    <Pencil size={12} />
+                                                                </button>
+                                                            </div>
+                                                            <span className="font-mono shrink-0">{new Date(seg.start_time * 1000).toISOString().substr(14, 5)}</span>
+                                                        </div>
+                                                        {editingSegmentId === seg.id ? (
+                                                            <div className="space-y-2">
+                                                                <div
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                    className="rounded-lg border border-blue-200 bg-white p-2.5 space-y-2"
+                                                                >
+                                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                                        {editingSegmentWords.map((word, idx) => (
+                                                                            <div key={`${seg.id}-${idx}`} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-1">
+                                                                                <input
+                                                                                    value={word}
+                                                                                    onChange={(e) => updateEditingWord(idx, e.target.value)}
+                                                                                    className="min-w-[2.5ch] max-w-[22ch] bg-transparent text-sm text-slate-700 focus:outline-none"
+                                                                                    style={{ width: `${Math.max(2.5, Math.min(22, (word || '').length + 1.5))}ch` }}
+                                                                                />
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => removeEditingWord(idx)}
+                                                                                    className="text-slate-400 hover:text-red-600"
+                                                                                    title="Remove word"
+                                                                                >
+                                                                                    <X size={11} />
+                                                                                </button>
+                                                                            </div>
+                                                                        ))}
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={addEditingWord}
+                                                                            className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700 hover:bg-blue-100"
+                                                                            title="Add word"
+                                                                        >
+                                                                            <Plus size={11} />
+                                                                            Add
+                                                                        </button>
+                                                                    </div>
+                                                                    <div className="text-[11px] text-slate-500">
+                                                                        Per-word timing is preserved when possible.
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-center justify-end gap-2">
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            if (!editingLoopSegment) {
+                                                                                setEditingLoopSegment(true);
+                                                                            } else {
+                                                                                setEditingLoopSegment(false);
+                                                                                pauseMainPreview();
+                                                                            }
+                                                                        }}
+                                                                        className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border ${editingLoopSegment
+                                                                            ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+                                                                            : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                                                                            }`}
+                                                                        title="Loop this segment while editing"
+                                                                    >
+                                                                        {editingLoopSegment ? <Pause size={12} /> : <Play size={12} />}
+                                                                        {editingLoopSegment ? 'Stop Loop' : 'Loop Segment'}
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            setEditingLoopSegment(false);
+                                                                            pauseMainPreview();
+                                                                            setEditingSegmentId(null);
+                                                                            setEditingSegmentWords([]);
+                                                                        }}
+                                                                        className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-slate-100 text-slate-600 hover:bg-slate-200"
+                                                                    >
+                                                                        <XCircle size={12} /> Cancel
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={(e) => { e.stopPropagation(); void saveSegmentEdit(seg.id); }}
+                                                                        disabled={savingSegmentEdit}
+                                                                        className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                                                                    >
+                                                                        {savingSegmentEdit ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+                                                                        Save
                                                                     </button>
                                                                 </div>
                                                             </div>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-                                    {false && segments.length > 0 && (
-                                        <div className="mt-3 rounded-xl border border-slate-200 bg-white/95 px-3 py-3">
-                                            <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-                                                <div className="min-w-0">
-                                                    <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">Transcript Benchmark</div>
-                                                    <div className="mt-1 text-sm text-slate-600">
-                                                        Define hand-corrected gold windows for this episode, run deterministic scoring, then attach reviewer verdicts.
-                                                    </div>
-                                                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                                                        <span className="rounded-full bg-slate-100 px-2.5 py-1 ring-1 ring-slate-200">
-                                                            {transcriptGoldWindows.length} gold window{transcriptGoldWindows.length === 1 ? '' : 's'}
-                                                        </span>
-                                                        <span className="rounded-full bg-slate-100 px-2.5 py-1 ring-1 ring-slate-200">
-                                                            {transcriptEvaluationResults.length} evaluation result{transcriptEvaluationResults.length === 1 ? '' : 's'}
-                                                        </span>
-                                                        {transcriptEvaluationSummary && (
-                                                            <>
-                                                                <span className="rounded-full bg-slate-100 px-2.5 py-1 ring-1 ring-slate-200">
-                                                                    Avg WER {transcriptEvaluationSummary?.average_wer?.toFixed(3) ?? '0.000'}
-                                                                </span>
-                                                                <span className="rounded-full bg-slate-100 px-2.5 py-1 ring-1 ring-slate-200">
-                                                                    Avg CER {transcriptEvaluationSummary?.average_cer?.toFixed(3) ?? '0.000'}
-                                                                </span>
-                                                            </>
+                                                        ) : (
+                                                            <p className="text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
+                                                                {wordsFn.length > 0 ? (
+                                                                    wordsFn.map((w: any, idx: number) => {
+                                                                        const isWordActive =
+                                                                            transcriptPlaybackTime >= w.start &&
+                                                                            transcriptPlaybackTime < (w.displayEnd ?? w.end);
+                                                                        return (
+                                                                            <span
+                                                                                key={idx}
+                                                                                className={`inline align-baseline transition-colors duration-100 ${isWordActive ? 'bg-blue-200/80 text-blue-900 rounded-sm' : ''}`}
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    handleSeek(w.start);
+                                                                                }}
+                                                                            >
+                                                                                {searchLower ? highlightText(w.word) : w.word}
+                                                                                {idx < wordsFn.length - 1 ? ' ' : ''}
+                                                                            </span>
+                                                                        );
+                                                                    })
+                                                                ) : (
+                                                                    searchLower ? highlightText(seg.text) : seg.text
+                                                                )}
+                                                            </p>
                                                         )}
                                                     </div>
-                                                </div>
-                                                <div className="grid gap-2 sm:grid-cols-2">
-                                                    <button
-                                                        onClick={useCurrentSelectionForGoldWindow}
-                                                        disabled={!selection}
-                                                        className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                                                        title="Use the current transcript or clip selection as the benchmark window range"
-                                                    >
-                                                        <Scissors size={14} />
-                                                        Use Selection Range
-                                                    </button>
-                                                    <button
-                                                        onClick={runTranscriptEvaluation}
-                                                        disabled={evaluatingTranscript || transcriptGoldWindows.length === 0}
-                                                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-violet-600 px-3 py-2 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-50"
-                                                    >
-                                                        {evaluatingTranscript ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                                                        Run Evaluation
-                                                    </button>
-                                                </div>
-                                            </div>
-
-                                            <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(320px,0.95fr)_minmax(0,1.35fr)]">
-                                                <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3">
-                                                    <div className="text-sm font-semibold text-slate-800">Gold Windows</div>
-                                                    <div className="grid gap-2 sm:grid-cols-2">
-                                                        <div className="sm:col-span-2">
-                                                            <label className="mb-1 block text-xs font-medium text-slate-600">Label</label>
-                                                            <input
-                                                                value={goldWindowLabelDraft}
-                                                                onChange={(e) => setGoldWindowLabelDraft(e.target.value)}
-                                                                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                placeholder="Window label"
-                                                            />
-                                                        </div>
-                                                        <div>
-                                                            <label className="mb-1 block text-xs font-medium text-slate-600">Start</label>
-                                                            <input
-                                                                value={goldWindowStartDraft}
-                                                                onChange={(e) => setGoldWindowStartDraft(e.target.value)}
-                                                                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                placeholder="0.00"
-                                                            />
-                                                        </div>
-                                                        <div>
-                                                            <label className="mb-1 block text-xs font-medium text-slate-600">End</label>
-                                                            <input
-                                                                value={goldWindowEndDraft}
-                                                                onChange={(e) => setGoldWindowEndDraft(e.target.value)}
-                                                                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                placeholder="15.00"
-                                                            />
-                                                        </div>
-                                                        <div className="sm:col-span-2">
-                                                            <label className="mb-1 block text-xs font-medium text-slate-600">Reference Transcript</label>
-                                                            <textarea
-                                                                value={goldWindowReferenceDraft}
-                                                                onChange={(e) => setGoldWindowReferenceDraft(e.target.value)}
-                                                                rows={5}
-                                                                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                placeholder="Paste the hand-corrected reference transcript for this window."
-                                                            />
-                                                        </div>
-                                                        <div className="sm:col-span-2">
-                                                            <label className="mb-1 block text-xs font-medium text-slate-600">Entities</label>
-                                                            <input
-                                                                value={goldWindowEntitiesDraft}
-                                                                onChange={(e) => setGoldWindowEntitiesDraft(e.target.value)}
-                                                                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                placeholder="Comma-separated entities to track"
-                                                            />
-                                                        </div>
-                                                        <div className="sm:col-span-2">
-                                                            <label className="mb-1 block text-xs font-medium text-slate-600">Notes</label>
-                                                            <textarea
-                                                                value={goldWindowNotesDraft}
-                                                                onChange={(e) => setGoldWindowNotesDraft(e.target.value)}
-                                                                rows={2}
-                                                                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                placeholder="Speaker boundaries, entity focus, overlap risk, punctuation notes..."
-                                                            />
-                                                        </div>
-                                                    </div>
-                                                    <button
-                                                        onClick={createTranscriptGoldWindow}
-                                                        disabled={savingTranscriptGoldWindow}
-                                                        className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                                                    >
-                                                        {savingTranscriptGoldWindow ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-                                                        Save Gold Window
-                                                    </button>
-                                                    {loadingTranscriptGoldWindows ? (
-                                                        <div className="inline-flex items-center gap-2 text-xs text-slate-500">
-                                                            <Loader2 size={14} className="animate-spin" />
-                                                            Loading benchmark windows...
-                                                        </div>
-                                                    ) : transcriptGoldWindowsError ? (
-                                                        <div className="text-xs text-rose-600">{transcriptGoldWindowsError}</div>
-                                                    ) : transcriptGoldWindows.length === 0 ? (
-                                                        <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-3 text-xs text-slate-500">
-                                                            No gold windows yet. Create one from a selected range or enter a benchmark window manually.
-                                                        </div>
-                                                    ) : (
-                                                        <div className="space-y-2">
-                                                            {transcriptGoldWindows.map((window) => (
-                                                                <div key={window.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-                                                                    <div className="flex items-start justify-between gap-2">
-                                                                        <div className="min-w-0">
-                                                                            <div className="text-sm font-medium text-slate-800">{window.label}</div>
-                                                                            <div className="mt-0.5 text-xs text-slate-500">
-                                                                                {window.start_time.toFixed(2)}s to {window.end_time.toFixed(2)}s
-                                                                                {window.language ? ` • ${window.language}` : ''}
-                                                                            </div>
-                                                                        </div>
-                                                                        <button
-                                                                            onClick={() => handleSeek(window.start_time)}
-                                                                            className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
-                                                                        >
-                                                                            Jump
-                                                                        </button>
-                                                                    </div>
-                                                                    <div className="mt-2 line-clamp-3 text-xs leading-5 text-slate-600">
-                                                                        {window.reference_text}
-                                                                    </div>
-                                                                    {window.entities.length > 0 && (
-                                                                        <div className="mt-2 flex flex-wrap gap-1">
-                                                                            {window.entities.map((entity) => (
-                                                                                <span key={`${window.id}-${entity}`} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600 ring-1 ring-slate-200">
-                                                                                    {entity}
-                                                                                </span>
-                                                                            ))}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-                                                </div>
-
-                                                <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/80 p-3">
-                                                    <div className="flex items-center justify-between gap-3">
-                                                        <div>
-                                                            <div className="text-sm font-semibold text-slate-800">Evaluation Results</div>
-                                                            <div className="text-xs text-slate-500">
-                                                                WER and CER come from the stored reference windows. Reviewer verdicts capture the human judgment layer.
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    {loadingTranscriptEvaluationResults ? (
-                                                        <div className="inline-flex items-center gap-2 text-xs text-slate-500">
-                                                            <Loader2 size={14} className="animate-spin" />
-                                                            Loading evaluation results...
-                                                        </div>
-                                                    ) : transcriptEvaluationError ? (
-                                                        <div className="text-xs text-rose-600">{transcriptEvaluationError}</div>
-                                                    ) : transcriptEvaluationResults.length === 0 ? (
-                                                        <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-3 text-xs text-slate-500">
-                                                            No evaluation results yet. Run evaluation after defining at least one gold window.
-                                                        </div>
-                                                    ) : (
-                                                        <div className="space-y-3">
-                                                            {transcriptEvaluationResults.map((result) => {
-                                                                const reviews = evaluationReviewsByResultId[result.id] || [];
-                                                                const verdict = evaluationReviewVerdictDrafts[result.id] || 'same';
-                                                                const reviewNotes = evaluationReviewNotesDrafts[result.id] || '';
-                                                                const reviewer = evaluationReviewReviewerDrafts[result.id] || '';
-                                                                return (
-                                                                    <div key={result.id} className="rounded-lg border border-slate-200 bg-white p-3">
-                                                                        <div className="flex flex-wrap items-center gap-2">
-                                                                            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-700 ring-1 ring-slate-200">
-                                                                                WER {result.wer.toFixed(3)}
-                                                                            </span>
-                                                                            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 ring-1 ring-slate-200">
-                                                                                CER {result.cer.toFixed(3)}
-                                                                            </span>
-                                                                            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 ring-1 ring-slate-200">
-                                                                                Unknown {result.unknown_speaker_rate.toFixed(2)}
-                                                                            </span>
-                                                                            {result.entity_accuracy != null && (
-                                                                                <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] text-slate-600 ring-1 ring-slate-200">
-                                                                                    Entity {result.entity_accuracy.toFixed(2)}
-                                                                                </span>
-                                                                            )}
-                                                                        </div>
-                                                                        <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                                                                            <div>
-                                                                                <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Reference</div>
-                                                                                <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-700 ring-1 ring-slate-200">
-                                                                                    {result.reference_text}
-                                                                                </div>
-                                                                            </div>
-                                                                            <div>
-                                                                                <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Candidate</div>
-                                                                                <div className="rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-700 ring-1 ring-slate-200">
-                                                                                    {result.candidate_text}
-                                                                                </div>
-                                                                            </div>
-                                                                        </div>
-                                                                        <div className="mt-3 grid gap-2 lg:grid-cols-[140px_140px_minmax(0,1fr)_auto]">
-                                                                            <input
-                                                                                value={reviewer}
-                                                                                onChange={(e) => setEvaluationReviewReviewerDrafts((current) => ({ ...current, [result.id]: e.target.value }))}
-                                                                                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                                placeholder="Reviewer"
-                                                                            />
-                                                                            <select
-                                                                                value={verdict}
-                                                                                onChange={(e) => setEvaluationReviewVerdictDrafts((current) => ({ ...current, [result.id]: e.target.value }))}
-                                                                                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                            >
-                                                                                <option value="better">Better</option>
-                                                                                <option value="same">Same</option>
-                                                                                <option value="worse">Worse</option>
-                                                                                <option value="bad_merge">Bad merge</option>
-                                                                                <option value="bad_speaker_reassignment">Bad speaker reassignment</option>
-                                                                                <option value="bad_entity_repair">Bad entity repair</option>
-                                                                                <option value="language_regression">Language regression</option>
-                                                                            </select>
-                                                                            <input
-                                                                                value={reviewNotes}
-                                                                                onChange={(e) => setEvaluationReviewNotesDrafts((current) => ({ ...current, [result.id]: e.target.value }))}
-                                                                                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                                                                                placeholder="Review notes"
-                                                                            />
-                                                                            <button
-                                                                                onClick={() => submitTranscriptEvaluationReview(result.id)}
-                                                                                disabled={reviewingEvaluationResultId === result.id}
-                                                                                className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-                                                                            >
-                                                                                {reviewingEvaluationResultId === result.id ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                                                                                Save Review
-                                                                            </button>
-                                                                        </div>
-                                                                        {reviews.length > 0 && (
-                                                                            <div className="mt-3 space-y-2">
-                                                                                {reviews.slice(0, 3).map((review) => (
-                                                                                    <div key={review.id} className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-600 ring-1 ring-slate-200">
-                                                                                        <span className="font-semibold text-slate-700">{review.verdict.replaceAll('_', ' ')}</span>
-                                                                                        {review.reviewer ? ` by ${review.reviewer}` : ''}
-                                                                                        {review.notes ? ` • ${review.notes}` : ''}
-                                                                                    </div>
-                                                                                ))}
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                );
-                                                            })}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
-                            <div
-                                ref={transcriptRef}
-                                className="flex-1 overflow-y-auto p-4 space-y-2 select-text pb-40"
-                                onMouseUp={handleMouseUp}
-                            >
-                                {segments.length === 0 ? (
-                                    <div className="flex flex-col items-center justify-center mt-16 px-6">
-                                        <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-4">
-                                            <FileText size={28} className="text-slate-300" />
-                                        </div>
-                                        <h3 className="text-sm font-semibold text-slate-600 mb-1">No transcript available</h3>
-                                        {video?.access_restricted ? (
-                                            <div className="w-full max-w-md rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-left text-sm text-slate-700">
-                                                <div className="font-semibold text-slate-800">{accessRestrictionLabel}</div>
-                                                <div className="mt-1 text-xs leading-relaxed text-slate-500">
-                                                    {accessRestrictionReason || 'This episode is not accessible with the current YouTube session, so it will be skipped instead of being downloaded or processed.'}
-                                                </div>
-                                            </div>
-                                        ) : video && !video.processed && video.status !== 'queued' && video.status !== 'running' && video.status !== 'downloading' && video.status !== 'transcribing' && video.status !== 'diarizing' ? (
-                                            <>
-                                                <p className="text-xs text-slate-400 mb-5 text-center">Start a transcription job to generate the transcript for this episode.</p>
-                                                <button
-                                                    onClick={async () => {
-                                                        setStartingTranscription(true);
-                                                        try {
-                                                            await api.post(`/videos/${video.id}/process`);
-                                                            setVideo({ ...video, status: 'queued' });
-                                                        } catch (e: any) {
-                                                            console.error('Failed to start transcription:', e);
-                                                            alert(e?.response?.data?.detail || 'Failed to start transcription');
-                                                        } finally {
-                                                            setStartingTranscription(false);
-                                                        }
-                                                    }}
-                                                    disabled={startingTranscription}
-                                                    className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-500 to-indigo-500 text-white rounded-xl hover:shadow-lg hover:shadow-blue-500/25 transition-all font-medium text-sm disabled:opacity-50"
-                                                >
-                                                    {startingTranscription ? <Loader2 size={16} className="animate-spin" /> : <Mic size={16} />}
-                                                    {startingTranscription ? 'Starting...' : 'Start Transcription'}
-                                                </button>
-                                            </>
-                                        ) : video && (video.status === 'queued' || video.status === 'running' || video.status === 'downloading' || video.status === 'transcribing' || video.status === 'diarizing') ? (
-                                            <div className="flex items-center gap-2 mt-2 text-xs text-blue-500">
-                                                <Loader2 size={14} className="animate-spin" />
-                                                <span>{video.status === 'queued' ? 'Transcription queued' : video.status === 'diarizing' ? 'Diarization in progress' : 'Transcription in progress'}...</span>
-                                            </div>
-                                        ) : (
-                                            <p className="text-xs text-slate-400">This episode has not been transcribed yet.</p>
+                                                );
+                                            })
                                         )}
                                     </div>
-                                ) : (
-                                    filteredSegments.map((seg, filteredIdx) => {
-                                        // Highlight logic
-                                        const isActiveSegment =
-                                            transcriptPlaybackTime >= seg.start_time &&
-                                            transcriptPlaybackTime < seg.end_time + TRANSCRIPT_SEGMENT_TRAIL_SECONDS;
-                                        const isActiveMatch = searchLower && filteredIdx === searchMatchIndex;
-                                        const isDeepLinkedSegment = !searchLower && deepLinkedSegmentId === seg.id;
-                                        const wordsFn = typeof seg.id === 'number'
-                                            ? (normalizedWordsBySegmentId.get(seg.id) || [])
-                                            : parseSegmentWords(seg);
-
-                                        return (
-                                            <div
-                                                key={seg.id}
-                                                id={`seg-${seg.id}`}
-                                                data-start={seg.start_time}
-                                                data-end={seg.end_time}
-                                                className={`p-3 rounded-lg text-sm transition-colors cursor-pointer border relative group ${isActiveMatch
-                                                    ? 'bg-yellow-50 border-yellow-300 ring-1 ring-yellow-200 shadow-sm'
-                                                    : isDeepLinkedSegment
-                                                        ? 'bg-amber-50 border-amber-300 ring-1 ring-amber-200 shadow-sm'
-                                                        : isActiveSegment
-                                                            ? 'bg-blue-50 border-blue-200 shadow-sm ring-1 ring-blue-100'
-                                                            : 'bg-white border-transparent hover:border-slate-200 hover:bg-white'}`}
-                                                onClick={() => {
-                                                    // Seek to segment start on click (word spans use stopPropagation so they won't trigger this)
-                                                    if (window.getSelection()?.toString().length === 0) {
-                                                        handleSeek(seg.start_time);
-                                                    }
-                                                }}
-                                            >
-                                                <div className="flex justify-between items-center mb-1 text-xs text-slate-400 select-none">
-                                                    <div className="flex items-center gap-2 min-w-0">
-                                                        <span
-                                                            className="font-medium text-slate-500 hover:text-blue-600 hover:underline cursor-pointer truncate"
-                                                            onClick={(e) => {
-                                                                if (seg.speaker_id) {
-                                                                    e.stopPropagation();
-                                                                    handleSpeakerClick(seg.speaker_id, seg);
-                                                                } else {
-                                                                    handleUnknownSpeakerClick(seg.id, e);
-                                                                }
-                                                            }}
-                                                        >
-                                                            {seg.speaker || "Unknown"}
-                                                        </span>
-                                                        <button
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                beginSegmentEdit(seg);
-                                                            }}
-                                                            className="opacity-100 lg:opacity-0 lg:group-hover:opacity-100 p-1 rounded text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition"
-                                                            title="Edit transcript text"
-                                                        >
-                                                            <Pencil size={12} />
-                                                        </button>
-                                                    </div>
-                                                    <span className="font-mono shrink-0">{new Date(seg.start_time * 1000).toISOString().substr(14, 5)}</span>
-                                                </div>
-                                                {editingSegmentId === seg.id ? (
-                                                    <div className="space-y-2">
-                                                        <div
-                                                            onClick={(e) => e.stopPropagation()}
-                                                            className="rounded-lg border border-blue-200 bg-white p-2.5 space-y-2"
-                                                        >
-                                                            <div className="flex flex-wrap items-center gap-1.5">
-                                                                {editingSegmentWords.map((word, idx) => (
-                                                                    <div key={`${seg.id}-${idx}`} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-1">
-                                                                        <input
-                                                                            value={word}
-                                                                            onChange={(e) => updateEditingWord(idx, e.target.value)}
-                                                                            className="min-w-[2.5ch] max-w-[22ch] bg-transparent text-sm text-slate-700 focus:outline-none"
-                                                                            style={{ width: `${Math.max(2.5, Math.min(22, (word || '').length + 1.5))}ch` }}
-                                                                        />
-                                                                        <button
-                                                                            type="button"
-                                                                            onClick={() => removeEditingWord(idx)}
-                                                                            className="text-slate-400 hover:text-red-600"
-                                                                            title="Remove word"
-                                                                        >
-                                                                            <X size={11} />
-                                                                        </button>
-                                                                    </div>
-                                                                ))}
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={addEditingWord}
-                                                                    className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2 py-1 text-xs text-blue-700 hover:bg-blue-100"
-                                                                    title="Add word"
-                                                                >
-                                                                    <Plus size={11} />
-                                                                    Add
-                                                                </button>
-                                                            </div>
-                                                            <div className="text-[11px] text-slate-500">
-                                                                Per-word timing is preserved when possible.
-                                                            </div>
-                                                        </div>
-                                                        <div className="flex items-center justify-end gap-2">
-                                                            <button
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    if (!editingLoopSegment) {
-                                                                        setEditingLoopSegment(true);
-                                                                    } else {
-                                                                        setEditingLoopSegment(false);
-                                                                        pauseMainPreview();
-                                                                    }
-                                                                }}
-                                                                className={`inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md border ${editingLoopSegment
-                                                                    ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
-                                                                    : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
-                                                                    }`}
-                                                                title="Loop this segment while editing"
-                                                            >
-                                                                {editingLoopSegment ? <Pause size={12} /> : <Play size={12} />}
-                                                                {editingLoopSegment ? 'Stop Loop' : 'Loop Segment'}
-                                                            </button>
-                                                            <button
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    setEditingLoopSegment(false);
-                                                                    pauseMainPreview();
-                                                                    setEditingSegmentId(null);
-                                                                    setEditingSegmentWords([]);
-                                                                }}
-                                                                className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-slate-100 text-slate-600 hover:bg-slate-200"
-                                                            >
-                                                                <XCircle size={12} /> Cancel
-                                                            </button>
-                                                            <button
-                                                                onClick={(e) => { e.stopPropagation(); void saveSegmentEdit(seg.id); }}
-                                                                disabled={savingSegmentEdit}
-                                                                className="inline-flex items-center gap-1 px-2 py-1 text-xs rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-                                                            >
-                                                                {savingSegmentEdit ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                                                                Save
-                                                            </button>
-                                                        </div>
-                                                    </div>
-                                                ) : (
-                                                    <p className="text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
-                                                        {wordsFn.length > 0 ? (
-                                                            wordsFn.map((w: any, idx: number) => {
-                                                                const isWordActive =
-                                                                    transcriptPlaybackTime >= w.start &&
-                                                                    transcriptPlaybackTime < (w.displayEnd ?? w.end);
-                                                                return (
-                                                                    <span
-                                                                        key={idx}
-                                                                        className={`inline align-baseline transition-colors duration-100 ${isWordActive ? 'bg-blue-200/80 text-blue-900 rounded-sm' : ''}`}
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            handleSeek(w.start);
-                                                                        }}
-                                                                    >
-                                                                        {searchLower ? highlightText(w.word) : w.word}
-                                                                        {idx < wordsFn.length - 1 ? ' ' : ''}
-                                                                    </span>
-                                                                );
-                                                            })
-                                                        ) : (
-                                                            searchLower ? highlightText(seg.text) : seg.text
-                                                        )}
-                                                    </p>
-                                                )}
-                                            </div>
-                                        );
-                                    })
-                                )}
-                            </div>
                                 </div>
                             )}
                             renderFunnyMomentsOverlay={() => null}

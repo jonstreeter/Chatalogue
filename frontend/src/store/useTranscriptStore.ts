@@ -3,6 +3,7 @@ import { devtools } from 'zustand/middleware';
 import api from '../lib/api';
 import type {
     FunnyMoment,
+    TranscriptSegment,
     TranscriptQuality,
     TranscriptRollbackOption,
     TranscriptGoldWindow,
@@ -87,7 +88,7 @@ export interface TranscriptState {
     setExplainingFunnyMoments: (value: boolean) => void;
     setShowGlobalHumorContext: (value: SetStateValue<boolean>) => void;
     setExpandedFunnySummaryIds: (value: SetStateValue<Set<number>>) => void;
-    setFunnyTaskProgress: (value: TranscriptState['funnyTaskProgress']) => void;
+    setFunnyTaskProgress: (value: SetStateValue<TranscriptState['funnyTaskProgress']>) => void;
     setEditingSegmentId: (value: number | null) => void;
     setEditingSegmentWords: (value: SetStateValue<string[]>) => void;
     setEditingLoopSegment: (value: boolean) => void;
@@ -131,6 +132,13 @@ export interface TranscriptState {
     fetchTranscriptGoldWindows: (videoId: number, signal?: AbortSignal) => Promise<void>;
     fetchTranscriptEvaluationResults: (videoId: number, signal?: AbortSignal) => Promise<void>;
     fetchEvaluationReviews: (resultId: number) => Promise<void>;
+    saveSegmentEdit: (
+        segmentId: number,
+        onSegmentUpdated: (segment: TranscriptSegment) => void,
+        onPausePreview: () => void,
+    ) => Promise<void>;
+    detectFunnyMoments: (videoId: number, force?: boolean) => Promise<void>;
+    explainFunnyMoments: (videoId: number, force?: boolean, onVideoMetaChanged?: () => Promise<void>) => Promise<void>;
     resetTranscriptState: () => void;
 }
 
@@ -200,7 +208,7 @@ export const useTranscriptStore = create<TranscriptState>()(
             setExplainingFunnyMoments: (value) => set({ explainingFunnyMoments: value }, false, 'setExplainingFunnyMoments'),
             setShowGlobalHumorContext: (value) => set({ showGlobalHumorContext: resolveValue(value, get().showGlobalHumorContext) }, false, 'setShowGlobalHumorContext'),
             setExpandedFunnySummaryIds: (value) => set({ expandedFunnySummaryIds: resolveValue(value, get().expandedFunnySummaryIds) }, false, 'setExpandedFunnySummaryIds'),
-            setFunnyTaskProgress: (value) => set({ funnyTaskProgress: value }, false, 'setFunnyTaskProgress'),
+            setFunnyTaskProgress: (value) => set({ funnyTaskProgress: resolveValue(value, get().funnyTaskProgress) }, false, 'setFunnyTaskProgress'),
             setEditingSegmentId: (value) => set({ editingSegmentId: value }, false, 'setEditingSegmentId'),
             setEditingSegmentWords: (value) => set({ editingSegmentWords: resolveValue(value, get().editingSegmentWords) }, false, 'setEditingSegmentWords'),
             setEditingLoopSegment: (value) => set({ editingLoopSegment: value }, false, 'setEditingLoopSegment'),
@@ -356,6 +364,92 @@ export const useTranscriptStore = create<TranscriptState>()(
                     );
                 } catch (e: any) {
                     console.error('Failed to fetch transcript evaluation reviews:', e);
+                }
+            },
+            saveSegmentEdit: async (segmentId, onSegmentUpdated, onPausePreview) => {
+                const words = get().editingSegmentWords.map(w => w.trim()).filter(Boolean);
+                const text = words.join(' ').trim();
+                if (!text) {
+                    alert('Transcript text cannot be empty');
+                    return;
+                }
+                set({ savingSegmentEdit: true }, false, 'saveSegmentEdit/pending');
+                try {
+                    const res = await api.patch<TranscriptSegment>(`/segments/${segmentId}/text`, { text, words });
+                    onSegmentUpdated(res.data);
+                    set(
+                        {
+                            editingLoopSegment: false,
+                            editingSegmentId: null,
+                            editingSegmentWords: [],
+                        },
+                        false,
+                        'saveSegmentEdit/fulfilled'
+                    );
+                    onPausePreview();
+                } catch (e: any) {
+                    alert(e?.response?.data?.detail || 'Failed to save transcript correction');
+                } finally {
+                    set({ savingSegmentEdit: false }, false, 'saveSegmentEdit/settled');
+                }
+            },
+            detectFunnyMoments: async (videoId, force = true) => {
+                set(
+                    (state) => ({
+                        detectingFunnyMoments: true,
+                        funnyTaskProgress: {
+                            video_id: videoId,
+                            status: 'running',
+                            task: 'detect',
+                            stage: state.funnyTaskProgress?.stage ?? 'loading',
+                            message: 'Starting funny-moment scan...',
+                            percent: 1,
+                            current: null,
+                            total: null,
+                        },
+                    }),
+                    false,
+                    'detectFunnyMoments/pending'
+                );
+                try {
+                    const res = await api.post<FunnyMoment[]>(`/videos/${videoId}/funny-moments/detect`, null, { params: { force } });
+                    set({ funnyMoments: res.data }, false, 'detectFunnyMoments/fulfilled');
+                } catch (e: any) {
+                    console.error('Failed to detect funny moments', e);
+                    alert(e?.response?.data?.detail || 'Failed to detect funny moments');
+                } finally {
+                    await get().fetchFunnyTaskProgress(videoId);
+                    set({ detectingFunnyMoments: false }, false, 'detectFunnyMoments/settled');
+                }
+            },
+            explainFunnyMoments: async (videoId, force = false, onVideoMetaChanged) => {
+                set(
+                    (state) => ({
+                        explainingFunnyMoments: true,
+                        funnyTaskProgress: {
+                            video_id: videoId,
+                            status: 'running',
+                            task: 'explain',
+                            stage: state.funnyTaskProgress?.stage ?? 'loading',
+                            message: force ? 'Starting re-explain...' : 'Starting explain...',
+                            percent: 1,
+                            current: 0,
+                            total: null,
+                        },
+                    }),
+                    false,
+                    'explainFunnyMoments/pending'
+                );
+                try {
+                    const res = await api.post<FunnyMoment[]>(`/videos/${videoId}/funny-moments/explain`, null, { params: { force } });
+                    set({ funnyMoments: res.data }, false, 'explainFunnyMoments/fulfilled');
+                    await onVideoMetaChanged?.();
+                } catch (e: any) {
+                    console.error('Failed to explain funny moments', e);
+                    alert(e?.response?.data?.detail || 'Failed to generate AI explanations');
+                } finally {
+                    await get().fetchFunnyTaskProgress(videoId);
+                    set({ explainingFunnyMoments: false }, false, 'explainFunnyMoments/settled');
                 }
             },
             resetTranscriptState: () => set({ ...initialTranscriptState }, false, 'resetTranscriptState'),
