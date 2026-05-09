@@ -14,6 +14,7 @@ import { ClipsTab } from './tabs/ClipsTab';
 import { CleanupTab } from './tabs/CleanupTab';
 import { ClipEditorWorkspace } from './tabs/ClipEditorWorkspace';
 import { OptimizeTab } from './tabs/OptimizeTab';
+import { TranscriptTab } from './tabs/TranscriptTab';
 import { ReconstructionSidebarTab, ReconstructionTab } from './tabs/ReconstructionTab';
 import { useCloneStore, useCloneUsesOllama } from '../../store/useCloneStore';
 import { useYoutubeStore } from '../../store/useYoutubeStore';
