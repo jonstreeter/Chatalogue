@@ -1,6 +1,9 @@
 import { Bot, CheckCircle2, Clock, Download, Eraser, FileText, Loader2, PlayCircle, Plus, RefreshCw, RotateCcw, Save, Sparkles, Users, XCircle } from 'lucide-react';
 import type { ReactNode } from 'react';
-import type { ReconstructionWorkbench } from '../../../types';\nimport { formatTime } from '../../../lib/formatters';
+import type { ReconstructionWorkbench, Video, TranscriptSegment } from '../../../types';
+import { formatTime } from '../../../lib/formatters';
+import { useReconstructionStore } from '../../../store/useReconstructionStore';
+import { useCleanupStore } from '../../../store/useCleanupStore';
 
 type ReconstructionSidebarProps = {
     isActive: boolean;
@@ -109,7 +112,14 @@ type ReconstructionStageProps = {
     reconstructionWorkbenchProgressNode: ReactNode;
     reconstructionWorkbenchActivityNode: ReactNode;
     reconstructionJobNode: ReactNode;
-    ctx: any;
+    video: Video | null;
+    segments: TranscriptSegment[];
+    isUploadedMedia: boolean;
+    episodeBusy: boolean;
+    reconstructionAudioUrl: string;
+    resolveWorkbenchAudioUrl: (url?: string) => string;
+    setVideo: (v: Video) => void;
+    onSetReconstructionPlayback: (enabled: boolean) => void;
     onRefreshWorkbench: () => void;
     onSetStudioTab: (tab: 'voices' | 'reconstruction') => void;
 };
@@ -129,26 +139,59 @@ export function ReconstructionTab({
     reconstructionWorkbenchProgressNode,
     reconstructionWorkbenchActivityNode,
     reconstructionJobNode,
-    ctx,
+    video,
+    segments,
+    isUploadedMedia,
+    episodeBusy,
+    reconstructionAudioUrl,
+    resolveWorkbenchAudioUrl,
+    setVideo,
+    onSetReconstructionPlayback,
     onRefreshWorkbench,
     onSetStudioTab,
 }: ReconstructionStageProps) {
     if (!isActive) return null;
 
+    const {
+        selectedReconstructionSpeakerId, setSelectedReconstructionSpeakerId,
+        addingReconstructionSampleSpeakerId, approvingReconstructionSpeakerId,
+        updatingReconstructionSampleKey, cleaningReconstructionSampleKey,
+        reconstructionTestTextDrafts, setReconstructionTestTextDrafts,
+        testingReconstructionSpeakerId, switchingReconstructionPlayback,
+        selectedReconstructionPreviewSegmentId, setSelectedReconstructionPreviewSegmentId,
+        reconstructionPreviewAudioUrl, reconstructionPreviewText,
+        queueingReconstruction, reconstructionInstructionDraft, setReconstructionInstructionDraft,
+        setReconstructionStudioTab,
+    } = useReconstructionStore();
+    const { savingReconstructionSettings } = useCleanupStore();
+
+    const selectedReconstructionSpeaker = reconstructionWorkbench?.speakers.find(
+        (s) => s.speaker_id === selectedReconstructionSpeakerId
+    ) ?? null;
+
+    const handleAddReconstructionSample = (speakerId: number) =>
+        void useReconstructionStore.getState().addReconstructionSample(video, isUploadedMedia, speakerId);
+    const handleApproveReconstructionSpeaker = (speakerId: number, approved: boolean) =>
+        void useReconstructionStore.getState().approveReconstructionSpeaker(video, isUploadedMedia, speakerId, approved);
+    const handleUpdateReconstructionSampleState = (
+        speakerId: number, segmentId: number, patch: { rejected?: boolean; selected?: boolean; clear_cleaned?: boolean }
+    ) => void useReconstructionStore.getState().updateReconstructionSampleState(video, isUploadedMedia, speakerId, segmentId, patch);
+    const handleCleanupReconstructionSample = (speakerId: number, segmentId: number) =>
+        void useReconstructionStore.getState().cleanupReconstructionSample(video, isUploadedMedia, speakerId, segmentId);
+    const handleTestReconstructionSpeaker = (
+        speakerId: number, segmentId?: number, options?: { performanceMode?: boolean; useSelectedSampleText?: boolean }
+    ) => void useReconstructionStore.getState().testReconstructionSpeaker(video, isUploadedMedia, speakerId, segmentId, options);
+    const handlePreviewReconstructionSegment = (segmentId: number) =>
+        void useReconstructionStore.getState().previewReconstructionSegment(video, isUploadedMedia, segmentId, resolveWorkbenchAudioUrl);
+    const handleQueueReconstruction = (force = false) =>
+        void useReconstructionStore.getState().queueReconstruction(video, isUploadedMedia, hasReconstructionAudio, force, setVideo);
+    const handleSaveReconstructionSettings = () =>
+        void useReconstructionStore.getState().saveReconstructionSettings(video, isUploadedMedia, setVideo);
+    const handleSetReconstructionPlayback = (enabled: boolean) => onSetReconstructionPlayback(enabled);
+
     const speakerCount = reconstructionWorkbench?.speaker_count ?? 0;
     const approvedCount = reconstructionWorkbench?.speakers.filter((speaker) => speaker.approved).length ?? 0;
     const pendingCount = Math.max(0, speakerCount - approvedCount);
-
-    const {
-        selectedReconstructionSpeaker, resolveWorkbenchAudioUrl, segments, setSelectedReconstructionSpeakerId, selectedReconstructionSpeakerId,
-        handleAddReconstructionSample, addingReconstructionSampleSpeakerId, handleApproveReconstructionSpeaker, approvingReconstructionSpeakerId,
-        handleUpdateReconstructionSampleState, updatingReconstructionSampleKey, cleaningReconstructionSampleKey, handleCleanupReconstructionSample,
-        reconstructionTestTextDrafts, setReconstructionTestTextDrafts, episodeBusy, handleTestReconstructionSpeaker, testingReconstructionSpeakerId,
-        hasReconstructionAudio, reconstructionAudioUrl, video, handleSetReconstructionPlayback, usingReconstructionForPlayback, switchingReconstructionPlayback,
-        selectedReconstructionPreviewSegmentId, setSelectedReconstructionPreviewSegmentId, reconstructionPreviewAudioUrl, reconstructionPreviewText,
-        handlePreviewReconstructionSegment, queueingReconstruction, reconstructionBusy, handleQueueReconstruction, reconstructionInstructionDraft,
-        setReconstructionInstructionDraft, savingReconstructionSettings, handleSaveReconstructionSettings, setReconstructionStudioTab,
-    } = ctx;
 
     const renderReconstructionVoiceReview = () => {
         const selectedSpeaker = selectedReconstructionSpeaker;

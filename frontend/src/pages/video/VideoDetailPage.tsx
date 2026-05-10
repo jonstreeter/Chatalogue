@@ -3259,7 +3259,271 @@ export function VideoDetailPage() {
                                     </div>
                                 </div>
                             )}
-                            renderFunnyMomentsOverlay={() => null}
+                            renderFunnyMomentsOverlay={() => !showClipEditorMain ? (
+                                <>
+                                    <button
+                                        onClick={() => setFunnyDrawerOpen(v => !v)}
+                                        className="absolute right-4 bottom-4 z-20 flex items-center gap-2 px-3 py-2 rounded-xl border border-amber-200 bg-white/95 hover:bg-white shadow-lg text-amber-800 text-sm font-medium"
+                                        title="Open funny moments drawer"
+                                    >
+                                        <Smile size={15} className="text-amber-600" />
+                                        {funnyDrawerOpen ? 'Hide Funny Moments' : 'Funny Moments'}
+                                    </button>
+
+                                    <div
+                                        className={`absolute right-4 top-4 bottom-20 z-20 w-[380px] max-w-[calc(100%-2rem)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur-sm shadow-2xl overflow-hidden transition-transform duration-200 ${funnyDrawerOpen ? 'translate-x-0' : 'translate-x-[110%]'}`}
+                                    >
+                                        <div className="h-full flex flex-col">
+                                            <div className="px-4 py-3 border-b border-slate-200 bg-gradient-to-r from-amber-50 to-yellow-50">
+                                                <div className="flex items-start justify-between gap-3">
+                                                    <div className="min-w-0">
+                                                        <div className="flex items-center gap-2 text-amber-800 font-semibold text-sm">
+                                                            <Smile size={15} className="text-amber-600" />
+                                                            Funny Moments
+                                                        </div>
+                                                        <p className="text-xs text-amber-700/80 mt-0.5">
+                                                            Click to jump video and transcript to the laugh moment.
+                                                        </p>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => setFunnyDrawerOpen(false)}
+                                                        className="p-1.5 rounded-lg text-slate-500 hover:text-slate-700 hover:bg-white/80"
+                                                    >
+                                                        <X size={14} />
+                                                    </button>
+                                                </div>
+                                                <div className="mt-3 flex items-center gap-2">
+                                                    <div className="grid grid-cols-2 gap-2 w-full">
+                                                        <button
+                                                            onClick={() => handleDetectFunnyMoments(true)}
+                                                            disabled={detectingFunnyMoments || !video?.processed}
+                                                            className="h-10 px-2 rounded-lg text-xs font-medium bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+                                                            title={video?.processed ? 'Analyze transcript/audio for funny moments' : 'Transcribe the episode first'}
+                                                        >
+                                                            {detectingFunnyMoments ? <Loader2 size={13} className="animate-spin" /> : <Smile size={13} />}
+                                                            {funnyMoments.length > 0 ? 'Rescan' : 'Find'}
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleExplainFunnyMoments(true)}
+                                                            disabled={explainingFunnyMoments || funnyMoments.length === 0}
+                                                            className="h-10 px-2 rounded-lg text-xs font-medium bg-purple-100 text-purple-700 hover:bg-purple-200 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+                                                            title="Force-regenerate global humor context and moment explanations with the current LLM provider/model"
+                                                        >
+                                                            {explainingFunnyMoments ? <Loader2 size={13} className="animate-spin" /> : (hasExistingFunnyExplanations ? <RefreshCw size={13} /> : <Search size={13} />)}
+                                                            {hasExistingFunnyExplanations ? 'Re-explain' : 'Explain'}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                {funnyDrawerTaskLabel && (
+                                                    <div className="mt-2 rounded-lg border border-slate-200/80 bg-white/80 px-2.5 py-2">
+                                                        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
+                                                            <div className="flex items-center gap-2 min-w-0">
+                                                                <Loader2 size={12} className="animate-spin text-amber-600 shrink-0" />
+                                                                <span className="truncate">{funnyDrawerTaskLabel}</span>
+                                                            </div>
+                                                            {funnyTaskCurrent != null && funnyTaskTotal != null && funnyTaskTotal > 0 && (
+                                                                <span className="shrink-0 font-mono text-slate-500">
+                                                                    {funnyTaskCurrent}/{funnyTaskTotal}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <div className="mt-2 h-1.5 bg-slate-100 rounded-full overflow-hidden relative">
+                                                            {funnyTaskPercent != null ? (
+                                                                <div
+                                                                    className="h-full bg-amber-500 transition-all duration-300"
+                                                                    style={{ width: `${funnyTaskPercent}%` }}
+                                                                />
+                                                            ) : (
+                                                                <div className="absolute inset-0 bg-amber-500/15">
+                                                                    <div className="h-full w-1/3 bg-amber-500 animate-[shimmer_1.5s_infinite] relative overflow-hidden">
+                                                                        <div className="absolute inset-0 bg-white/35 skew-x-12" />
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                                                    <span className="px-2 py-0.5 rounded bg-white/80 border border-amber-200 text-amber-800">
+                                                        {funnyMoments.length > 0 ? `${funnyMoments.length} saved moments` : 'No saved moments'}
+                                                    </span>
+                                                    {funnyExplainHeaderModelLabel && (
+                                                        <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200">
+                                                            {funnyExplainHeaderModelLabel}
+                                                        </span>
+                                                    )}
+                                                    {latestFunnyExplainAt > 0 && (
+                                                        <span className="text-slate-600">
+                                                            {new Date(latestFunnyExplainAt).toLocaleString()}
+                                                        </span>
+                                                    )}
+                                                    {explainedFunnyMoments.length > 0 && (
+                                                        <span className="text-slate-500">
+                                                            {explainedFunnyMoments.length} explained
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            <div className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50/50">
+                                                {segments.length > 0 && (
+                                                    <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
+                                                        <div className="flex items-center justify-between gap-2">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setShowGlobalHumorContext(v => !v)}
+                                                                className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-slate-600 font-semibold hover:text-slate-800"
+                                                                title={showGlobalHumorContext ? 'Hide global humor context' : 'Show global humor context'}
+                                                            >
+                                                                {showGlobalHumorContext ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                                Global Humor Context
+                                                            </button>
+                                                            <div className="flex items-center gap-1.5">
+                                                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
+                                                                    Stage 1
+                                                                </span>
+                                                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-50 text-slate-500 border border-slate-200">
+                                                                    Episode-wide context
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                        {showGlobalHumorContext ? (
+                                                            video?.humor_context_summary ? (
+                                                                <div className="mt-1.5">
+                                                                    <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
+                                                                        {getDisplayHumorSummary(video.humor_context_summary)}
+                                                                    </p>
+                                                                    <div className="mt-2 text-[10px] text-slate-500 flex flex-wrap items-center gap-x-2 gap-y-1">
+                                                                        {video.humor_context_model && (
+                                                                            <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700">
+                                                                                {video.humor_context_model}
+                                                                            </span>
+                                                                        )}
+                                                                        {video.humor_context_generated_at && (
+                                                                            <span>
+                                                                                {new Date(video.humor_context_generated_at).toLocaleString()}
+                                                                            </span>
+                                                                        )}
+                                                                        <span>Used to inform per-moment explanations</span>
+                                                                    </div>
+                                                                </div>
+                                                            ) : explainingFunnyMoments ? (
+                                                                <div className="mt-1.5 text-xs text-slate-600 flex items-center gap-2">
+                                                                    <Loader2 size={13} className="animate-spin" />
+                                                                    Building episode-wide humor context summary...
+                                                                </div>
+                                                            ) : (
+                                                                <p className="mt-1.5 text-xs text-slate-500">
+                                                                    Run <span className="font-medium">Explain</span> to generate an episode-wide humor context summary, then per-moment joke summaries.
+                                                                </p>
+                                                            )
+                                                        ) : (
+                                                            <p className="mt-1.5 text-xs text-slate-500">
+                                                                Optional episode-wide context for callbacks/running bits. Expand if you want extra background while reviewing individual moments.
+                                                            </p>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {funnyMoments.length > 0 && (
+                                                    <div className="px-1 pt-1 pb-0.5 flex items-center justify-between">
+                                                        <div className="text-[10px] uppercase tracking-wide text-slate-600 font-semibold">
+                                                            Moment Explanations
+                                                        </div>
+                                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
+                                                            Stage 2
+                                                        </span>
+                                                    </div>
+                                                )}
+
+                                                {(loadingFunnyMoments || detectingFunnyMoments) && funnyMoments.length === 0 ? (
+                                                    <div className="text-xs text-slate-600 flex items-center gap-2 py-2 px-2">
+                                                        <Loader2 size={13} className="animate-spin" />
+                                                        Analyzing episode for laughter...
+                                                    </div>
+                                                ) : funnyMoments.length > 0 ? (
+                                                    funnyMoments.map((moment) => {
+                                                        const summaryText = moment.humor_summary ? getDisplayHumorSummary(moment.humor_summary) : '';
+                                                        const isExpanded = expandedFunnySummaryIds.has(moment.id);
+                                                        const canExpand = summaryText.length > 220;
+                                                        return (
+                                                            <button
+                                                                key={moment.id}
+                                                                onClick={() => handleFunnyMomentJump(moment)}
+                                                                className="w-full text-left rounded-xl border border-amber-200/60 bg-white hover:bg-amber-50/40 px-3 py-2.5 transition-colors shadow-sm"
+                                                            >
+                                                                <div className="flex items-center justify-between gap-2">
+                                                                    <div className="font-mono text-xs text-amber-900">
+                                                                        {formatTime(moment.start_time)} - {formatTime(moment.end_time)}
+                                                                    </div>
+                                                                    <div className="flex items-center gap-2 shrink-0">
+                                                                        <span className="text-[10px] uppercase tracking-wide text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">
+                                                                            {moment.source}
+                                                                        </span>
+                                                                        <span className="text-[10px] text-amber-700 font-semibold">
+                                                                            {(moment.score * 100).toFixed(0)}
+                                                                        </span>
+                                                                    </div>
+                                                                </div>
+                                                                {moment.humor_summary ? (
+                                                                    <div className="mt-1.5">
+                                                                        <div className="flex items-center gap-2 mb-1">
+                                                                            <span className="text-[10px] uppercase tracking-wide text-slate-600">Likely joke</span>
+                                                                            {moment.humor_confidence && (
+                                                                                <span className={`text-[10px] px-1.5 py-0.5 rounded ${moment.humor_confidence === 'high'
+                                                                                    ? 'bg-emerald-100 text-emerald-700'
+                                                                                    : moment.humor_confidence === 'medium'
+                                                                                        ? 'bg-blue-100 text-blue-700'
+                                                                                        : 'bg-slate-100 text-slate-600'
+                                                                                    }`}>
+                                                                                    {moment.humor_confidence}
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                        <p className={`text-xs text-slate-700 ${isExpanded ? '' : 'line-clamp-4'}`}>
+                                                                            {summaryText}
+                                                                        </p>
+                                                                        {canExpand && (
+                                                                            <span
+                                                                                role="button"
+                                                                                tabIndex={0}
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    toggleFunnySummaryExpanded(moment.id);
+                                                                                }}
+                                                                                onKeyDown={(e) => {
+                                                                                    if (e.key === 'Enter' || e.key === ' ') {
+                                                                                        e.preventDefault();
+                                                                                        e.stopPropagation();
+                                                                                        toggleFunnySummaryExpanded(moment.id);
+                                                                                    }
+                                                                                }}
+                                                                                className="mt-1 inline-flex text-[11px] font-medium text-amber-700 hover:text-amber-800 underline underline-offset-2 cursor-pointer"
+                                                                            >
+                                                                                {isExpanded ? 'Show less' : 'Show more'}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                ) : moment.snippet ? (
+                                                                    <p className="mt-1.5 text-xs text-slate-700 line-clamp-3">
+                                                                        {moment.snippet}
+                                                                    </p>
+                                                                ) : null}
+                                                            </button>
+                                                        )
+                                                    })
+                                                ) : (
+                                                    <div className="rounded-lg border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-500">
+                                                        {segments.length === 0
+                                                            ? 'Transcript required first. Start transcription to analyze funny moments.'
+                                                            : 'No funny moments detected yet. Click Find to analyze this episode.'}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </>
+                            ) : null}
                         />
                     )}
                     {activeTab === 'optimize' && (
@@ -3583,45 +3847,14 @@ export function VideoDetailPage() {
                         reconstructionWorkbenchProgressNode={reconstructionWorkbenchProgress ? renderWorkbenchTaskProgressCard(reconstructionWorkbenchProgress) : null}
                         reconstructionWorkbenchActivityNode={reconstructionWorkbenchActivity ? renderWorkbenchActivityCard(reconstructionWorkbenchActivity) : null}
                         reconstructionJobNode={reconstructionJob ? renderAuxiliaryProgressCard('reconstruction', reconstructionJob, { className: 'mt-4 border-violet-200 bg-violet-50/50' }) : null}
-                        ctx={{
-                            selectedReconstructionSpeaker,
-                            resolveWorkbenchAudioUrl,
-                            segments,
-                            setSelectedReconstructionSpeakerId,
-                            selectedReconstructionSpeakerId,
-                            handleAddReconstructionSample,
-                            addingReconstructionSampleSpeakerId,
-                            handleApproveReconstructionSpeaker,
-                            approvingReconstructionSpeakerId,
-                            handleUpdateReconstructionSampleState,
-                            updatingReconstructionSampleKey,
-                            cleaningReconstructionSampleKey,
-                            handleCleanupReconstructionSample,
-                            reconstructionTestTextDrafts,
-                            setReconstructionTestTextDrafts,
-                            episodeBusy,
-                            handleTestReconstructionSpeaker,
-                            testingReconstructionSpeakerId,
-                            hasReconstructionAudio,
-                            reconstructionAudioUrl,
-                            video,
-                            handleSetReconstructionPlayback,
-                            usingReconstructionForPlayback,
-                            switchingReconstructionPlayback,
-                            selectedReconstructionPreviewSegmentId,
-                            setSelectedReconstructionPreviewSegmentId,
-                            reconstructionPreviewAudioUrl,
-                            reconstructionPreviewText,
-                            handlePreviewReconstructionSegment,
-                            queueingReconstruction,
-                            reconstructionBusy,
-                            handleQueueReconstruction,
-                            reconstructionInstructionDraft,
-                            setReconstructionInstructionDraft,
-                            savingReconstructionSettings,
-                            handleSaveReconstructionSettings,
-                            setReconstructionStudioTab,
-                        }}
+                        video={video}
+                        segments={segments}
+                        isUploadedMedia={isUploadedMedia}
+                        episodeBusy={episodeBusy}
+                        reconstructionAudioUrl={reconstructionAudioUrl}
+                        resolveWorkbenchAudioUrl={resolveWorkbenchAudioUrl}
+                        setVideo={setVideo}
+                        onSetReconstructionPlayback={(enabled) => void handleSetReconstructionPlayback(enabled)}
                         onRefreshWorkbench={() => void loadReconstructionWorkbench()}
                         onSetStudioTab={setReconstructionStudioTab}
                     />
@@ -3640,272 +3873,6 @@ export function VideoDetailPage() {
                             {renderMainPlayer("w-full bg-black rounded-2xl overflow-hidden shadow-2xl aspect-video")}
                         </div>
                     </div>
-                )}
-
-                {!showClipEditorMain && activeTab === 'transcript' && (
-                    <>
-                        <button
-                            onClick={() => setFunnyDrawerOpen(v => !v)}
-                            className="absolute right-4 bottom-4 z-20 flex items-center gap-2 px-3 py-2 rounded-xl border border-amber-200 bg-white/95 hover:bg-white shadow-lg text-amber-800 text-sm font-medium"
-                            title="Open funny moments drawer"
-                        >
-                            <Smile size={15} className="text-amber-600" />
-                            {funnyDrawerOpen ? 'Hide Funny Moments' : 'Funny Moments'}
-                        </button>
-
-                        <div
-                            className={`absolute right-4 top-4 bottom-20 z-20 w-[380px] max-w-[calc(100%-2rem)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur-sm shadow-2xl overflow-hidden transition-transform duration-200 ${funnyDrawerOpen ? 'translate-x-0' : 'translate-x-[110%]'}`}
-                        >
-                            <div className="h-full flex flex-col">
-                                <div className="px-4 py-3 border-b border-slate-200 bg-gradient-to-r from-amber-50 to-yellow-50">
-                                    <div className="flex items-start justify-between gap-3">
-                                        <div className="min-w-0">
-                                            <div className="flex items-center gap-2 text-amber-800 font-semibold text-sm">
-                                                <Smile size={15} className="text-amber-600" />
-                                                Funny Moments
-                                            </div>
-                                            <p className="text-xs text-amber-700/80 mt-0.5">
-                                                Click to jump video and transcript to the laugh moment.
-                                            </p>
-                                        </div>
-                                        <button
-                                            onClick={() => setFunnyDrawerOpen(false)}
-                                            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-700 hover:bg-white/80"
-                                        >
-                                            <X size={14} />
-                                        </button>
-                                    </div>
-                                    <div className="mt-3 flex items-center gap-2">
-                                        <div className="grid grid-cols-2 gap-2 w-full">
-                                            <button
-                                                onClick={() => handleDetectFunnyMoments(true)}
-                                                disabled={detectingFunnyMoments || !video?.processed}
-                                                className="h-10 px-2 rounded-lg text-xs font-medium bg-amber-100 text-amber-800 hover:bg-amber-200 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
-                                                title={video?.processed ? 'Analyze transcript/audio for funny moments' : 'Transcribe the episode first'}
-                                            >
-                                                {detectingFunnyMoments ? <Loader2 size={13} className="animate-spin" /> : <Smile size={13} />}
-                                                {funnyMoments.length > 0 ? 'Rescan' : 'Find'}
-                                            </button>
-                                            <button
-                                                onClick={() => handleExplainFunnyMoments(true)}
-                                                disabled={explainingFunnyMoments || funnyMoments.length === 0}
-                                                className="h-10 px-2 rounded-lg text-xs font-medium bg-purple-100 text-purple-700 hover:bg-purple-200 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
-                                                title="Force-regenerate global humor context and moment explanations with the current LLM provider/model"
-                                            >
-                                                {explainingFunnyMoments ? <Loader2 size={13} className="animate-spin" /> : (hasExistingFunnyExplanations ? <RefreshCw size={13} /> : <Search size={13} />)}
-                                                {hasExistingFunnyExplanations ? 'Re-explain' : 'Explain'}
-                                            </button>
-                                        </div>
-                                    </div>
-                                    {funnyDrawerTaskLabel && (
-                                        <div className="mt-2 rounded-lg border border-slate-200/80 bg-white/80 px-2.5 py-2">
-                                            <div className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
-                                                <div className="flex items-center gap-2 min-w-0">
-                                                    <Loader2 size={12} className="animate-spin text-amber-600 shrink-0" />
-                                                    <span className="truncate">{funnyDrawerTaskLabel}</span>
-                                                </div>
-                                                {funnyTaskCurrent != null && funnyTaskTotal != null && funnyTaskTotal > 0 && (
-                                                    <span className="shrink-0 font-mono text-slate-500">
-                                                        {funnyTaskCurrent}/{funnyTaskTotal}
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div className="mt-2 h-1.5 bg-slate-100 rounded-full overflow-hidden relative">
-                                                {funnyTaskPercent != null ? (
-                                                    <div
-                                                        className="h-full bg-amber-500 transition-all duration-300"
-                                                        style={{ width: `${funnyTaskPercent}%` }}
-                                                    />
-                                                ) : (
-                                                    <div className="absolute inset-0 bg-amber-500/15">
-                                                        <div className="h-full w-1/3 bg-amber-500 animate-[shimmer_1.5s_infinite] relative overflow-hidden">
-                                                            <div className="absolute inset-0 bg-white/35 skew-x-12" />
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
-                                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                                        <span className="px-2 py-0.5 rounded bg-white/80 border border-amber-200 text-amber-800">
-                                            {funnyMoments.length > 0 ? `${funnyMoments.length} saved moments` : 'No saved moments'}
-                                        </span>
-                                        {funnyExplainHeaderModelLabel && (
-                                            <span className="px-2 py-0.5 rounded bg-purple-100 text-purple-700 border border-purple-200">
-                                                {funnyExplainHeaderModelLabel}
-                                            </span>
-                                        )}
-                                        {latestFunnyExplainAt > 0 && (
-                                            <span className="text-slate-600">
-                                                {new Date(latestFunnyExplainAt).toLocaleString()}
-                                            </span>
-                                        )}
-                                        {explainedFunnyMoments.length > 0 && (
-                                            <span className="text-slate-500">
-                                                {explainedFunnyMoments.length} explained
-                                            </span>
-                                        )}
-                                    </div>
-                                </div>
-
-                                <div className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50/50">
-                                    {segments.length > 0 && (
-                                        <div className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
-                                            <div className="flex items-center justify-between gap-2">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setShowGlobalHumorContext(v => !v)}
-                                                    className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-slate-600 font-semibold hover:text-slate-800"
-                                                    title={showGlobalHumorContext ? 'Hide global humor context' : 'Show global humor context'}
-                                                >
-                                                    {showGlobalHumorContext ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                                                    Global Humor Context
-                                                </button>
-                                                <div className="flex items-center gap-1.5">
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
-                                                        Stage 1
-                                                    </span>
-                                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-50 text-slate-500 border border-slate-200">
-                                                        Episode-wide context
-                                                    </span>
-                                                </div>
-                                            </div>
-                                            {showGlobalHumorContext ? (
-                                                video?.humor_context_summary ? (
-                                                    <div className="mt-1.5">
-                                                        <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
-                                                            {getDisplayHumorSummary(video.humor_context_summary)}
-                                                        </p>
-                                                        <div className="mt-2 text-[10px] text-slate-500 flex flex-wrap items-center gap-x-2 gap-y-1">
-                                                            {video.humor_context_model && (
-                                                                <span className="px-1.5 py-0.5 rounded bg-purple-50 text-purple-700">
-                                                                    {video.humor_context_model}
-                                                                </span>
-                                                            )}
-                                                            {video.humor_context_generated_at && (
-                                                                <span>
-                                                                    {new Date(video.humor_context_generated_at).toLocaleString()}
-                                                                </span>
-                                                            )}
-                                                            <span>Used to inform per-moment explanations</span>
-                                                        </div>
-                                                    </div>
-                                                ) : explainingFunnyMoments ? (
-                                                    <div className="mt-1.5 text-xs text-slate-600 flex items-center gap-2">
-                                                        <Loader2 size={13} className="animate-spin" />
-                                                        Building episode-wide humor context summary...
-                                                    </div>
-                                                ) : (
-                                                    <p className="mt-1.5 text-xs text-slate-500">
-                                                        Run <span className="font-medium">Explain</span> to generate an episode-wide humor context summary, then per-moment joke summaries.
-                                                    </p>
-                                                )
-                                            ) : (
-                                                <p className="mt-1.5 text-xs text-slate-500">
-                                                    Optional episode-wide context for callbacks/running bits. Expand if you want extra background while reviewing individual moments.
-                                                </p>
-                                            )}
-                                        </div>
-                                    )}
-
-                                    {funnyMoments.length > 0 && (
-                                        <div className="px-1 pt-1 pb-0.5 flex items-center justify-between">
-                                            <div className="text-[10px] uppercase tracking-wide text-slate-600 font-semibold">
-                                                Moment Explanations
-                                            </div>
-                                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">
-                                                Stage 2
-                                            </span>
-                                        </div>
-                                    )}
-
-                                    {(loadingFunnyMoments || detectingFunnyMoments) && funnyMoments.length === 0 ? (
-                                        <div className="text-xs text-slate-600 flex items-center gap-2 py-2 px-2">
-                                            <Loader2 size={13} className="animate-spin" />
-                                            Analyzing episode for laughter...
-                                        </div>
-                                    ) : funnyMoments.length > 0 ? (
-                                        funnyMoments.map((moment) => {
-                                            const summaryText = moment.humor_summary ? getDisplayHumorSummary(moment.humor_summary) : '';
-                                            const isExpanded = expandedFunnySummaryIds.has(moment.id);
-                                            const canExpand = summaryText.length > 220;
-                                            return (
-                                                <button
-                                                    key={moment.id}
-                                                    onClick={() => handleFunnyMomentJump(moment)}
-                                                    className="w-full text-left rounded-xl border border-amber-200/60 bg-white hover:bg-amber-50/40 px-3 py-2.5 transition-colors shadow-sm"
-                                                >
-                                                    <div className="flex items-center justify-between gap-2">
-                                                        <div className="font-mono text-xs text-amber-900">
-                                                            {formatTime(moment.start_time)} - {formatTime(moment.end_time)}
-                                                        </div>
-                                                        <div className="flex items-center gap-2 shrink-0">
-                                                            <span className="text-[10px] uppercase tracking-wide text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded">
-                                                                {moment.source}
-                                                            </span>
-                                                            <span className="text-[10px] text-amber-700 font-semibold">
-                                                                {(moment.score * 100).toFixed(0)}
-                                                            </span>
-                                                        </div>
-                                                    </div>
-                                                    {moment.humor_summary ? (
-                                                        <div className="mt-1.5">
-                                                            <div className="flex items-center gap-2 mb-1">
-                                                                <span className="text-[10px] uppercase tracking-wide text-slate-600">Likely joke</span>
-                                                                {moment.humor_confidence && (
-                                                                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${moment.humor_confidence === 'high'
-                                                                        ? 'bg-emerald-100 text-emerald-700'
-                                                                        : moment.humor_confidence === 'medium'
-                                                                            ? 'bg-blue-100 text-blue-700'
-                                                                            : 'bg-slate-100 text-slate-600'
-                                                                        }`}>
-                                                                        {moment.humor_confidence}
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            <p className={`text-xs text-slate-700 ${isExpanded ? '' : 'line-clamp-4'}`}>
-                                                                {summaryText}
-                                                            </p>
-                                                            {canExpand && (
-                                                                <span
-                                                                    role="button"
-                                                                    tabIndex={0}
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        toggleFunnySummaryExpanded(moment.id);
-                                                                    }}
-                                                                    onKeyDown={(e) => {
-                                                                        if (e.key === 'Enter' || e.key === ' ') {
-                                                                            e.preventDefault();
-                                                                            e.stopPropagation();
-                                                                            toggleFunnySummaryExpanded(moment.id);
-                                                                        }
-                                                                    }}
-                                                                    className="mt-1 inline-flex text-[11px] font-medium text-amber-700 hover:text-amber-800 underline underline-offset-2 cursor-pointer"
-                                                                >
-                                                                    {isExpanded ? 'Show less' : 'Show more'}
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    ) : moment.snippet ? (
-                                                        <p className="mt-1.5 text-xs text-slate-700 line-clamp-3">
-                                                            {moment.snippet}
-                                                        </p>
-                                                    ) : null}
-                                                </button>
-                                            )
-                                        })
-                                    ) : (
-                                        <div className="rounded-lg border border-dashed border-slate-200 bg-white p-4 text-xs text-slate-500">
-                                            {segments.length === 0
-                                                ? 'Transcript required first. Start transcription to analyze funny moments.'
-                                                : 'No funny moments detected yet. Click Find to analyze this episode.'}
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    </>
                 )}
             </div>
 
