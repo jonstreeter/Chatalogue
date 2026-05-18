@@ -1550,6 +1550,117 @@ class SemanticIndexRebuildResponse(BaseModel):
     video_ids: List[int] = []
 
 
+# Episode Chat
+
+class EpisodeChatThreadCreateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=160)
+    provider_override: Optional[str] = Field(default=None, max_length=40)
+    model_override: Optional[str] = Field(default=None, max_length=160)
+    system_prompt: Optional[str] = Field(default=None, max_length=2000)
+    scope_mode: Literal["episode", "episode_related"] = "episode"
+
+
+class EpisodeChatThreadUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, max_length=160)
+    status: Optional[Literal["active", "archived"]] = None
+    provider_override: Optional[str] = Field(default=None, max_length=40)
+    model_override: Optional[str] = Field(default=None, max_length=160)
+    system_prompt: Optional[str] = Field(default=None, max_length=2000)
+    scope_mode: Optional[Literal["episode", "episode_related"]] = None
+
+
+class EpisodeChatMessageCreateRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    provider_override: Optional[str] = Field(default=None, max_length=40)
+    model_override: Optional[str] = Field(default=None, max_length=160)
+    max_context_chunks: int = Field(default=10, ge=2, le=10)
+
+
+class EpisodeChatCitationRead(BaseModel):
+    chunk_id: Optional[int] = None
+    video_id: Optional[int] = None
+    video_title: Optional[str] = None
+    citation_scope: Literal["episode", "related"] = "episode"
+    segment_ids: List[int] = []
+    score: Optional[float] = None
+    speaker_name: Optional[str] = None
+    start_time: float
+    end_time: float
+    support_text: str
+
+
+class EpisodeChatMessageContextRead(BaseModel):
+    scope_mode: Literal["episode", "episode_related"] = "episode"
+    retrieval_mode: str = "episode"
+    semantic_query: Optional[str] = None
+    prompt_version: str = "episode-chat-v2"
+    citations: List[EpisodeChatCitationRead] = []
+    related_citations: List[EpisodeChatCitationRead] = []
+    related_video_ids: List[int] = []
+    used_related_context: bool = False
+    retrieved_chunk_ids: List[int] = []
+    retrieved_segment_ids: List[int] = []
+    token_estimate: int = 0
+    latency_ms: Optional[int] = None
+
+
+class EpisodeChatMessageRead(BaseModel):
+    id: int
+    thread_id: int
+    role: Literal["user", "assistant"]
+    status: str
+    content: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    parent_message_id: Optional[int] = None
+    error: Optional[str] = None
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    context: Optional[EpisodeChatMessageContextRead] = None
+
+
+class EpisodeChatThreadRead(BaseModel):
+    id: int
+    video_id: int
+    channel_id: Optional[int] = None
+    title: str
+    status: str
+    scope_mode: Literal["episode", "episode_related"] = "episode"
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    system_prompt: Optional[str] = None
+    message_count: int = 0
+    last_message_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class EpisodeChatThreadDetailRead(EpisodeChatThreadRead):
+    messages: List[EpisodeChatMessageRead] = []
+
+
+class EpisodeChatSendResponse(BaseModel):
+    thread: EpisodeChatThreadRead
+    user_message: EpisodeChatMessageRead
+    assistant_message: EpisodeChatMessageRead
+
+
+class EpisodeChatChannelItemRead(BaseModel):
+    video_id: int
+    channel_id: int
+    video_title: str
+    video_thumbnail_url: Optional[str] = None
+    video_published_at: Optional[datetime] = None
+    thread_count: int = 0
+    message_count: int = 0
+    latest_thread_id: Optional[int] = None
+    latest_thread_title: Optional[str] = None
+    latest_scope_mode: Literal["episode", "episode_related"] = "episode"
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    last_message_at: Optional[datetime] = None
+
+
 # Episode Clone
 
 class EpisodeCloneCandidateRead(BaseModel):

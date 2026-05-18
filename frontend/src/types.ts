@@ -1127,3 +1127,93 @@ export interface EpisodeCloneJob {
     request_signature: string;
     result?: EpisodeCloneGenerateResponse | null;
 }
+
+export interface EpisodeChatCitation {
+    chunk_id?: number | null;
+    video_id?: number | null;
+    video_title?: string | null;
+    citation_scope: 'episode' | 'related';
+    segment_ids: number[];
+    score?: number | null;
+    speaker_name?: string | null;
+    start_time: number;
+    end_time: number;
+    support_text: string;
+}
+
+export interface EpisodeChatMessageContext {
+    scope_mode: 'episode' | 'episode_related';
+    retrieval_mode: string;
+    semantic_query?: string | null;
+    prompt_version: string;
+    citations: EpisodeChatCitation[];
+    related_citations: EpisodeChatCitation[];
+    related_video_ids: number[];
+    used_related_context: boolean;
+    retrieved_chunk_ids: number[];
+    retrieved_segment_ids: number[];
+    token_estimate: number;
+    latency_ms?: number | null;
+}
+
+export interface EpisodeChatMessage {
+    id: number;
+    thread_id: number;
+    role: 'user' | 'assistant';
+    status: string;
+    content: string;
+    provider?: string | null;
+    model?: string | null;
+    parent_message_id?: number | null;
+    error?: string | null;
+    created_at: string;
+    completed_at?: string | null;
+    context?: EpisodeChatMessageContext | null;
+}
+
+export interface EpisodeChatThread {
+    id: number;
+    video_id: number;
+    channel_id?: number | null;
+    title: string;
+    status: string;
+    scope_mode: 'episode' | 'episode_related';
+    provider?: string | null;
+    model?: string | null;
+    system_prompt?: string | null;
+    message_count: number;
+    last_message_at?: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface EpisodeChatThreadDetail extends EpisodeChatThread {
+    messages: EpisodeChatMessage[];
+}
+
+export interface EpisodeChatSendResponse {
+    thread: EpisodeChatThread;
+    user_message: EpisodeChatMessage;
+    assistant_message: EpisodeChatMessage;
+}
+
+export interface EpisodeChatThreadDeleteResponse {
+    status: string;
+    thread_id: number;
+}
+
+export interface EpisodeChatChannelItem {
+    video_id: number;
+    channel_id: number;
+    video_title: string;
+    video_thumbnail_url?: string | null;
+    video_published_at?: string | null;
+    thread_count: number;
+    message_count: number;
+    latest_thread_id?: number | null;
+    latest_thread_title?: string | null;
+    latest_scope_mode: 'episode' | 'episode_related';
+    provider?: string | null;
+    model?: string | null;
+    last_message_at?: string | null;
+}

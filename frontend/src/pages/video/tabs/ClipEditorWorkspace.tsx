@@ -9,7 +9,7 @@ type Props = {
     currentTime: number;
     video: Video | null;
     segments: TranscriptSegment[];
-    renderMainPlayer: (containerClassName: string) => ReactNode;
+    playerNode: ReactNode;
     onSeek: (seconds: number) => void;
 };
 
@@ -93,7 +93,7 @@ export function ClipEditorWorkspace({
     currentTime,
     video,
     segments,
-    renderMainPlayer,
+    playerNode,
     onSeek,
 }: Props) {
     const cropPreviewRef = useRef<HTMLDivElement>(null);
@@ -624,7 +624,7 @@ export function ClipEditorWorkspace({
                 </div>
 
                 <div className="space-y-4">
-                    {renderMainPlayer('w-full bg-black rounded-2xl overflow-hidden shadow-2xl aspect-video')}
+                    {playerNode}
                     <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
                         <div className="flex items-center justify-between gap-2 mb-2">
                             <div className="text-[11px] font-semibold tracking-wide text-slate-600">Burn/Crop Preview (draw to set crop)</div>

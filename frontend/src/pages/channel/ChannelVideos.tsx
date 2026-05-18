@@ -182,22 +182,21 @@ export function ChannelVideos() {
         }
 
         const shouldPollRefresh = channel?.status === 'refreshing';
-        const shouldPollDates = (
-            missingDateCount > 0 &&
+        const shouldPollMetadataBackfill = (
             !isManualChannel &&
             isMetadataBackfillDetail(channel?.sync_status_detail) &&
             Number(channel?.sync_progress ?? 0) < 100 &&
             backfillPollCountRef.current < DATE_BACKFILL_MAX_POLLS
         );
-        if (!shouldPollRefresh && !shouldPollDates) {
-            if (missingDateCount === 0) {
+        if (!shouldPollRefresh && !shouldPollMetadataBackfill) {
+            if (!isMetadataBackfillDetail(channel?.sync_status_detail) || Number(channel?.sync_progress ?? 0) >= 100) {
                 backfillPollCountRef.current = 0;
             }
             return;
         }
 
         backfillPollTimerRef.current = setTimeout(() => {
-            if (!shouldPollRefresh && shouldPollDates) {
+            if (!shouldPollRefresh && shouldPollMetadataBackfill) {
                 backfillPollCountRef.current += 1;
             }
             void fetchVideos(true);
@@ -473,7 +472,6 @@ export function ChannelVideos() {
     const unmutedFilteredCount = processedVideos.filter(v => !v.muted && !v.access_restricted).length;
     const isRefreshingChannel = !isManualChannel && (channel?.status === 'refreshing' || fetching);
     const isDateBackfillActive = (
-        missingDateCount > 0 &&
         !isRefreshingChannel &&
         !isManualChannel &&
         isMetadataBackfillDetail(channel?.sync_status_detail) &&
@@ -487,7 +485,9 @@ export function ChannelVideos() {
                 : `${isTikTokChannel ? 'Scanning TikTok for more videos' : 'Scanning YouTube for more videos'}. This list updates automatically as new metadata arrives.`))
             : (channel?.sync_status_detail || `Scanning the channel and importing the initial video list from ${isTikTokChannel ? 'TikTok' : 'YouTube'}. This page updates automatically.`)
         : isDateBackfillActive
-            ? `Backfilling publication dates for ${missingDateCount} video${missingDateCount === 1 ? '' : 's'}.`
+            ? (channel?.sync_status_detail || (missingDateCount > 0
+                ? `Backfilling publication dates and metadata for ${missingDateCount} video${missingDateCount === 1 ? '' : 's'}.`
+                : 'Finishing metadata backfill for this channel. This page updates automatically.'))
             : null;
 
     if (loading) {

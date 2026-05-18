@@ -3,7 +3,6 @@ import type { ReactNode } from 'react';
 import type { ReconstructionWorkbench, Video, TranscriptSegment } from '../../../types';
 import { formatTime } from '../../../lib/formatters';
 import { useReconstructionStore } from '../../../store/useReconstructionStore';
-import { useCleanupStore } from '../../../store/useCleanupStore';
 
 type ReconstructionSidebarProps = {
     isActive: boolean;
@@ -160,10 +159,10 @@ export function ReconstructionTab({
         testingReconstructionSpeakerId, switchingReconstructionPlayback,
         selectedReconstructionPreviewSegmentId, setSelectedReconstructionPreviewSegmentId,
         reconstructionPreviewAudioUrl, reconstructionPreviewText,
+        previewingReconstructionSegment, savingReconstructionSettings,
         queueingReconstruction, reconstructionInstructionDraft, setReconstructionInstructionDraft,
         setReconstructionStudioTab,
     } = useReconstructionStore();
-    const { savingReconstructionSettings } = useCleanupStore();
 
     const selectedReconstructionSpeaker = reconstructionWorkbench?.speakers.find(
         (s) => s.speaker_id === selectedReconstructionSpeakerId

@@ -85,10 +85,10 @@ Zero errors = done.
 | 1 | AI Clone tab | `useCloneStore.ts` ✅ | `CloneTab.tsx` ✅ | ✅ | ✅ |
 | 2 | YouTube/Summary metadata tab | `useYoutubeStore.ts` ✅ | `YoutubeTab.tsx` ✅ | ✅ | ✅ |
 | 3 | Speakers tab | `useSpeakersTabStore.ts` ✅ | `SpeakersTab.tsx` ✅ | ✅ | ✅ |
-| 4 | Clips tab | `useClipsStore.ts` ✅ | `ClipsTab.tsx` ✅ | ✅ | ✅ |
-| 5 | Cleanup tab | `useCleanupStore.ts` | `CleanupTab.tsx` | | |
-| 6 | Reconstruction tab | `useReconstructionStore.ts` | `ReconstructionTab.tsx` | | |
-| 7 | Transcript + Optimize tabs | `useTranscriptStore.ts` | `TranscriptTab.tsx`, `OptimizeTab.tsx` | | |
+| 4 | Clips tab | `useClipsStore.ts` ✅ | `ClipsTab.tsx` ✅ + `ClipEditorWorkspace.tsx` ✅ | ✅ | ⚠️ |
+| 5 | Cleanup tab | `useCleanupStore.ts` ✅ | `CleanupTab.tsx` ✅ | ✅ | ⚠️ |
+| 6 | Reconstruction tab | `useReconstructionStore.ts` ✅ | `ReconstructionTab.tsx` ✅ | ✅ | ⚠️ |
+| 7 | Transcript + Optimize tabs | `useTranscriptStore.ts` ✅ | `TranscriptTab.tsx` ✅, `OptimizeTab.tsx` ✅ | ✅ | ✅ |
 | 8 | Player + shell | — | thin shell | | |
 | 9 | Settings.tsx | multiple stores | settings section components | | |
 | 10 | JobQueue.tsx | `useJobQueueStore.ts` | — | | |
@@ -462,13 +462,19 @@ const [clipBatchPresetKey, setClipBatchPresetKey] = useState<...>
 
 - [x] Grep for `{activeTab === 'clips' && (` to find the sidebar JSX block.
 - [x] Grep for `renderClipEditor` or `showClipEditorMain` to find the main-area clip editor block.
-- [ ] Move both JSX blocks into `ClipsTab.tsx`. Props: `video`, `videoId`, `segments`, `currentTime`, `isActive`, `onSeek`, `onVideoUpdated`.
-- [ ] Run `npx tsc --noEmit` — zero errors.
+- [x] Move both JSX blocks into `ClipsTab.tsx`. Props: `video`, `videoId`, `segments`, `currentTime`, `isActive`, `onSeek`, `onVideoUpdated`.
+  - Verified 2026-05-09: sidebar clips list lives in `ClipsTab.tsx`; the main editor workspace is extracted as `ClipEditorWorkspace.tsx` and rendered by `VideoDetailPage` when `showClipEditorMain` is true.
+  - Remaining deviation: transcript text selection and the slide-up "Create Clip" panel still live in `VideoDetailPage.tsx` because clip creation is triggered from transcript selection rather than the clips tab.
+- [x] Run `npx tsc --noEmit` — zero errors.
+  - Verified 2026-05-09 with `cd frontend && npx tsc --noEmit`.
 
 ### Task 4.3 — Integrate into VideoDetailPage
 
-- [ ] Replace JSX, remove state/functions, wire `resetClipsState`, update player section to read `useClipsStore((s) => s.clipPreviewLoop)`.
-- [ ] Run `npx tsc --noEmit` — zero errors.
+- [x] Replace JSX, remove state/functions, wire `resetClipsState`, update player section to read `useClipsStore((s) => s.clipPreviewLoop)`.
+  - Verified 2026-05-09: `VideoDetailPage.tsx` imports and renders `ClipsTab`, `ClipEditorWorkspace`, and reads `clipPreviewLoop` from `useClipsStore`.
+  - Remaining cleanup: `selection`, `handleMouseUp`, `handleCreateClip`, `fetchClips`, and `fetchClipExportArtifacts` still live in `VideoDetailPage.tsx` for transcript-selection-driven clip creation/fetch orchestration.
+- [x] Run `npx tsc --noEmit` — zero errors.
+  - Verified 2026-05-09 with `cd frontend && npx tsc --noEmit`.
 - [ ] Commit.
 
 ---
@@ -496,28 +502,38 @@ const [loadingClearVoiceInstallInfo, setLoadingClearVoiceInstallInfo]
 
 ### Task 5.1 — Audit shared state between Cleanup and Reconstruction
 
-- [ ] Grep for every variable used in BOTH `renderCleanupStudio()` and `renderReconstructionStudio()`:
+- [x] Grep for every variable used in BOTH `renderCleanupStudio()` and `renderReconstructionStudio()`:
   ```bash
   grep -n "voiceFixerBusy\|voiceFixerPaused\|reconstructionBusy\|reconstructionPaused\|workbenchTaskProgress\|auxiliaryJobs\|loadAuxiliaryJobs" \
     frontend/src/pages/video/VideoDetailPage.tsx
   ```
-- [ ] List which variables are shared, create `useWorkbenchStore.ts` for them.
+- [x] List which variables are shared, create `useWorkbenchStore.ts` for them.
+  - Verified 2026-05-09: `useWorkbenchStore.ts` exists and `VideoDetailPage.tsx` reads shared `auxiliaryJobs` / `workbenchTaskProgress` from it.
 
 ### Task 5.2 — Create `useWorkbenchStore.ts` (shared)
 
-- [ ] Create `frontend/src/store/useWorkbenchStore.ts` with polling logic for `auxiliaryJobs`, `workbenchTaskProgress`, voiceFixer and reconstruction busy/paused flags.
+- [x] Create `frontend/src/store/useWorkbenchStore.ts` with polling logic for `auxiliaryJobs`, `workbenchTaskProgress`, voiceFixer and reconstruction busy/paused flags.
+  - Verified 2026-05-09: shared store exists and TypeScript passes.
 
 ### Task 5.3 — Create `useCleanupStore.ts`
 
-- [ ] Move Cleanup-specific state and `renderCleanupStudio` logic into `frontend/src/store/useCleanupStore.ts`.
+- [x] Move Cleanup-specific state and `renderCleanupStudio` logic into `frontend/src/store/useCleanupStore.ts`.
+  - Verified 2026-05-09: cleanup-specific store exists and `CleanupTab.tsx` uses `useCleanupStore()`.
+  - Remaining cleanup: `VideoDetailPage.tsx` still contains an inline `renderCleanupStudio()` function and stale cleanup reset/fetch references (`setCleanupWorkbench`, `setClearVoiceInstallInfo`, `setClearVoiceTestResult`, `fetchCleanupWorkbench`, `fetchClearVoiceInstallInfo`) that appear to be dead/stale code paths after extraction but still compile.
 
 ### Task 5.4 — Create `CleanupTab.tsx`
 
-- [ ] Move `renderCleanupStudio()` JSX into `frontend/src/pages/video/tabs/CleanupTab.tsx`.
+- [x] Move `renderCleanupStudio()` JSX into `frontend/src/pages/video/tabs/CleanupTab.tsx`.
+  - Verified 2026-05-09: main cleanup stage renders `<CleanupTab />` from `VideoDetailPage.tsx`, and `CleanupTab.tsx` owns the cleanup UI.
 
 ### Task 5.5 — Integrate
 
-- [ ] Replace inline JSX, remove state/functions, commit.
+- [x] Replace inline JSX, remove state/functions, commit.
+  - Verified 2026-05-09: `VideoDetailPage.tsx` renders `<CleanupTab />` for the cleanup main stage.
+  - Remaining cleanup before marking phase truly done: delete stale inline `renderCleanupStudio()` and any obsolete cleanup reset/fetch references from `VideoDetailPage.tsx`.
+- [x] Run `npx tsc --noEmit` — zero errors.
+  - Verified 2026-05-09 with `cd frontend && npx tsc --noEmit`.
+- [ ] Commit.
 
 ---
 
@@ -527,16 +543,24 @@ Depends on `useWorkbenchStore` from Phase 5.
 
 ### Task 6.1 — Create `useReconstructionStore.ts`
 
-- [ ] Grep Reconstruction-specific state: `reconstructionWorkbench`, `selectedReconstructionSpeakerId`, `addingReconstructionSampleSpeakerId`, etc.
-- [ ] Move into `frontend/src/store/useReconstructionStore.ts`.
+- [x] Grep Reconstruction-specific state: `reconstructionWorkbench`, `selectedReconstructionSpeakerId`, `addingReconstructionSampleSpeakerId`, etc.
+- [x] Move into `frontend/src/store/useReconstructionStore.ts`.
+  - Verified 2026-05-09: reconstruction-specific store exists and `VideoDetailPage.tsx` reads reconstruction state/actions from it.
 
 ### Task 6.2 — Create `ReconstructionTab.tsx`
 
-- [ ] Move `renderReconstructionStudio()` (which calls `renderReconstructionVoiceReview()` and `renderReconstructionBuildSuite()`) into `frontend/src/pages/video/tabs/ReconstructionTab.tsx`. Convert the three render functions to local components or inline JSX.
+- [x] Move `renderReconstructionStudio()` (which calls `renderReconstructionVoiceReview()` and `renderReconstructionBuildSuite()`) into `frontend/src/pages/video/tabs/ReconstructionTab.tsx`. Convert the three render functions to local components or inline JSX.
+  - Verified 2026-05-09: `ReconstructionTab.tsx` exports both `ReconstructionSidebarTab` and `ReconstructionTab`, and contains local reconstruction voice/build render functions.
+  - Remaining deviation: `ReconstructionTab` receives a broad `ctx: any` prop with many callbacks/state values still assembled in `VideoDetailPage.tsx`; further cleanup should move more orchestration into `useReconstructionStore` or typed props.
 
 ### Task 6.3 — Integrate
 
-- [ ] Replace inline JSX, remove state/functions, commit.
+- [x] Replace inline JSX, remove state/functions, commit.
+  - Verified 2026-05-09: `VideoDetailPage.tsx` renders `ReconstructionSidebarTab` and `ReconstructionTab` for reconstruction routes.
+  - Remaining cleanup before marking phase truly done: remove root-level reconstruction handler wrappers where possible and replace `ctx: any` with typed props or store-driven actions.
+- [x] Run `npx tsc --noEmit` — zero errors.
+  - Verified 2026-05-09 with `cd frontend && npx tsc --noEmit`.
+- [ ] Commit.
 
 ---
 
@@ -555,21 +579,23 @@ Depends on `useWorkbenchStore` from Phase 5.
 
 ### Task 7.1 — Create `useTranscriptStore.ts`
 
-- [ ] Move all transcript-tab-specific state (segment editing, search, follow-playback, funny moments, gold windows, evaluation, transcript quality, rollback options) into `frontend/src/store/useTranscriptStore.ts`.
-- [ ] Keep `segments` in VideoDetailPage (or a new `useVideoStore`).
+- [x] Move all transcript-tab-specific state (segment editing, search, follow-playback, funny moments, gold windows, evaluation, transcript quality, rollback options) into `frontend/src/store/useTranscriptStore.ts`.
+- [x] Keep `segments` in VideoDetailPage (or a new `useVideoStore`).
 
 ### Task 7.2 — Create `TranscriptTab.tsx`
 
-- [ ] Find the `{activeTab === 'transcript' && (` sidebar block and `{!showClipEditorMain && activeTab === 'transcript' && (` main block.
-- [ ] Move into `frontend/src/pages/video/tabs/TranscriptTab.tsx`. Props: `video`, `videoId`, `segments`, `currentTime`, `isActive`, `onSeek`.
+- [x] Find the `{activeTab === 'transcript' && (` sidebar block and `{!showClipEditorMain && activeTab === 'transcript' && (` main block.
+- [x] Move into `frontend/src/pages/video/tabs/TranscriptTab.tsx`. Props: `video`, `videoId`, `segments`, `currentTime`, `isActive`, `onSeek`.
 
 ### Task 7.3 — Create `OptimizeTab.tsx`
 
-- [ ] Move `renderTranscriptOptimizationWorkbench()` JSX (~line 4683) into `frontend/src/pages/video/tabs/OptimizeTab.tsx`.
+- [x] Move `renderTranscriptOptimizationWorkbench()` JSX (~line 4683) into `frontend/src/pages/video/tabs/OptimizeTab.tsx`.
+  - Completed 2026-05-10: `OptimizeTab.tsx` owns the optimize fetch side effect, snapshot card, rollback controls, repair/rebuild/retranscribe actions, benchmark gold-window form, and evaluation review UI.
 
 ### Task 7.4 — Integrate both
 
-- [ ] Replace inline JSX blocks, remove state/functions, commit.
+- [x] Replace inline JSX blocks, remove state/functions, commit.
+  - Completed 2026-05-10: `VideoDetailPage.tsx` now passes only video/selection/player callbacks into `TranscriptTab.tsx` and `OptimizeTab.tsx`; `segments` remains root-level for shared player/tab usage.
 
 ---
 
@@ -585,6 +611,7 @@ After all tabs are extracted, VideoDetailPage should contain only:
 
 - [ ] Create `frontend/src/store/usePlayerStore.ts` for `currentTime`, `playbackRate`, `player`.
 - [ ] Move `renderMainPlayer()`, `renderPlaybackRateControl()`, `renderUploadedPlaybackSourceSwitcher()` into `frontend/src/components/video/VideoPlayer.tsx`.
+  - Progress 2026-05-10: created `frontend/src/components/video/VideoPlayer.tsx` and moved the main player render body for YouTube/native audio/video playback out of `VideoDetailPage.tsx`. Playback rate controls and uploaded playback source switcher still remain in `VideoDetailPage.tsx` and are passed as `playbackControls` pending the next Phase 8 increment.
 
 ### Task 8.2 — Extract video meta
 

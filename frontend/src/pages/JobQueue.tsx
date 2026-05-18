@@ -2136,12 +2136,16 @@ const getStatusLabel = (status: string): string => {
                                                                 const elapsed = getJobElapsedSeconds(job);
                                                                 const stageTotal = processStageSummary?.activeDuration ?? runtime;
                                                                 const wallElapsed = processStageSummary?.elapsedDuration ?? elapsed;
+                                                                const transcribeStage = processStageSummary?.transcribeDuration ?? null;
                                                                 const isProcess = (job.job_type || '').toLowerCase() === 'process';
                                                                 const videoLengthSeconds =
                                                                     typeof job.video?.duration === 'number' && job.video.duration > 0
                                                                         ? job.video.duration
                                                                         : null;
-                                                                const realtimeRatio = isProcess
+                                                                const transcriptionRatio = isProcess
+                                                                    ? getRealtimeRatioLabel(videoLengthSeconds, transcribeStage)
+                                                                    : null;
+                                                                const pipelineRatio = isProcess
                                                                     ? getRealtimeRatioLabel(videoLengthSeconds, stageTotal)
                                                                     : null;
                                                                 return (
@@ -2154,9 +2158,14 @@ const getStatusLabel = (status: string): string => {
                                                                                 video {formatDuration(videoLengthSeconds)}
                                                                             </div>
                                                                         )}
-                                                                        {isProcess && realtimeRatio && (
+                                                                        {isProcess && transcriptionRatio && (
                                                                             <div className="text-[11px] text-slate-400 mt-0.5">
-                                                                                speed {realtimeRatio}
+                                                                                transcribe {transcriptionRatio}
+                                                                            </div>
+                                                                        )}
+                                                                        {isProcess && pipelineRatio && pipelineRatio !== transcriptionRatio && (
+                                                                            <div className="text-[11px] text-slate-400 mt-0.5">
+                                                                                pipeline {pipelineRatio}
                                                                             </div>
                                                                         )}
                                                                         {isProcess && wallElapsed != null && stageTotal != null && Math.abs(wallElapsed - stageTotal) >= 1 && (

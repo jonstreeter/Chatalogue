@@ -3379,6 +3379,17 @@ class IngestionService:
 
         if stage_key == "download" and not payload.get("pipeline_started_at"):
             fields["pipeline_started_at"] = now_iso
+        if stage_key == "diarize":
+            transcribe_started_at = payload.get("stage_transcribe_started_at") or payload.get("stage_transcribing_started_at")
+            transcribe_completed_at = payload.get("stage_transcribe_completed_at")
+            if transcribe_started_at and not transcribe_completed_at:
+                fields["stage_transcribe_completed_at"] = now_iso
+                try:
+                    start_dt = datetime.fromisoformat(str(transcribe_started_at))
+                    now_dt = datetime.fromisoformat(now_iso)
+                    fields["stage_transcribe_seconds"] = max(0.0, (now_dt - start_dt).total_seconds())
+                except Exception:
+                    pass
         self._upsert_job_payload_fields(job_id, fields)
 
     def _strip_transient_job_payload_fields(self, payload: dict | None) -> dict:

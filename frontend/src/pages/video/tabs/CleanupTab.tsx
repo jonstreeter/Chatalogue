@@ -9,7 +9,7 @@ import {
     Sparkles,
     FileText,
 } from 'lucide-react';
-import type { Video, Job, WorkbenchTaskProgress, CleanupWorkbench, ClearVoiceInstallInfo, ClearVoiceTestResult } from '../../../types';
+import type { Video, Job, WorkbenchTaskProgress } from '../../../types';
 import { useCleanupStore } from '../../../store/useCleanupStore';
 import { useWorkbenchStore } from '../../../store/useWorkbenchStore';
 
@@ -354,7 +354,7 @@ interface CleanupTabProps {
     isActive: boolean;
     onVideoUpdated: (v: Video) => void;
     episodeBusy: boolean;
-    renderMainPlayer: (containerClassName: string) => React.ReactNode;
+    playerNode: React.ReactNode;
     onNavigateToTranscript: () => void;
 }
 
@@ -365,7 +365,7 @@ export function CleanupTab({
     isActive,
     onVideoUpdated,
     episodeBusy,
-    renderMainPlayer,
+    playerNode,
     onNavigateToTranscript,
 }: CleanupTabProps) {
     // derived from video prop
@@ -446,7 +446,7 @@ export function CleanupTab({
             : null;
     const cleanupWorkbenchProgress =
         currentWorkbenchProgress &&
-        String(currentWorkbenchProgress.area || '').toLowerCase() === 'cleanup'
+            String(currentWorkbenchProgress.area || '').toLowerCase() === 'cleanup'
             ? currentWorkbenchProgress
             : null;
 
@@ -781,7 +781,7 @@ export function CleanupTab({
                                 </span>
                             </div>
                             <div className="mt-4 overflow-hidden rounded-[24px] border border-slate-200 bg-black">
-                                {renderMainPlayer('h-[360px] w-full')}
+                                {playerNode}
                             </div>
                             <div className="mt-4 grid gap-3 md:grid-cols-3">
                                 <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">

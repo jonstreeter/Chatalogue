@@ -86,7 +86,7 @@ echo     timeout /t 3 /nobreak ^>nul
 echo     goto restart_loop
 echo ^)
 ) > "%BACKEND_RESTART_SCRIPT%"
-start /B "" cmd.exe /c ""%BACKEND_RESTART_SCRIPT%""
+start /B "" cmd.exe /c ""%BACKEND_RESTART_SCRIPT%" <nul"
 
 :: Wait for backend readiness before starting frontend
 echo Waiting for backend to become ready...
@@ -117,7 +117,7 @@ exit /b 1
 
 :: Start Frontend
 echo Starting Frontend on http://localhost:5173 ...
-start "Chatalogue Frontend" /B cmd.exe /c "cd /d ""%FRONTEND_DIR%"" && npm run dev 1>""%FRONTEND_LOG%"" 2>&1"
+start "Chatalogue Frontend" /B cmd.exe /c "cd /d ""%FRONTEND_DIR%"" && npm run dev 1>""%FRONTEND_LOG%"" 2>&1 <nul"
 
 :: Wait for frontend dev server to bind, then open browser
 timeout /t 2 /nobreak >nul
@@ -139,6 +139,9 @@ echo Press any key to stop all servers...
 pause >nul
 echo.
 echo Stopping servers...
+echo Gracefully shutting down Postgres...
+cd /d "%BACKEND_DIR%"
+"%VENV_PYTHON%" manage_embedded_postgres.py stop
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":%BACKEND_PORT%.*LISTENING" 2^>nul') do (
     taskkill /F /T /PID %%a >nul 2>&1
 )

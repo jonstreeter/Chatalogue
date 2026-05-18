@@ -624,6 +624,54 @@ class VideoDescriptionRevisionRead(SQLModel):
     note: Optional[str] = None
     created_at: datetime
 
+class EpisodeChatThread(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    video_id: int = Field(foreign_key="video.id", index=True)
+    channel_id: Optional[int] = Field(default=None, foreign_key="channel.id", index=True)
+    title: str = Field(default="New Chat")
+    status: str = Field(default="active", index=True)  # active | archived
+    scope_mode: str = Field(default="episode", index=True)  # episode | episode_related
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    system_prompt: Optional[str] = None
+    last_message_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
+
+
+class EpisodeChatMessage(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    thread_id: int = Field(foreign_key="episodechatthread.id", index=True)
+    role: str = Field(index=True)  # user | assistant
+    status: str = Field(default="completed", index=True)  # running | completed | failed | cancelled
+    content: str = Field(default="")
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    parent_message_id: Optional[int] = Field(default=None, foreign_key="episodechatmessage.id", index=True)
+    error: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    completed_at: Optional[datetime] = None
+
+
+class EpisodeChatMessageContext(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    message_id: int = Field(foreign_key="episodechatmessage.id", index=True, unique=True)
+    video_id: int = Field(foreign_key="video.id", index=True)
+    scope_mode: str = Field(default="episode", index=True)
+    retrieval_mode: Optional[str] = None
+    semantic_query: Optional[str] = None
+    recent_history_json: Optional[str] = None
+    citations_json: Optional[str] = None
+    related_citations_json: Optional[str] = None
+    retrieved_chunk_ids_json: Optional[str] = None
+    retrieved_segment_ids_json: Optional[str] = None
+    related_video_ids_json: Optional[str] = None
+    used_related_context: bool = Field(default=False)
+    prompt_version: str = Field(default="episode-chat-v2")
+    token_estimate: int = Field(default=0)
+    latency_ms: Optional[int] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
 class TranscriptSegmentRevisionRead(SQLModel):
     id: int
     segment_id: int
@@ -713,6 +761,12 @@ def _column_migrations() -> list[tuple[str, str, str, str]]:
         ("funnymoment", "humor_model", "TEXT", "TEXT"),
         ("funnymoment", "humor_explained_at", "TEXT", "TIMESTAMP"),
         ("job", "payload_json", "TEXT", "TEXT"),
+        ("episodechatthread", "scope_mode", "TEXT", "TEXT"),
+        ("episodechatmessagecontext", "scope_mode", "TEXT", "TEXT"),
+        ("episodechatmessagecontext", "retrieval_mode", "TEXT", "TEXT"),
+        ("episodechatmessagecontext", "related_citations_json", "TEXT", "TEXT"),
+        ("episodechatmessagecontext", "related_video_ids_json", "TEXT", "TEXT"),
+        ("episodechatmessagecontext", "used_related_context", "BOOLEAN", "BOOLEAN"),
         ("speakerembedding", "sample_start_time", "REAL", "DOUBLE PRECISION"),
         ("speakerembedding", "sample_end_time", "REAL", "DOUBLE PRECISION"),
         ("speakerembedding", "sample_text", "TEXT", "TEXT"),
@@ -798,6 +852,13 @@ def _ensure_indexes(conn: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_transcriptoptimizationcampaignitem_campaign_status ON transcriptoptimizationcampaignitem(campaign_id, status, action_tier)",
         "CREATE INDEX IF NOT EXISTS idx_transcriptoptimizationcampaignitem_video_status ON transcriptoptimizationcampaignitem(video_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_videodescriptionrevision_video_created ON videodescriptionrevision(video_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_episodechatthread_video_updated ON episodechatthread(video_id, updated_at DESC, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_episodechatthread_video_status_updated ON episodechatthread(video_id, status, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_episodechatthread_video_scope_updated ON episodechatthread(video_id, scope_mode, updated_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_episodechatmessage_thread_created ON episodechatmessage(thread_id, created_at, id)",
+        "CREATE INDEX IF NOT EXISTS idx_episodechatmessage_thread_role_created ON episodechatmessage(thread_id, role, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_episodechatmessagecontext_video_created ON episodechatmessagecontext(video_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_episodechatmessagecontext_scope_created ON episodechatmessagecontext(scope_mode, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_clipexportartifact_clip_created ON clipexportartifact(clip_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_clipexportartifact_video_created ON clipexportartifact(video_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_transcriptchunkembedding_video_id ON transcriptchunkembedding(video_id)",
@@ -849,6 +910,12 @@ def _backfill_video_defaults(conn: Any) -> None:
     conn.execute(text("UPDATE video SET access_restricted=FALSE WHERE access_restricted IS NULL"))
 
 
+def _backfill_episode_chat_defaults(conn: Any) -> None:
+    conn.execute(text("UPDATE episodechatthread SET scope_mode='episode' WHERE scope_mode IS NULL OR TRIM(scope_mode) = ''"))
+    conn.execute(text("UPDATE episodechatmessagecontext SET scope_mode='episode' WHERE scope_mode IS NULL OR TRIM(scope_mode) = ''"))
+    conn.execute(text("UPDATE episodechatmessagecontext SET used_related_context=FALSE WHERE used_related_context IS NULL"))
+
+
 def _reset_postgres_sequences(conn: Any) -> None:
     if not IS_POSTGRES:
         return
@@ -873,6 +940,9 @@ def _reset_postgres_sequences(conn: Any) -> None:
         "clipexportartifact",
         "funnymoment",
         "videodescriptionrevision",
+        "episodechatthread",
+        "episodechatmessage",
+        "episodechatmessagecontext",
     ]
     for table in tables:
         conn.execute(
@@ -919,6 +989,9 @@ def _migrate_sqlite_to_postgres_if_needed() -> None:
         "clipexportartifact",
         "funnymoment",
         "videodescriptionrevision",
+        "episodechatthread",
+        "episodechatmessage",
+        "episodechatmessagecontext",
     ]
 
     with engine.begin() as pg_conn:
@@ -1011,3 +1084,4 @@ def create_db_and_tables():
         _backfill_clip_defaults(conn)
         _backfill_channel_defaults(conn)
         _backfill_video_defaults(conn)
+        _backfill_episode_chat_defaults(conn)

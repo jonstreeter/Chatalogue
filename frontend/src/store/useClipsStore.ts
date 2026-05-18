@@ -30,6 +30,12 @@ export type ClipPreviewLoop = {
     clipId: number;
 };
 
+export type ClipSelection = {
+    start: number;
+    end: number;
+    defaultTitle: string;
+} | null;
+
 export type ClipBatchPresetKey = 'youtube_landscape' | 'shorts_vertical' | 'square_captioned' | 'audio_focus';
 export type ClipUploadPrivacy = 'private' | 'unlisted' | 'public';
 
@@ -114,6 +120,7 @@ export interface ClipsState {
     clipUploadPrivacy: ClipUploadPrivacy;
     clipPreviewLoop: ClipPreviewLoop | null;
     clipBatchPresetKey: ClipBatchPresetKey;
+    clipSelection: ClipSelection;
     clipTitle: string;
     creatingClip: boolean;
 
@@ -137,10 +144,12 @@ export interface ClipsState {
     setClipUploadPrivacy: (privacy: ClipUploadPrivacy) => void;
     setClipPreviewLoop: (value: SetStateValue<ClipPreviewLoop | null>) => void;
     setClipBatchPresetKey: (key: ClipBatchPresetKey) => void;
+    setClipSelection: (selection: ClipSelection) => void;
     setClipTitle: (title: string) => void;
 
     fetchClips: (videoId: number) => Promise<void>;
     createClip: (videoId: number, input: { start: number; end: number; title: string }) => Promise<Clip | null>;
+    createClipFromSelection: (videoId: number) => Promise<Clip | null>;
     fetchClipExportArtifacts: (videoId: number) => Promise<void>;
     deleteClip: (clipId: number) => Promise<void>;
     saveClipEdit: (clipId: number) => Promise<boolean>;
@@ -152,6 +161,7 @@ export interface ClipsState {
     batchExportSelectedClips: () => Promise<void>;
     queueRenderSelectedClips: () => Promise<void>;
     batchUploadSelectedClips: () => Promise<void>;
+    startClipEdit: (clip: Clip) => void;
     toggleClipPreviewLoop: (clip: Clip, onSeek: (seconds: number) => void) => void;
     cancelClipEdit: () => void;
     resetClipsState: () => void;
@@ -180,6 +190,7 @@ export const useClipsStore = create<ClipsState>()(
             clipUploadPrivacy: 'private',
             clipPreviewLoop: null,
             clipBatchPresetKey: 'youtube_landscape',
+            clipSelection: null,
             clipTitle: '',
             creatingClip: false,
 
@@ -222,6 +233,7 @@ export const useClipsStore = create<ClipsState>()(
             setClipPreviewLoop: (value) =>
                 set({ clipPreviewLoop: resolveValue(value, get().clipPreviewLoop) }, false, 'setClipPreviewLoop'),
             setClipBatchPresetKey: (key) => set({ clipBatchPresetKey: key }, false, 'setClipBatchPresetKey'),
+            setClipSelection: (selection) => set({ clipSelection: selection }, false, 'setClipSelection'),
             setClipTitle: (title) => set({ clipTitle: title }, false, 'setClipTitle'),
 
             fetchClips: async (videoId) => {
@@ -264,6 +276,20 @@ export const useClipsStore = create<ClipsState>()(
                 } finally {
                     set({ creatingClip: false }, false, 'createClip/settled');
                 }
+            },
+
+            createClipFromSelection: async (videoId) => {
+                const selection = get().clipSelection;
+                if (!selection) return null;
+                const createdClip = await get().createClip(videoId, {
+                    start: selection.start,
+                    end: selection.end,
+                    title: get().clipTitle || selection.defaultTitle,
+                });
+                if (createdClip) {
+                    set({ clipSelection: null }, false, 'createClipFromSelection/clearSelection');
+                }
+                return createdClip;
             },
 
             fetchClipExportArtifacts: async (videoId) => {
@@ -538,6 +564,28 @@ export const useClipsStore = create<ClipsState>()(
                 }
             },
 
+            startClipEdit: (clip) => {
+                const nextDraft: Partial<Clip> = {
+                    ...clip,
+                    aspect_ratio: clip.aspect_ratio || 'source',
+                    portrait_split_enabled: clip.portrait_split_enabled ?? false,
+                    fade_in_sec: clip.fade_in_sec ?? 0,
+                    fade_out_sec: clip.fade_out_sec ?? 0,
+                    burn_captions: clip.burn_captions ?? false,
+                    caption_speaker_labels: clip.caption_speaker_labels ?? true,
+                };
+                set(
+                    {
+                        editingClipId: clip.id,
+                        clipEditorDraft: nextDraft,
+                        clipEditorCropTarget: 'main',
+                        clipEditorDragRect: null,
+                    },
+                    false,
+                    'startClipEdit'
+                );
+            },
+
             toggleClipPreviewLoop: (clip, onSeek) => {
                 if (get().clipPreviewLoop?.clipId === clip.id) {
                     set({ clipPreviewLoop: null }, false, 'toggleClipPreviewLoop/stop');
@@ -589,6 +637,7 @@ export const useClipsStore = create<ClipsState>()(
                         clipUploadPrivacy: 'private',
                         clipPreviewLoop: null,
                         clipBatchPresetKey: 'youtube_landscape',
+                        clipSelection: null,
                         clipTitle: '',
                         creatingClip: false,
                     },

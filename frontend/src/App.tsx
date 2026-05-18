@@ -8,6 +8,7 @@ import { ChannelVideos } from './pages/channel/ChannelVideos';
 import { ChannelSpeakers } from './pages/channel/ChannelSpeakers';
 import { ChannelSearch } from './pages/channel/ChannelSearch';
 import { ChannelClips } from './pages/channel/ChannelClips';
+import { ChannelChats } from './pages/channel/ChannelChats';
 import { JobQueue } from './pages/JobQueue';
 import { Settings } from './pages/Settings';
 import { Speakers } from './pages/Speakers';
@@ -205,6 +206,7 @@ function App() {
             <Route index element={<ChannelVideos />} />
             <Route path="transcripts" element={<ChannelSearch />} />
             <Route path="speakers" element={<ChannelSpeakers />} />
+            <Route path="chats" element={<ChannelChats />} />
             <Route path="search" element={<Navigate to="../transcripts" replace />} />
             <Route path="clips" element={<ChannelClips />} />
           </Route>

@@ -1,6 +1,6 @@
 
 import { NavLink, Outlet, useParams, useNavigate } from 'react-router-dom';
-import { Video, FileText, Users, Scissors, ArrowLeft, Trash2, Download, Loader2, Link2, CheckCircle2, AlertCircle, AudioLines, RotateCcw } from 'lucide-react';
+import { Video, FileText, Users, Scissors, ArrowLeft, Trash2, Download, Loader2, Link2, CheckCircle2, AlertCircle, AudioLines, RotateCcw, MessageSquareText } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import api from '../lib/api';
@@ -11,6 +11,7 @@ const tabs = [
     { path: '', label: 'Videos', icon: Video },
     { path: 'transcripts', label: 'Transcripts', icon: FileText },
     { path: 'speakers', label: 'Speakers', icon: Users },
+    { path: 'chats', label: 'Chats', icon: MessageSquareText },
     { path: 'clips', label: 'Clips', icon: Scissors },
 ];
 
@@ -220,7 +221,7 @@ export function ChannelDetail() {
 
             {/* Tab Navigation */}
             <div className="glass-panel rounded-2xl p-2">
-                <nav className="grid grid-cols-4 gap-1 sm:flex sm:flex-wrap">
+                <nav className="grid grid-cols-5 gap-1 sm:flex sm:flex-wrap">
                     {tabs.map((tab) => {
                         const Icon = tab.icon;
                         return (

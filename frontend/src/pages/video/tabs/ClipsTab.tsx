@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Clock, Download, Loader2, Pencil, Play, Scissors, Trash2, Upload } from 'lucide-react';
 import { formatTime } from '../../../lib/formatters';
 import {
@@ -6,12 +7,11 @@ import {
     type ClipBatchPresetKey,
     type ClipUploadPrivacy,
 } from '../../../store/useClipsStore';
-import type { Clip } from '../../../types';
 
 type Props = {
+    videoId: number;
     isActive: boolean;
     onSeek: (seconds: number) => void;
-    onStartClipEdit: (clip: Clip) => void;
 };
 
 function formatFileSize(bytes?: number) {
@@ -26,7 +26,7 @@ function formatFileSize(bytes?: number) {
     return `${size.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
 }
 
-export function ClipsTab({ isActive, onSeek, onStartClipEdit }: Props) {
+export function ClipsTab({ videoId, isActive, onSeek }: Props) {
     const clips = useClipsStore((s) => s.clips);
     const clipExportArtifactsByClip = useClipsStore((s) => s.clipExportArtifactsByClip);
     const loadingClips = useClipsStore((s) => s.loadingClips);
@@ -54,7 +54,14 @@ export function ClipsTab({ isActive, onSeek, onStartClipEdit }: Props) {
     const batchExportSelectedClips = useClipsStore((s) => s.batchExportSelectedClips);
     const queueRenderSelectedClips = useClipsStore((s) => s.queueRenderSelectedClips);
     const batchUploadSelectedClips = useClipsStore((s) => s.batchUploadSelectedClips);
+    const startClipEdit = useClipsStore((s) => s.startClipEdit);
     const toggleClipPreviewLoop = useClipsStore((s) => s.toggleClipPreviewLoop);
+
+    useEffect(() => {
+        if (!isActive) return;
+        void useClipsStore.getState().fetchClips(videoId);
+        void useClipsStore.getState().fetchClipExportArtifacts(videoId);
+    }, [isActive, videoId]);
 
     if (!isActive) return null;
 
@@ -207,7 +214,7 @@ export function ClipsTab({ isActive, onSeek, onStartClipEdit }: Props) {
                                                 {isLooping ? 'Stop Loop' : 'Loop'}
                                             </button>
                                             <button
-                                                onClick={() => isEditing ? cancelClipEdit() : onStartClipEdit(clip)}
+                                                onClick={() => isEditing ? cancelClipEdit() : startClipEdit(clip)}
                                                 className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded"
                                                 title="Edit clip trim/export settings"
                                             >
