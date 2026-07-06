@@ -88,7 +88,11 @@ IF ERRORLEVEL 1 (
 REM --- Python ---
 echo [Prerequisites] Checking Python...
 SET "PYTHON_CMD="
-where py >nul 2>&1 && SET "PYTHON_CMD=py -3"
+where py >nul 2>&1 && (
+  py -3.12 --version >nul 2>&1 && SET "PYTHON_CMD=py -3.12"
+  IF "!PYTHON_CMD!"=="" py -3.11 --version >nul 2>&1 && SET "PYTHON_CMD=py -3.11"
+  IF "!PYTHON_CMD!"=="" py -3.10 --version >nul 2>&1 && SET "PYTHON_CMD=py -3.10"
+)
 IF "!PYTHON_CMD!"=="" (
   where python >nul 2>&1 && SET "PYTHON_CMD=python"
 )
@@ -105,7 +109,11 @@ IF "!PYTHON_CMD!"=="" (
       FOR /F "tokens=2*" %%A IN ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>nul') DO SET "SYS_PATH=%%B"
       FOR /F "tokens=2*" %%A IN ('reg query "HKCU\Environment" /v Path 2^>nul') DO SET "USR_PATH=%%B"
       SET "PATH=!SYS_PATH!;!USR_PATH!"
-      where py >nul 2>&1 && SET "PYTHON_CMD=py -3"
+      where py >nul 2>&1 && (
+        py -3.12 --version >nul 2>&1 && SET "PYTHON_CMD=py -3.12"
+        IF "!PYTHON_CMD!"=="" py -3.11 --version >nul 2>&1 && SET "PYTHON_CMD=py -3.11"
+        IF "!PYTHON_CMD!"=="" py -3.10 --version >nul 2>&1 && SET "PYTHON_CMD=py -3.10"
+      )
       IF "!PYTHON_CMD!"=="" (
         where python >nul 2>&1 && SET "PYTHON_CMD=python"
       )

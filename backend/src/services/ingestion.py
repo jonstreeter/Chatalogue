@@ -6714,20 +6714,124 @@ class IngestionService:
 
         word_timestamps = bool(kwargs.get("word_timestamps", True))
         beam_size = max(1, int(kwargs.get("beam_size", 1) or 1))
-        batch_size = 8 if os.getenv("TRANSCRIPTION_BATCHED", "true").strip().lower() == "true" else 1
         total_duration = float(self._probe_audio_duration_seconds(Path(audio_path)) or 0.0)
+
+        def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
+            try:
+                value = int((os.getenv(name) or str(default)).strip() or default)
+            except Exception:
+                value = default
+            return max(min_value, min(value, max_value))
+
+        def _resolve_initial_batch_size() -> int:
+            if os.getenv("TRANSCRIPTION_BATCHED", "true").strip().lower() != "true":
+                return 1
+            requested = _env_int("TRANSFORMERS_WHISPER_BATCH_SIZE", 4, 1, 16)
+            if self.device != "cuda":
+                return requested
+            snap = self._cuda_memory_snapshot()
+            free_b = int(snap.get("free") or 0)
+            total_b = int(snap.get("total") or self._gpu_total_vram_bytes or 0)
+            free_gb = float(free_b) / (1024 ** 3) if free_b > 0 else 0.0
+            free_ratio = (float(free_b) / float(total_b)) if total_b > 0 and free_b > 0 else 0.0
+            cap = 8
+            if free_gb < 8.0 or free_ratio < 0.25:
+                cap = 1
+            elif free_gb < 12.0 or free_ratio < 0.35:
+                cap = 2
+            elif free_gb < 18.0 or free_ratio < 0.50:
+                cap = 4
+            return max(1, min(requested, cap))
+
+        initial_batch_size = _resolve_initial_batch_size()
+        initial_chunk_length = _env_int("TRANSFORMERS_WHISPER_CHUNK_LENGTH_S", 30, 5, 30)
 
         generate_kwargs = {"task": "transcribe", "num_beams": beam_size}
         language_hint = self._resolve_whisper_language_hint(kwargs.get("language"))
         if language_hint:
             generate_kwargs["language"] = language_hint
-        result = pipeline_runner(
-            str(audio_path),
-            chunk_length_s=30,
-            batch_size=batch_size,
-            return_timestamps="word" if word_timestamps else True,
-            generate_kwargs=generate_kwargs,
-        )
+        attempts = []
+        seen = set()
+        batch_candidates = [initial_batch_size]
+        if initial_batch_size > 4:
+            batch_candidates.append(4)
+        if initial_batch_size > 2:
+            batch_candidates.append(2)
+        if initial_batch_size > 1:
+            batch_candidates.append(1)
+        chunk_candidates = [initial_chunk_length]
+        if initial_chunk_length > 20:
+            chunk_candidates.append(20)
+        if initial_chunk_length > 15:
+            chunk_candidates.append(15)
+        if initial_chunk_length > 10:
+            chunk_candidates.append(10)
+        for batch_candidate in batch_candidates:
+            for chunk_candidate in chunk_candidates:
+                key = (int(batch_candidate), int(chunk_candidate))
+                if key not in seen:
+                    seen.add(key)
+                    attempts.append(key)
+
+        result = None
+        last_oom = None
+        for attempt_index, (batch_size, chunk_length_s) in enumerate(attempts, start=1):
+            if self.device == "cuda":
+                self._log_cuda_memory(f"pre_transformers_whisper_attempt_{attempt_index}", job_id=kwargs.get("job_id"))
+            try:
+                log_verbose(
+                    "Transformers Whisper transcription attempt "
+                    f"{attempt_index}/{len(attempts)} "
+                    f"(batch_size={batch_size}, chunk_length_s={chunk_length_s}, beams={beam_size})"
+                )
+                result = pipeline_runner(
+                    str(audio_path),
+                    chunk_length_s=chunk_length_s,
+                    batch_size=batch_size,
+                    return_timestamps="word" if word_timestamps else True,
+                    generate_kwargs=generate_kwargs,
+                )
+                if self.device == "cuda":
+                    self._log_cuda_memory(f"post_transformers_whisper_attempt_{attempt_index}", job_id=kwargs.get("job_id"))
+                if attempt_index > 1:
+                    self._upsert_job_payload_fields(
+                        kwargs.get("job_id"),
+                        {
+                            "transformers_whisper_oom_recovered": True,
+                            "transformers_whisper_recovery_attempt": int(attempt_index),
+                            "transformers_whisper_batch_size_effective": int(batch_size),
+                            "transformers_whisper_chunk_length_s_effective": int(chunk_length_s),
+                        },
+                    )
+                break
+            except Exception as e:
+                if not self._is_cuda_oom(e):
+                    raise
+                last_oom = e
+                self._upsert_job_payload_fields(
+                    kwargs.get("job_id"),
+                    {
+                        "transformers_whisper_cuda_oom": True,
+                        "transformers_whisper_oom_attempt": int(attempt_index),
+                        "transformers_whisper_oom_batch_size": int(batch_size),
+                        "transformers_whisper_oom_chunk_length_s": int(chunk_length_s),
+                        "transformers_whisper_oom_error": str(e)[:800],
+                    },
+                )
+                log(
+                    "Transformers Whisper CUDA OOM "
+                    f"(attempt {attempt_index}/{len(attempts)}, batch_size={batch_size}, "
+                    f"chunk_length_s={chunk_length_s}). Retrying with safer settings."
+                )
+                self._clear_cuda_cache()
+
+        if result is None:
+            if last_oom is not None:
+                raise RuntimeError(
+                    "Transformers Whisper failed due to CUDA OOM after retrying reduced "
+                    "batch/chunk settings. Falling back to a safer Whisper backend or CPU is required."
+                ) from last_oom
+            raise RuntimeError("Transformers Whisper returned no transcription result.")
 
         chunk_items = result.get("chunks") if isinstance(result, dict) else None
         words = []
@@ -16546,7 +16650,37 @@ class IngestionService:
                 )
                 whisper_info = info
             except RuntimeError as e:
-                if "CUBLAS" in str(e).upper():
+                if self._is_cuda_oom(e) and whisper_backend != "faster_whisper":
+                    log("Transformers Whisper CUDA OOM during transcription - falling back to faster-whisper.")
+                    self._update_job_status_detail(job_id, "Whisper VRAM pressure detected. Retrying with safer backend...")
+                    self._upsert_job_payload_fields(
+                        job_id,
+                        {
+                            "whisper_backend_oom_fallback_from": whisper_backend,
+                            "whisper_backend_oom_fallback_to": "faster_whisper",
+                            "whisper_backend_oom_fallback_reason": str(e)[:800],
+                        },
+                    )
+                    self._release_whisper_model("transformers_whisper_oom_fallback", job_id=job_id)
+                    self._clear_cuda_cache()
+                    self._load_whisper_model(
+                        job_id=job_id,
+                        force_float32=False,
+                        model_size_override=whisper_model_override,
+                        backend_override="faster_whisper",
+                    )
+                    whisper_backend = self._whisper_backend or "faster_whisper"
+                    use_batched = False
+                    whisper_runtime_device = self._whisper_device or self.device
+                    segments_generator, info = _run_transcribe_with_stage_start(
+                        self.whisper_model,
+                        transcribe_path,
+                        transcribe_params,
+                        use_batched,
+                        whisper_runtime_device,
+                    )
+                    whisper_info = info
+                elif "CUBLAS" in str(e).upper():
                     log("cuBLAS error during transcription - reloading model with float32...")
                     self._update_job_status_detail(job_id, "Reloading model (GPU compatibility fallback)...")
                     self._load_whisper_model(

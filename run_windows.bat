@@ -6,6 +6,7 @@ SET "PROJECT_ROOT=%~dp0"
 SET "PROJECT_NAME=Chatalogue"
 SET "BACKEND_DIR=%PROJECT_ROOT%backend"
 SET "FRONTEND_DIR=%PROJECT_ROOT%frontend"
+SET "READINESS_PROBE=%PROJECT_ROOT%scripts\windows_backend_readiness_probe.ps1"
 SET "VENV_DIR=%BACKEND_DIR%\.venv"
 SET "VENV_PYTHON=%VENV_DIR%\Scripts\python.exe"
 SET "BACKEND_PORT=8011"
@@ -43,9 +44,16 @@ timeout /t 2 /nobreak >nul
 if exist "%BACKEND_LOG%" del /f /q "%BACKEND_LOG%" >nul 2>&1
 if exist "%FRONTEND_LOG%" del /f /q "%FRONTEND_LOG%" >nul 2>&1
 
-:: Ensure backend/frontend dependencies exist
-IF NOT EXIST "%VENV_PYTHON%" (
-    echo Backend venv missing. Running install_windows.bat...
+:: Ensure backend/frontend dependencies exist. A venv can exist but still point at
+:: a removed Python install, so validate that python.exe can actually start.
+SET "VENV_NEEDS_REPAIR=0"
+IF NOT EXIST "%VENV_PYTHON%" SET "VENV_NEEDS_REPAIR=1"
+IF "%VENV_NEEDS_REPAIR%"=="0" (
+    "%VENV_PYTHON%" --version >nul 2>&1
+    IF !ERRORLEVEL! NEQ 0 SET "VENV_NEEDS_REPAIR=1"
+)
+IF "%VENV_NEEDS_REPAIR%"=="1" (
+    echo Backend venv missing or broken. Running install_windows.bat...
     call "%PROJECT_ROOT%install_windows.bat"
     IF !ERRORLEVEL! NEQ 0 (
         echo install_windows.bat failed. Aborting startup.
@@ -95,8 +103,7 @@ echo   Do not close this window while recovery is in progress or startup will re
 set "PGLOG_PATH=%BACKEND_DIR%\runtime\postgres\postgres.log"
 set "PGLOG_SIZE_BEFORE=0"
 for %%I in ("%PGLOG_PATH%") do if exist "%%~fI" set "PGLOG_SIZE_BEFORE=%%~zI"
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$url='http://127.0.0.1:%BACKEND_PORT%/system/worker-status'; $log='%BACKEND_LOG%'; $pglog='%PGLOG_PATH%'; $pgStartOffset=[int64]('%PGLOG_SIZE_BEFORE%'); $deadline=(Get-Date).AddSeconds(900); $ok=$false; $fatal=$false; $lastRecoveryNotice=''; while((Get-Date)-lt $deadline){ try { $r=Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2; if($r.StatusCode -ge 200 -and $r.StatusCode -lt 300){ $ok=$true; break } } catch {}; if(Test-Path $log){ try { $tail=((Get-Content -Path $log -Tail 120 -ErrorAction SilentlyContinue) -join [Environment]::NewLine); if(($tail -match 'Traceback \(most recent call last\)') -or ($tail -match 'EmbeddedPostgresError') -or ($tail -match 'ConnectionTimeout') -or ($tail -match 'connection timeout expired') -or ($tail -match 'did not become query-ready in time') -or ($tail -match 'pre-existing shared memory block is still in use') -or ($tail -match 'error while attempting to bind on address')){ $fatal=$true; break } } catch {} }; if(Test-Path $pglog){ try { $content=(Get-Content -Path $pglog -Raw -Encoding UTF8 -ErrorAction SilentlyContinue); if($null -ne $content){ if($content.Length -gt $pgStartOffset){ $recent=$content.Substring([Math]::Min($pgStartOffset, $content.Length)); $recoverLines=$recent -split \"`r?`n\" | Where-Object { $_ -match 'syncing data directory \(fsync\), elapsed time:|database system is ready to accept connections|automatic recovery in progress' }; $msg=$recoverLines | Select-Object -Last 1; if($msg){ $msg=$msg.Trim(); if($msg -ne $lastRecoveryNotice){ Write-Host ('  [postgres] ' + $msg); $lastRecoveryNotice=$msg } } } } } catch {} }; Start-Sleep -Milliseconds 800 }; if($ok){ exit 0 }; if($fatal){ exit 2 }; exit 1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%READINESS_PROBE%" -Url "http://127.0.0.1:%BACKEND_PORT%/system/worker-status" -BackendLog "%BACKEND_LOG%" -PostgresLog "%PGLOG_PATH%" -PostgresLogStartOffset %PGLOG_SIZE_BEFORE% -TimeoutSeconds 900
 set "BACKEND_READY_RC=%ERRORLEVEL%"
 if not "%BACKEND_READY_RC%"=="0" goto :backend_start_failed
 goto :backend_start_ready
