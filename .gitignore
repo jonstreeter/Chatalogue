@@ -6,6 +6,11 @@ Thumbs.db
 .claude/
 .agent/
 
+# AI assistant tooling (local)
+.agents/
+.roo/
+.roomodes
+
 # Python
 __pycache__/
 *.py[cod]
@@ -34,6 +39,7 @@ venv/
 ENV/
 backend/.venv/
 backend/.venv_old_311/
+backend/.venv_broken*/
 frontend/.venv/
 
 # Node / frontend
