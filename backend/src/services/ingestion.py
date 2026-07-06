@@ -810,7 +810,6 @@ class IngestionService:
         if not token_matches:
             return {"changed": False, "applied": []}
         token_texts = [match.group(0) for match in token_matches]
-        normalized_tokens = [self._normalize_entity_phrase(token) for token in token_texts]
         words_payload = self._parse_segment_words_json(getattr(segment, "words", None))
 
         replacements: list[dict] = []
@@ -9330,7 +9329,7 @@ class IngestionService:
         except Exception as e:
             raise RuntimeError(f"ClearVoice runtime could not import torch: {e}")
         try:
-            import torchaudio  # type: ignore
+            pass  # type: ignore
         except Exception as e:
             torch_version = str(getattr(torch, "__version__", "") or "").strip() or "unknown"
             raise RuntimeError(
@@ -10646,7 +10645,6 @@ class IngestionService:
         segment_id: int,
         performance_mode: bool | None = None,
     ) -> dict:
-        import soundfile as sf  # type: ignore
 
         with Session(engine) as session:
             video = session.get(Video, video_id)
@@ -16029,7 +16027,7 @@ class IngestionService:
 
             # Delete the corrupt file
             audio_path.unlink(missing_ok=True)
-            log(f"Deleted corrupt audio file. Retrying with fallback format...")
+            log("Deleted corrupt audio file. Retrying with fallback format...")
             self._update_job_status_detail(job_id, "Re-downloading (corrupt audio detected)...")
 
             # Determine which format to try as fallback. Now that we default to 'best', 
@@ -16085,8 +16083,8 @@ class IngestionService:
             if probe2.returncode != 0:
                 new_file.unlink(missing_ok=True)
                 raise RuntimeError(
-                    f"Both audio formats are corrupt. This video may still be processing on YouTube. "
-                    f"Try again later."
+                    "Both audio formats are corrupt. This video may still be processing on YouTube. "
+                    "Try again later."
                 )
 
             log(f"Fallback download OK: {new_file.name} ({new_file.stat().st_size / 1024 / 1024:.1f} MB)")
@@ -17318,7 +17316,6 @@ class IngestionService:
             # between the same speaker label due to diarization boundary jitter.
             orphan_max_words = max(0, int(os.getenv("DIARIZATION_ORPHAN_MAX_WORDS", "2")))
             orphan_max_seconds = max(0.0, float(os.getenv("DIARIZATION_ORPHAN_MAX_SECONDS", "0.65")))
-            orphan_max_gap_seconds = max(0.0, float(os.getenv("DIARIZATION_ORPHAN_MAX_GAP_SECONDS", "0.35")))
 
             def _run_duration(run_words: list) -> float:
                 if not run_words:
@@ -17536,8 +17533,6 @@ class IngestionService:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
-            speaker_id = None # Passed how? The caller will use this to update speaker.
-            # Wait, this method just returns the path. The caller handles DB.
             yt_id = video.youtube_id
 
         # 1. Get YouTube URL
@@ -17720,7 +17715,7 @@ class IngestionService:
         
         # print(f"RUNNING FFMPEG: {cmd}") # DEBUG
         try:
-            log_verbose(f"Running ffmpeg frame extract...")
+            log_verbose("Running ffmpeg frame extract...")
             
             # Use temp file for stderr to avoid memory issues and capturing crashes
             stderr_file = Path(output_path).parent / f"{Path(output_path).stem}.err"
@@ -17742,7 +17737,7 @@ class IngestionService:
             # Return relative path for API
             return f"/thumbnails/speakers/{filename}"
             
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError:
             # Read error from file
             stderr_content = "Unknown error"
             stderr_file = Path(output_path).parent / f"{Path(output_path).stem}.err"
@@ -17756,5 +17751,5 @@ class IngestionService:
             error_msg = f"FFmpeg frame extraction failed: {stderr_content}"
             log(error_msg)
             raise RuntimeError(error_msg)
-        except Exception as e:
+        except Exception:
             raise

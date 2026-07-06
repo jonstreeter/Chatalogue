@@ -22,12 +22,6 @@ def setup_ffmpeg():
         
     ffmpeg_exe = BIN_DIR / "ffmpeg.exe"
     ffprobe_exe = BIN_DIR / "ffprobe.exe"
-    # Check for a key DLL to see if we have the shared version
-    avcodec_dll = BIN_DIR / "avcodec-61.dll" # Version might change, but presence of any dll is good check?
-    # Actually, let's just force update if user runs this script, or check if ffmpeg exists.
-    # But since we are switching versions, maybe we should force?
-    # For now, let's check if ffmpeg exists.
-    
     if ffmpeg_exe.exists() and ffprobe_exe.exists():
         print("FFmpeg executables found.")
         # Optional: could check for DLLs to decide if we need to upgrade from static to shared

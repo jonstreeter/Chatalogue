@@ -1,0 +1,18 @@
+# Lint guardrails. Intentionally minimal to start: catch real defects
+# (undefined names, unused imports/variables, syntax errors) without
+# forcing a cosmetic reformat of the existing codebase. Tighten over time.
+target-version = "py310"
+line-length = 120
+
+extend-exclude = [
+    "backend/tools/legacy",
+    "backend/.venv*",
+    "checkpoints",
+    "snapshots",
+]
+
+[lint]
+select = [
+    "E9", # syntax / io errors
+    "F",  # pyflakes: undefined names, unused imports, redefinitions
+]

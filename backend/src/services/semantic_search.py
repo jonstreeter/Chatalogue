@@ -19,7 +19,6 @@ import numpy as np
 from sqlmodel import Session, select
 
 from ..db.database import (
-    Channel,
     Speaker,
     TranscriptChunkEmbedding,
     TranscriptSegment,

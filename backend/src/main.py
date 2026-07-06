@@ -4,7 +4,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from typing import List, Optional
+from typing import List, Literal, Optional
 from datetime import datetime, timedelta
 from sqlmodel import Session, select
 from sqlalchemy import func, text
@@ -24,6 +24,7 @@ import html
 import hashlib
 import secrets
 import math
+import mimetypes
 import re
 import logging
 import subprocess
@@ -45,7 +46,7 @@ from .schemas import (
     SpeakerRead, SpeakerCountsRead, SpeakerOverviewRead, SpeakerEpisodeAppearanceRead, SpeakerVoiceProfileRead, SpeakerMergeSuggestionRead,
     MoveSpeakerProfileRequest, SpeakerSample, ExtractThumbnailRequest, MergeRequest,
     AvatarCreateRequest, AvatarUpdateRequest, AvatarRead, AvatarSectionSummaryRead, AvatarWorkbenchSpeakerRead, AvatarWorkbenchRead,
-    AvatarPersonalityDatasetExampleRead, AvatarPersonalityDatasetRead, AvatarPersonalityDatasetPageRead, AvatarPersonalityExampleStateRequest, AvatarPersonalityJudgePassRequest, AvatarPersonalityJudgeStatusRead, AvatarPersonalityJudgeFeedItemRead, AvatarPersonalityLongFormSampleRead, AvatarPersonalityLongFormConfigRead, AvatarPersonalityLongFormPageRead, AvatarPersonalityLongFormSampleStateRequest, AvatarPersonalityLongFormConfigUpdateRequest, AvatarPersonalityTrainingConfigRead, AvatarPersonalityTrainingConfigUpdateRequest, AvatarPersonalityTrainingDatasetProfileRead, AvatarPersonalityTrainingPlanRead, AvatarPersonalityTrainingPackageRead, AvatarPersonalityTrainRequest, AvatarPersonalityTrainingStatusRead, AvatarPersonalitySnapshotRead, AvatarPersonalitySnapshotSelectRequest, AvatarPersonalitySnapshotCleanupRequest, AvatarPersonalitySnapshotDeleteRequest, AvatarPersonalityTestChatRequest, AvatarPersonalityTestChatResponse, AvatarPersonalityFitCheckRequest, AvatarPersonalityFitCheckResponse, AvatarPersonalityFitCheckPromptResultRead, AvatarPersonalityBaseModelCandidateRead, AvatarPersonalityBaseModelSupportRead, AvatarPersonalityBaseModelDownloadRequest, AvatarPersonalityTrainingReadinessRead,
+    AvatarPersonalityDatasetExampleRead, AvatarPersonalityDatasetRead, AvatarPersonalityDatasetPageRead, AvatarPersonalityExampleStateRequest, AvatarPersonalityJudgePassRequest, AvatarPersonalityJudgeStatusRead, AvatarPersonalityLongFormSampleRead, AvatarPersonalityLongFormConfigRead, AvatarPersonalityLongFormPageRead, AvatarPersonalityLongFormSampleStateRequest, AvatarPersonalityLongFormConfigUpdateRequest, AvatarPersonalityTrainingConfigRead, AvatarPersonalityTrainingConfigUpdateRequest, AvatarPersonalityTrainingDatasetProfileRead, AvatarPersonalityTrainingPlanRead, AvatarPersonalityTrainingPackageRead, AvatarPersonalityTrainRequest, AvatarPersonalityTrainingStatusRead, AvatarPersonalitySnapshotRead, AvatarPersonalitySnapshotSelectRequest, AvatarPersonalitySnapshotCleanupRequest, AvatarPersonalitySnapshotDeleteRequest, AvatarPersonalityTestChatRequest, AvatarPersonalityTestChatResponse, AvatarPersonalityFitCheckRequest, AvatarPersonalityFitCheckResponse, AvatarPersonalityFitCheckPromptResultRead, AvatarPersonalityBaseModelCandidateRead, AvatarPersonalityBaseModelSupportRead, AvatarPersonalityBaseModelDownloadRequest, AvatarPersonalityTrainingReadinessRead,
     JobRead, PipelineFocusRead, PipelineFocusUpdate,
     Settings, OllamaPullRequest, TranscriptionEngineTestRequest,
     YouTubeDataApiTestRequest, YouTubeDataApiTestResult,
@@ -60,10 +61,9 @@ from .schemas import (
     ReconstructionSegmentPreviewRequest, ReconstructionSegmentPreviewResult,
     WorkbenchTaskProgressRead, UploadedPlaybackSourceRequest,
     ExternalShareStartRequest, ExternalShareStatus, ExternalShareAuditEntry,
-    SemanticSearchRequest, SemanticSearchPage, SemanticSearchHit, ContextChunk,
-    SemanticIndexStatus, SemanticIndexRebuildResponse,
+    SemanticSearchRequest, SemanticSearchPage, SemanticSearchHit, SemanticIndexStatus, SemanticIndexRebuildResponse,
     EpisodeChatThreadCreateRequest, EpisodeChatThreadUpdateRequest, EpisodeChatMessageCreateRequest, EpisodeChatCitationRead, EpisodeChatMessageContextRead, EpisodeChatMessageRead, EpisodeChatThreadRead, EpisodeChatThreadDetailRead, EpisodeChatSendResponse, EpisodeChatChannelItemRead,
-    EpisodeCloneCandidateRead, EpisodeCloneContextHitRead, EpisodeCloneEngineRead, EpisodeCloneConceptsRequest, EpisodeCloneConceptsResponse, EpisodeCloneGenerateRequest, EpisodeCloneGenerateResponse, EpisodeCloneJobRead,
+    EpisodeCloneCandidateRead, EpisodeCloneEngineRead, EpisodeCloneConceptsRequest, EpisodeCloneConceptsResponse, EpisodeCloneGenerateRequest, EpisodeCloneGenerateResponse, EpisodeCloneJobRead,
 )
 from filelock import FileLock, Timeout as FileLockTimeout
 
@@ -3559,7 +3559,6 @@ def export_channel(
     session: Session = Depends(get_session),
 ):
     """Export a channel archive as JSON with transcripts and speaker profiles."""
-    import json as _json
     channel = session.get(Channel, channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
@@ -6728,7 +6727,7 @@ def _queue_diarization_rebuild_job(
                 if k.startswith("stage_transcribe") or k.startswith("parakeet_") or k.startswith("transcription_"):
                     payload[k] = v
         except Exception as e:
-            log(f"Failed to inherit transcription stats for redo: {e}")
+            print(f"Failed to inherit transcription stats for redo: {e}")
 
     job = _enqueue_unique_job(session, video_id=int(video.id), job_type="process", payload=payload)
     return job, quality, len(segments), len(funny_rows)
@@ -9670,6 +9669,28 @@ def _avatar_training_process_is_alive(pid: int | None) -> bool:
         process_id = int(pid or 0)
     except Exception:
         return False
+    if process_id <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {process_id}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            output = str(result.stdout or "").strip()
+            return bool(output) and "No tasks are running" not in output
+        except Exception:
+            return False
+    try:
+        os.kill(process_id, 0)
+        return True
+    except Exception:
+        return False
 
 
 def _avatar_training_gpu_memory_by_pid_gb() -> dict[int, float]:
@@ -9742,28 +9763,6 @@ def _collect_avatar_training_process_memory() -> dict[str, object]:
         "vram_gb": round(total_vram_gb, 2),
         "loaded": active_count > 0,
     }
-    if process_id <= 0:
-        return False
-    if os.name == "nt":
-        try:
-            result = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {process_id}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=10,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            output = str(result.stdout or "").strip()
-            return bool(output) and "No tasks are running" not in output
-        except Exception:
-            return False
-    try:
-        os.kill(process_id, 0)
-        return True
-    except Exception:
-        return False
 
 
 def _reconcile_avatar_personality_training_runtime(
@@ -11470,7 +11469,7 @@ def _start_avatar_personality_judge_pass(
                     )
 
                 review_path_inner.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows_inner), encoding="utf-8")
-                refreshed = _refresh_avatar_personality_dataset_exports(avatar_inner, personality_inner)
+                _refresh_avatar_personality_dataset_exports(avatar_inner, personality_inner)
                 inner_session.add(personality_inner)
                 inner_session.commit()
                 final_status = "stopped" if stop_event.is_set() else "completed"
@@ -14930,7 +14929,7 @@ def redo_channel_diarization(
     session: Session = Depends(get_session),
 ):
     """Bulk re-queue diarization across channel videos using existing raw transcripts."""
-    from sqlalchemy import func, delete
+    from sqlalchemy import delete
 
     channel = session.get(Channel, channel_id)
     if not channel:
@@ -15744,7 +15743,6 @@ def move_job_to_top(job_id: int, session: Session = Depends(get_session)):
 @app.delete("/jobs/queue")
 def clear_queue(session: Session = Depends(get_session)):
     """Delete all queued and paused jobs quickly and reliably."""
-    from sqlalchemy import func
     from sqlalchemy.exc import OperationalError
 
     max_attempts = 12
