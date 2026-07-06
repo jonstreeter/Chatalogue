@@ -20,6 +20,7 @@ from src.db.database import (
     Video,
 )
 from src import main as main_mod
+from src.routers import jobs as jobs_routes
 from src.services import ingestion as ingestion_mod
 
 
@@ -272,7 +273,7 @@ def test_clear_queue_detaches_campaign_item_job_references():
         session.commit()
         session.refresh(item)
 
-        result = main_mod.clear_queue(session=session)
+        result = jobs_routes.clear_queue(session=session)
         refreshed_item = session.exec(
             select(TranscriptOptimizationCampaignItem).where(TranscriptOptimizationCampaignItem.id == item.id)
         ).first()
