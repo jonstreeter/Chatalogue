@@ -3704,7 +3704,8 @@ class IngestionService:
 
             session.commit()
 
-    def _load_job_payload(self, payload_json: str | None) -> dict:
+    @staticmethod
+    def _load_job_payload(payload_json: str | None) -> dict:
         if not payload_json:
             return {}
         try:
