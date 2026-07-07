@@ -17,21 +17,33 @@ can be extracted the same way.
 | `src/routers/channels.py` | 17 core channel CRUD/ingest/refresh/upload/export endpoints |
 | `src/routers/clips.py` | 14 clip CRUD/export/YouTube-upload endpoints |
 | `src/routers/share.py` | 6 external-share session endpoints |
-| `src/routers/episode_chat.py` | 9 episode-chat thread/message endpoints |
+| `src/routers/episode_chat.py` | 9 episode-chat thread/message endpoints (+ serialization helpers) |
+| `src/routers/transcript_ops.py` | 29 transcript quality/run/evaluation/campaign/repair/rebuild endpoints |
+| `src/routers/episode_clone.py` | 6 episode cloning endpoints |
+| `src/routers/video_media.py` | 26 media, VoiceFixer, cleanup- and reconstruction-workbench endpoints |
+| `src/routers/videos.py` | 19 core video endpoints (list, process, funny moments, YouTube-AI) |
+| `src/routers/search.py` | 5 keyword/semantic search + semantic-index endpoints |
+| `src/routers/segments.py` | 4 segment editing endpoints |
+| `src/routers/video_maintenance.py` | 7 purge/redo/consolidate/mute endpoints |
 | `src/deps.py` | `get_session` dependency, `get_ingestion_service()` lazy accessor |
 | `src/job_utils.py` | Job-state helpers + `PIPELINE_ACTIVE_STATUSES` constants |
 | `src/env_utils.py` | `ENV_PATH` + `_set_env_persist` (.env persistence) |
 | `src/paths.py` | Data/runtime directory constants (`IMAGES_DIR`, `AVATARS_DIR`, ...) |
 | `src/youtube_utils.py` | YouTube API/OAuth URL constants |
-| `src/main.py` | Everything else (~12k lines, shrinking) |
+| `src/video_utils.py` | Shared video helpers: `_enqueue_unique_job`, queue builders, remote info fetch |
+| `src/main.py` | Avatars domain (33 routes + large helper web), YouTube metadata helpers, share/middleware helpers, app lifespan (~8.2k lines) |
 
 Routers are registered at the **end** of `main.py` via `app.include_router(...)`.
 
 ## Remaining domains to extract (largest first)
 
-`/videos` (67 routes), `/avatars` (33), transcript-optimization (11),
-search/semantic-index (3), episode-clone routes, plus YouTube
-metadata/token-refresh helpers still in main.py.
+Only `/avatars` (33 routes) remains, plus its large helper web
+(personality scoring, dataset building, training orchestration —
+several thousand lines). Budget a full session; consider moving the
+helper web to `src/services/avatar_personality.py` rather than into the
+router. After that, migrate remaining `_main().x` call sites
+(`grep -rn "_main()." src/routers/ src/video_utils.py`) to direct
+imports as helpers find permanent homes.
 
 Caution from phase 8-9: never cut two ranges where one lies inside the
 other — the bottom-up deletion shifts the outer range and eats an extra
