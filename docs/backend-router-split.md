@@ -33,24 +33,22 @@ can be extracted the same way.
 | `src/youtube_utils.py` | YouTube API/OAuth URL constants |
 | `src/video_utils.py` | Shared video helpers: `_enqueue_unique_job`, queue builders, remote info fetch |
 | `src/services/avatar_personality.py` | Avatar personality service: datasets, judge passes, training orchestration (~4.5k lines) |
-| `src/main.py` | App/lifespan/middleware, share/YouTube-API/ollama helper layers — zero routes (~2.6k lines) |
+| `src/services/ollama.py` | GPU detection, Ollama model normalization/pull/size/recommendation |
+| `src/services/youtube_api.py` | YouTube OAuth refresh, Data API requests, description updates, uploads |
+| `src/services/speaker_queries.py` | Speaker list/count query builders + TTL caches |
+| `src/main.py` | App/lifespan/middleware, external-share + component-installer helpers — zero routes (~1.3k lines) |
 
 Routers are registered at the **end** of `main.py` via `app.include_router(...)`.
 
 ## Remaining domains to extract (largest first)
 
-**Route extraction and the avatar-service move are complete.** main.py
-is ~2.6k lines: app/lifespan/middleware, queue workers, and the last
-helper clusters. Remaining `_main().x` debt is 67 names
-(`grep -rn "_main()." src/routers/ src/video_utils.py src/services/`),
-all runtime-verified to resolve. Candidate homes:
-
-1. External-share state + helpers (share.py router uses them; the HTTP
-   middleware also does, so they can reasonably stay in main.py)
-2. YouTube metadata/token-refresh + upload helpers ->
-   `src/services/youtube_api.py` (channels/clips/videos routers use them)
-3. Ollama pull/hardware helpers -> `src/services/ollama.py` (settings)
-4. Speaker query caches -> `src/speaker_cache.py` (speakers/segments)
+**The split is essentially done.** main.py is ~1.3k lines: app assembly,
+lifespan, queue workers, HTTP middleware, and the external-share +
+component-installer helpers that the middleware and share/system routers
+use. The remaining `_main().x` debt (40 names, all share/installer
+helpers) is intentional — those helpers are coupled to app/middleware
+state and can stay in main.py, or move to
+`src/services/external_share.py` in a future pass if desired.
 
 **Lesson from phase 15:** when a helper moves out of main.py, every
 `_main().<name>` site pointing at it breaks at runtime, and ruff cannot
