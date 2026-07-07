@@ -1,0 +1,5 @@
+"""YouTube API constants shared by main.py and routers."""
+YOUTUBE_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube"
+YOUTUBE_OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+YOUTUBE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+YOUTUBE_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
