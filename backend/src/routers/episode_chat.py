@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 
 from ..db.database import (
     Channel,
+    TranscriptSegment,
     EpisodeChatMessage,
     EpisodeChatMessageContext,
     EpisodeChatThread,
@@ -17,6 +18,8 @@ from ..db.database import (
 from ..deps import get_ingestion_service, get_session
 from ..services import episode_chat as chat_svc
 from ..schemas import (
+    EpisodeChatCitationRead,
+    EpisodeChatMessageContextRead,
     EpisodeChatMessageCreateRequest,
     EpisodeChatChannelItemRead,
     EpisodeChatMessageRead,
@@ -37,6 +40,156 @@ def _main():
     return main
 
 
+def _ensure_episode_chat_video_ready(session: Session, video_id: int) -> Video:
+    video = session.get(Video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    segment_exists = session.exec(
+        select(TranscriptSegment.id).where(TranscriptSegment.video_id == video_id).limit(1)
+    ).first()
+    if segment_exists is None:
+        raise HTTPException(status_code=400, detail="Episode does not have a transcript yet.")
+    return video
+
+
+def _build_episode_chat_citation_read(raw: object) -> EpisodeChatCitationRead:
+    source = raw if isinstance(raw, dict) else {}
+    return EpisodeChatCitationRead(
+        chunk_id=int(source["chunk_id"]) if source.get("chunk_id") is not None else None,
+        video_id=int(source["video_id"]) if source.get("video_id") is not None else None,
+        video_title=(str(source.get("video_title") or "").strip() or None),
+        citation_scope=("related" if str(source.get("citation_scope") or "").strip().lower() == "related" else "episode"),
+        segment_ids=[int(v) for v in (source.get("segment_ids") or []) if str(v).isdigit()],
+        score=(round(float(source.get("score") or 0.0), 4) if source.get("score") is not None else None),
+        speaker_name=(str(source.get("speaker_name") or "").strip() or None),
+        start_time=float(source.get("start_time") or 0.0),
+        end_time=float(source.get("end_time") or 0.0),
+        support_text=str(source.get("support_text") or "").strip(),
+    )
+
+
+def _load_episode_chat_context_map(session: Session, message_ids: list[int]) -> dict[int, EpisodeChatMessageContext]:
+    if not message_ids:
+        return {}
+    rows = session.exec(
+        select(EpisodeChatMessageContext).where(EpisodeChatMessageContext.message_id.in_(message_ids))
+    ).all()
+    return {int(row.message_id): row for row in rows}
+
+
+def _build_episode_chat_message_read(
+    message: EpisodeChatMessage,
+    *,
+    context: EpisodeChatMessageContext | None = None,
+) -> EpisodeChatMessageRead:
+    parsed_context = None
+    if context:
+        try:
+            citations_raw = json.loads(context.citations_json or "[]")
+        except Exception:
+            citations_raw = []
+        try:
+            related_citations_raw = json.loads(context.related_citations_json or "[]")
+        except Exception:
+            related_citations_raw = []
+        try:
+            retrieved_chunk_ids = [int(v) for v in json.loads(context.retrieved_chunk_ids_json or "[]") if str(v).isdigit()]
+        except Exception:
+            retrieved_chunk_ids = []
+        try:
+            retrieved_segment_ids = [int(v) for v in json.loads(context.retrieved_segment_ids_json or "[]") if str(v).isdigit()]
+        except Exception:
+            retrieved_segment_ids = []
+        try:
+            related_video_ids = [int(v) for v in json.loads(context.related_video_ids_json or "[]") if str(v).isdigit()]
+        except Exception:
+            related_video_ids = []
+        parsed_context = EpisodeChatMessageContextRead(
+            scope_mode=("episode_related" if str(context.scope_mode or "").strip().lower() == "episode_related" else "episode"),
+            retrieval_mode=str(context.retrieval_mode or "episode"),
+            semantic_query=context.semantic_query,
+            prompt_version=str(context.prompt_version or "episode-chat-v2"),
+            citations=[
+                _build_episode_chat_citation_read(item)
+                for item in (citations_raw if isinstance(citations_raw, list) else [])
+                if isinstance(item, dict)
+            ],
+            related_citations=[
+                _build_episode_chat_citation_read(item)
+                for item in (related_citations_raw if isinstance(related_citations_raw, list) else [])
+                if isinstance(item, dict)
+            ],
+            related_video_ids=related_video_ids,
+            used_related_context=bool(context.used_related_context),
+            retrieved_chunk_ids=retrieved_chunk_ids,
+            retrieved_segment_ids=retrieved_segment_ids,
+            token_estimate=int(context.token_estimate or 0),
+            latency_ms=(int(context.latency_ms) if context.latency_ms is not None else None),
+        )
+    return EpisodeChatMessageRead(
+        id=int(message.id),
+        thread_id=int(message.thread_id),
+        role="assistant" if str(message.role or "").strip().lower() == "assistant" else "user",
+        status=str(message.status or "completed"),
+        content=str(message.content or ""),
+        provider=(str(message.provider or "").strip() or None),
+        model=(str(message.model or "").strip() or None),
+        parent_message_id=(int(message.parent_message_id) if message.parent_message_id is not None else None),
+        error=message.error,
+        created_at=message.created_at,
+        completed_at=message.completed_at,
+        context=parsed_context,
+    )
+
+
+def _build_episode_chat_thread_read(
+    session: Session,
+    thread: EpisodeChatThread,
+    *,
+    message_count: int | None = None,
+) -> EpisodeChatThreadRead:
+    count = message_count
+    if count is None:
+        count = int(
+            session.exec(
+                select(func.count(EpisodeChatMessage.id)).where(EpisodeChatMessage.thread_id == thread.id)
+            ).one()
+            or 0
+        )
+    return EpisodeChatThreadRead(
+        id=int(thread.id),
+        video_id=int(thread.video_id),
+        channel_id=(int(thread.channel_id) if thread.channel_id is not None else None),
+        title=str(thread.title or "New Chat"),
+        status=str(thread.status or "active"),
+        scope_mode=("episode_related" if str(thread.scope_mode or "").strip().lower() == "episode_related" else "episode"),
+        provider=(str(thread.provider or "").strip() or None),
+        model=(str(thread.model or "").strip() or None),
+        system_prompt=thread.system_prompt,
+        message_count=int(count or 0),
+        last_message_at=thread.last_message_at,
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+    )
+
+
+def _build_episode_chat_thread_detail_read(session: Session, thread: EpisodeChatThread) -> EpisodeChatThreadDetailRead:
+    messages = session.exec(
+        select(EpisodeChatMessage)
+        .where(EpisodeChatMessage.thread_id == thread.id)
+        .order_by(EpisodeChatMessage.created_at.asc(), EpisodeChatMessage.id.asc())
+    ).all()
+    context_map = _load_episode_chat_context_map(session, [int(msg.id) for msg in messages if msg.id is not None])
+    base = _build_episode_chat_thread_read(session, thread, message_count=len(messages))
+    return EpisodeChatThreadDetailRead(
+        **base.model_dump(),
+        messages=[
+            _build_episode_chat_message_read(msg, context=context_map.get(int(msg.id)))
+            for msg in messages
+        ],
+    )
+
+
 @router.post("/videos/{video_id}/episode-chat/threads", response_model=EpisodeChatThreadRead)
 def create_episode_chat_thread(
     video_id: int,
@@ -45,7 +198,7 @@ def create_episode_chat_thread(
 ):
     if get_ingestion_service() is None:
         raise HTTPException(status_code=503, detail="Backend services are still starting up")
-    video = _main()._ensure_episode_chat_video_ready(session, video_id)
+    video = _ensure_episode_chat_video_ready(session, video_id)
     request_payload = chat_svc.normalize_thread_request(
         title=body.title,
         provider_override=body.provider_override,
@@ -73,7 +226,7 @@ def create_episode_chat_thread(
     session.add(thread)
     session.commit()
     session.refresh(thread)
-    return _main()._build_episode_chat_thread_read(session, thread, message_count=0)
+    return _build_episode_chat_thread_read(session, thread, message_count=0)
 
 
 @router.get("/videos/{video_id}/episode-chat/threads", response_model=List[EpisodeChatThreadRead])
@@ -99,7 +252,7 @@ def list_episode_chat_threads(video_id: int, session: Session = Depends(get_sess
         ).all()
     }
     return [
-        _main()._build_episode_chat_thread_read(session, thread, message_count=counts.get(int(thread.id), 0))
+        _build_episode_chat_thread_read(session, thread, message_count=counts.get(int(thread.id), 0))
         for thread in threads
     ]
 
@@ -190,7 +343,7 @@ def read_episode_chat_thread(thread_id: int, session: Session = Depends(get_sess
     thread = session.get(EpisodeChatThread, thread_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Episode chat thread not found")
-    return _main()._build_episode_chat_thread_detail_read(session, thread)
+    return _build_episode_chat_thread_detail_read(session, thread)
 
 
 @router.patch("/episode-chat/threads/{thread_id}", response_model=EpisodeChatThreadRead)
@@ -228,7 +381,7 @@ def update_episode_chat_thread(
     session.add(thread)
     session.commit()
     session.refresh(thread)
-    return _main()._build_episode_chat_thread_read(session, thread)
+    return _build_episode_chat_thread_read(session, thread)
 
 
 @router.delete("/episode-chat/threads/{thread_id}")
@@ -263,9 +416,9 @@ def list_episode_chat_messages(thread_id: int, session: Session = Depends(get_se
         .where(EpisodeChatMessage.thread_id == thread_id)
         .order_by(EpisodeChatMessage.created_at.asc(), EpisodeChatMessage.id.asc())
     ).all()
-    context_map = _main()._load_episode_chat_context_map(session, [int(msg.id) for msg in messages if msg.id is not None])
+    context_map = _load_episode_chat_context_map(session, [int(msg.id) for msg in messages if msg.id is not None])
     return [
-        _main()._build_episode_chat_message_read(msg, context=context_map.get(int(msg.id)))
+        _build_episode_chat_message_read(msg, context=context_map.get(int(msg.id)))
         for msg in messages
     ]
 
@@ -281,7 +434,7 @@ def send_episode_chat_message(
     thread = session.get(EpisodeChatThread, thread_id)
     if not thread:
         raise HTTPException(status_code=404, detail="Episode chat thread not found")
-    video = _main()._ensure_episode_chat_video_ready(session, int(thread.video_id))
+    video = _ensure_episode_chat_video_ready(session, int(thread.video_id))
 
     request_payload = chat_svc.normalize_message_request(
         message=body.message,
@@ -399,14 +552,14 @@ def send_episode_chat_message(
     session.refresh(thread)
     session.refresh(user_message)
     session.refresh(assistant_message)
-    context_map = _main()._load_episode_chat_context_map(
+    context_map = _load_episode_chat_context_map(
         session,
         [int(assistant_message.id)] if assistant_message.id is not None else [],
     )
     return EpisodeChatSendResponse(
-        thread=_main()._build_episode_chat_thread_read(session, thread),
-        user_message=_main()._build_episode_chat_message_read(user_message),
-        assistant_message=_main()._build_episode_chat_message_read(
+        thread=_build_episode_chat_thread_read(session, thread),
+        user_message=_build_episode_chat_message_read(user_message),
+        assistant_message=_build_episode_chat_message_read(
             assistant_message,
             context=context_map.get(int(assistant_message.id)) if assistant_message.id is not None else None,
         ),
@@ -421,5 +574,5 @@ def read_episode_chat_message(message_id: int, session: Session = Depends(get_se
     context = session.exec(
         select(EpisodeChatMessageContext).where(EpisodeChatMessageContext.message_id == message_id)
     ).first()
-    return _main()._build_episode_chat_message_read(message, context=context)
+    return _build_episode_chat_message_read(message, context=context)
 

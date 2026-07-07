@@ -19,8 +19,8 @@ from src.db.database import (
     TranscriptSegment,
     Video,
 )
-from src import main as main_mod
 from src.routers import jobs as jobs_routes
+from src.routers import transcript_ops as transcript_ops_routes
 from src.services import ingestion as ingestion_mod
 
 
@@ -336,7 +336,7 @@ def test_delete_campaign_removes_items_but_keeps_existing_jobs():
         session.add(item)
         session.commit()
 
-        result = main_mod.delete_transcript_optimization_campaign(campaign.id, session=session)
+        result = transcript_ops_routes.delete_transcript_optimization_campaign(campaign.id, session=session)
 
         remaining_campaign = session.get(TranscriptOptimizationCampaign, campaign.id)
         remaining_item = session.exec(
