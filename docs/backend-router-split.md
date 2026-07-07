@@ -14,20 +14,30 @@ can be extracted the same way.
 | `src/routers/system.py` | 21 system endpoints: CUDA health, component installers, version/restart/update, worker status |
 | `src/routers/youtube_auth.py` | 6 YouTube OAuth + data-api-test endpoints (owns the pending-state dict) |
 | `src/routers/speakers.py` | 17 speaker profile/sample/thumbnail/merge endpoints |
+| `src/routers/channels.py` | 17 core channel CRUD/ingest/refresh/upload/export endpoints |
+| `src/routers/clips.py` | 14 clip CRUD/export/YouTube-upload endpoints |
+| `src/routers/share.py` | 6 external-share session endpoints |
+| `src/routers/episode_chat.py` | 9 episode-chat thread/message endpoints |
 | `src/deps.py` | `get_session` dependency, `get_ingestion_service()` lazy accessor |
 | `src/job_utils.py` | Job-state helpers + `PIPELINE_ACTIVE_STATUSES` constants |
 | `src/env_utils.py` | `ENV_PATH` + `_set_env_persist` (.env persistence) |
 | `src/paths.py` | Data/runtime directory constants (`IMAGES_DIR`, `AVATARS_DIR`, ...) |
 | `src/youtube_utils.py` | YouTube API/OAuth URL constants |
-| `src/main.py` | Everything else (~14k lines, shrinking) |
+| `src/main.py` | Everything else (~12k lines, shrinking) |
 
 Routers are registered at the **end** of `main.py` via `app.include_router(...)`.
 
 ## Remaining domains to extract (largest first)
 
-`/videos` (67 routes), `/avatars` (33), `/channels` (29), `/clips` (10),
-`/share` (6), `/episode-chat` (6), transcript-optimization (11), search (3),
-plus YouTube metadata/token-refresh helpers still in main.py.
+`/videos` (67 routes), `/avatars` (33), transcript-optimization (11),
+search/semantic-index (3), episode-clone routes, plus YouTube
+metadata/token-refresh helpers still in main.py.
+
+Caution from phase 8-9: never cut two ranges where one lies inside the
+other — the bottom-up deletion shifts the outer range and eats an extra
+line (a route decorator, in that case). The route-count assertion
+(`len(app.routes) == 248`) catches this class of error; run it after every
+extraction.
 
 When a test fails after an extraction with
 `module 'src.main' has no attribute '<route_fn>'`, update the test to import
