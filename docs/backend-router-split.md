@@ -32,25 +32,31 @@ can be extracted the same way.
 | `src/paths.py` | Data/runtime directory constants (`IMAGES_DIR`, `AVATARS_DIR`, ...) |
 | `src/youtube_utils.py` | YouTube API/OAuth URL constants |
 | `src/video_utils.py` | Shared video helpers: `_enqueue_unique_job`, queue builders, remote info fetch |
-| `src/main.py` | App/lifespan/middleware + helper layers only — zero routes (~7.2k lines) |
+| `src/services/avatar_personality.py` | Avatar personality service: datasets, judge passes, training orchestration (~4.5k lines) |
+| `src/main.py` | App/lifespan/middleware, share/YouTube-API/ollama helper layers — zero routes (~2.6k lines) |
 
 Routers are registered at the **end** of `main.py` via `app.include_router(...)`.
 
 ## Remaining domains to extract (largest first)
 
-**Route extraction is complete** — all 242 API routes live in the 17
-domain routers. The remaining work is helper migration out of main.py
-(~7.2k lines) into permanent service/util modules, replacing the
-transitional `_main().x` call sites with direct imports as you go
-(`grep -rn "_main()." src/routers/ src/video_utils.py` lists the debt).
-The big clusters still in main.py:
+**Route extraction and the avatar-service move are complete.** main.py
+is ~2.6k lines: app/lifespan/middleware, queue workers, and the last
+helper clusters. Remaining `_main().x` debt is 67 names
+(`grep -rn "_main()." src/routers/ src/video_utils.py src/services/`),
+all runtime-verified to resolve. Candidate homes:
 
-1. Avatar personality web (~50 functions: dataset building, judge
-   passes, training orchestration) -> `src/services/avatar_personality.py`
-2. YouTube metadata/token-refresh helpers -> `src/services/youtube_api.py`
-3. External-share state + helpers (used by the HTTP middleware) ->
-   could stay in main.py or move to `src/services/external_share.py`
-4. Speaker query caches, ollama helpers, LLM-provider test helpers
+1. External-share state + helpers (share.py router uses them; the HTTP
+   middleware also does, so they can reasonably stay in main.py)
+2. YouTube metadata/token-refresh + upload helpers ->
+   `src/services/youtube_api.py` (channels/clips/videos routers use them)
+3. Ollama pull/hardware helpers -> `src/services/ollama.py` (settings)
+4. Speaker query caches -> `src/speaker_cache.py` (speakers/segments)
+
+**Lesson from phase 15:** when a helper moves out of main.py, every
+`_main().<name>` site pointing at it breaks at runtime, and ruff cannot
+see it. After any helper move, run the resolution check: import
+src.main and assert hasattr(main, name) for every `_main()\.(\w+)`
+match across routers/ and services/.
 
 Caution from phase 8-9: never cut two ranges where one lies inside the
 other — the bottom-up deletion shifts the outer range and eats an extra
