@@ -23,6 +23,7 @@ from ..schemas import (
     Settings,
     TranscriptionEngineTestRequest,
 )
+from ..services import ollama as ollama_svc
 
 router = APIRouter()
 
@@ -235,7 +236,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     funny_moments_explain_batch_limit = max(1, min(int(getattr(settings, "funny_moments_explain_batch_limit", 12)), 200))
     nvidia_nim_min_interval = max(0.0, min(float(getattr(settings, "nvidia_nim_min_request_interval_seconds", 2.5)), 30.0))
     youtube_redirect_uri = (getattr(settings, "youtube_oauth_redirect_uri", "") or "http://localhost:8000/auth/youtube/callback").strip()
-    normalized_ollama_model = _main()._normalize_ollama_model_ref(getattr(settings, "ollama_model", "") or "")
+    normalized_ollama_model = ollama_svc._normalize_ollama_model_ref(getattr(settings, "ollama_model", "") or "")
 
     # 1. Update .env file
     set_key(ENV_PATH, "HF_TOKEN", settings.hf_token)
@@ -449,7 +450,7 @@ def test_ollama_connection():
     import time
 
     ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-    ollama_model = _main()._normalize_ollama_model_ref(os.getenv("OLLAMA_MODEL", "mistral"))
+    ollama_model = ollama_svc._normalize_ollama_model_ref(os.getenv("OLLAMA_MODEL", "mistral"))
 
     # 1. Check if Ollama is reachable
     try:
@@ -466,7 +467,7 @@ def test_ollama_connection():
 
     # 2. Check if selected model is available
     # Model names from /api/tags include the tag (e.g. "mistral:latest")
-    model_found = any(_main()._ollama_model_name_matches(m, ollama_model) for m in available_models)
+    model_found = any(ollama_svc._ollama_model_name_matches(m, ollama_model) for m in available_models)
 
     if not model_found:
         return {
@@ -563,14 +564,14 @@ def get_ollama_models(url: Optional[str] = None):
             "status": "error",
             "error": f"Cannot connect to Ollama at {ollama_url}. Is Ollama running?",
             "models": [],
-            "current_model": _main()._normalize_ollama_model_ref((os.getenv("OLLAMA_MODEL") or "").strip()),
+            "current_model": ollama_svc._normalize_ollama_model_ref((os.getenv("OLLAMA_MODEL") or "").strip()),
         }
     except Exception as e:
         return {
             "status": "error",
             "error": f"Failed to query Ollama models: {e}",
             "models": [],
-            "current_model": _main()._normalize_ollama_model_ref((os.getenv("OLLAMA_MODEL") or "").strip()),
+            "current_model": ollama_svc._normalize_ollama_model_ref((os.getenv("OLLAMA_MODEL") or "").strip()),
         }
 
     raw_models = data.get("models") or []
@@ -594,7 +595,7 @@ def get_ollama_models(url: Optional[str] = None):
         "status": "ok",
         "ollama_url": ollama_url,
         "models": models,
-        "current_model": _main()._normalize_ollama_model_ref((os.getenv("OLLAMA_MODEL") or "").strip()),
+        "current_model": ollama_svc._normalize_ollama_model_ref((os.getenv("OLLAMA_MODEL") or "").strip()),
     }
 
 
@@ -927,7 +928,7 @@ def pull_ollama_model(req: OllamaPullRequest):
     import httpx
 
     ollama_url = (req.url or os.getenv("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
-    ollama_model = _main()._normalize_ollama_model_ref((req.model or os.getenv("OLLAMA_MODEL") or "mistral").strip())
+    ollama_model = ollama_svc._normalize_ollama_model_ref((req.model or os.getenv("OLLAMA_MODEL") or "mistral").strip())
     wait_for_completion = bool(getattr(req, "wait_for_completion", False))
 
     if not ollama_model:
@@ -943,7 +944,7 @@ def pull_ollama_model(req: OllamaPullRequest):
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Failed to query Ollama models: {e}")
 
-    model_found = any(_main()._ollama_model_name_matches(m, ollama_model) for m in available_models)
+    model_found = any(ollama_svc._ollama_model_name_matches(m, ollama_model) for m in available_models)
     if model_found:
         return {
             "status": "already_installed",
@@ -952,10 +953,10 @@ def pull_ollama_model(req: OllamaPullRequest):
         }
 
     if wait_for_completion:
-        _main()._run_ollama_pull_job(ollama_url, ollama_model)
-        key = _main()._ollama_pull_job_key(ollama_url, ollama_model)
-        with _main()._ollama_pull_jobs_lock:
-            job = dict(_main()._ollama_pull_jobs.get(key) or {})
+        ollama_svc._run_ollama_pull_job(ollama_url, ollama_model)
+        key = ollama_svc._ollama_pull_job_key(ollama_url, ollama_model)
+        with ollama_svc._ollama_pull_jobs_lock:
+            job = dict(ollama_svc._ollama_pull_jobs.get(key) or {})
         status = str(job.get("status") or "")
         if status == "failed":
             raise HTTPException(status_code=500, detail=f"Failed to pull model '{ollama_model}': {job.get('error') or 'Unknown error'}")
@@ -966,16 +967,16 @@ def pull_ollama_model(req: OllamaPullRequest):
             "ollama_response": job.get("ollama_response") or {},
         }
 
-    key = _main()._ollama_pull_job_key(ollama_url, ollama_model)
-    with _main()._ollama_pull_jobs_lock:
-        existing = dict(_main()._ollama_pull_jobs.get(key) or {})
+    key = ollama_svc._ollama_pull_job_key(ollama_url, ollama_model)
+    with ollama_svc._ollama_pull_jobs_lock:
+        existing = dict(ollama_svc._ollama_pull_jobs.get(key) or {})
         if existing.get("status") in {"queued", "running"}:
             return {
                 "status": "already_running",
                 "model": ollama_model,
                 "job": existing,
             }
-        _main()._ollama_pull_jobs[key] = {
+        ollama_svc._ollama_pull_jobs[key] = {
             "status": "queued",
             "started_at": time.time(),
             "updated_at": time.time(),
@@ -985,14 +986,14 @@ def pull_ollama_model(req: OllamaPullRequest):
         }
 
     t = threading.Thread(
-        target=_main()._run_ollama_pull_job,
+        target=ollama_svc._run_ollama_pull_job,
         args=(ollama_url, ollama_model),
         daemon=True,
         name=f"ollama-pull-{int(time.time())}"
     )
     t.start()
-    with _main()._ollama_pull_jobs_lock:
-        job = dict(_main()._ollama_pull_jobs.get(key) or {})
+    with ollama_svc._ollama_pull_jobs_lock:
+        job = dict(ollama_svc._ollama_pull_jobs.get(key) or {})
     return {
         "status": "pulling_started",
         "model": ollama_model,
@@ -1004,19 +1005,19 @@ def pull_ollama_model(req: OllamaPullRequest):
 def get_ollama_pull_status(url: Optional[str] = None, model: Optional[str] = None):
     ollama_url = (url or os.getenv("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
     if not model:
-        with _main()._ollama_pull_jobs_lock:
+        with ollama_svc._ollama_pull_jobs_lock:
             jobs = [
                 {"key": k, **v}
-                for k, v in _main()._ollama_pull_jobs.items()
+                for k, v in ollama_svc._ollama_pull_jobs.items()
                 if k.startswith(f"{ollama_url.lower()}|")
             ]
         jobs.sort(key=lambda j: float(j.get("updated_at") or j.get("started_at") or 0), reverse=True)
         return {"status": "ok", "jobs": jobs[:20]}
 
-    normalized_model = _main()._normalize_ollama_model_ref(model)
-    key = _main()._ollama_pull_job_key(ollama_url, normalized_model)
-    with _main()._ollama_pull_jobs_lock:
-        job = dict(_main()._ollama_pull_jobs.get(key) or {})
+    normalized_model = ollama_svc._normalize_ollama_model_ref(model)
+    key = ollama_svc._ollama_pull_job_key(ollama_url, normalized_model)
+    with ollama_svc._ollama_pull_jobs_lock:
+        job = dict(ollama_svc._ollama_pull_jobs.get(key) or {})
 
     if not job:
         return {
@@ -1044,8 +1045,8 @@ def get_ollama_pull_status(url: Optional[str] = None, model: Optional[str] = Non
 
 @router.get("/settings/ollama/hardware-recommendation")
 def get_ollama_hardware_recommendation(objective: str = "balanced"):
-    hardware = _main()._detect_gpu_hardware()
-    recommendation = _main()._recommend_ollama_for_hardware(hardware.get("gpu_vram_gb"), objective=objective)
+    hardware = ollama_svc._detect_gpu_hardware()
+    recommendation = ollama_svc._recommend_ollama_for_hardware(hardware.get("gpu_vram_gb"), objective=objective)
     return {
         "status": "ok",
         "hardware": hardware,

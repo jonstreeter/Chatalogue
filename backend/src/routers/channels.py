@@ -38,6 +38,7 @@ from ..video_utils import (
 from ..job_utils import PIPELINE_ACTIVE_STATUSES
 from ..paths import MANUAL_MEDIA_DIR
 from ..schemas import ChannelOverviewRead
+from ..services import youtube_api as yt_api
 
 router = APIRouter()
 
@@ -320,7 +321,7 @@ def check_channel_youtube_publish_ownership(channel_id: int, session: Session = 
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
     try:
-        check = _main()._youtube_channel_ownership_check_for_app_channel(channel)
+        check = yt_api._youtube_channel_ownership_check_for_app_channel(channel)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ownership check failed: {e}")
     return {

@@ -58,6 +58,7 @@ from ..schemas import (
     AvatarWorkbenchRead,
     AvatarWorkbenchSpeakerRead,
 )
+from . import ollama as ollama_svc
 
 
 def _main():
@@ -390,7 +391,7 @@ def _detect_avatar_memory_optimized_support() -> tuple[bool, str | None]:
 
 
 def _recommend_avatar_training_model_for_hardware() -> tuple[dict[str, object], list[dict[str, str]]]:
-    hardware = _main()._detect_gpu_hardware()
+    hardware = ollama_svc._detect_gpu_hardware()
     gpu_vram_gb = hardware.get("gpu_vram_gb")
     candidates = _recommended_avatar_training_models()
     recommended = "Qwen/Qwen2.5-3B-Instruct"
@@ -442,7 +443,7 @@ def _recommend_avatar_training_launch_settings(
     requested_per_device_batch_size: int | None,
     requested_gradient_accumulation_steps: int | None,
 ) -> dict[str, object]:
-    hardware = _main()._detect_gpu_hardware()
+    hardware = ollama_svc._detect_gpu_hardware()
     gpu_vram_gb_raw = hardware.get("gpu_vram_gb")
     gpu_vram_gb = float(gpu_vram_gb_raw) if gpu_vram_gb_raw is not None else None
     model_scale_b = _infer_avatar_model_scale_b(model_id)
@@ -2686,8 +2687,8 @@ def _avatar_resolve_local_judge_model() -> tuple[str, str]:
     import httpx
 
     ollama_url = (os.getenv("OLLAMA_URL") or "http://localhost:11434").rstrip("/")
-    judge_override = _main()._normalize_ollama_model_ref(os.getenv("AVATAR_JUDGE_MODEL", ""))
-    requested_model = _main()._normalize_ollama_model_ref(os.getenv("OLLAMA_MODEL", "mistral"))
+    judge_override = ollama_svc._normalize_ollama_model_ref(os.getenv("AVATAR_JUDGE_MODEL", ""))
+    requested_model = ollama_svc._normalize_ollama_model_ref(os.getenv("OLLAMA_MODEL", "mistral"))
     try:
         response = httpx.get(f"{ollama_url}/api/tags", timeout=8)
         response.raise_for_status()
@@ -2697,7 +2698,7 @@ def _avatar_resolve_local_judge_model() -> tuple[str, str]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Failed to query local Ollama at {ollama_url}: {exc}") from exc
 
-    if judge_override and any(_main()._ollama_model_name_matches(name, judge_override) for name in available_models):
+    if judge_override and any(ollama_svc._ollama_model_name_matches(name, judge_override) for name in available_models):
         return ollama_url, judge_override
 
     preferred_models = [
@@ -2708,10 +2709,10 @@ def _avatar_resolve_local_judge_model() -> tuple[str, str]:
         "qwen3.5:27b",
     ]
     for preferred in preferred_models:
-        if any(_main()._ollama_model_name_matches(name, preferred) for name in available_models):
+        if any(ollama_svc._ollama_model_name_matches(name, preferred) for name in available_models):
             return ollama_url, preferred
 
-    if requested_model and any(_main()._ollama_model_name_matches(name, requested_model) for name in available_models):
+    if requested_model and any(ollama_svc._ollama_model_name_matches(name, requested_model) for name in available_models):
         return ollama_url, requested_model
 
     if available_models:

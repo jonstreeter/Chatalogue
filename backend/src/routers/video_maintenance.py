@@ -14,6 +14,7 @@ from ..video_utils import (
     _queue_diarization_rebuild_job,
     _queue_full_retranscription_job,
 )
+from ..services import speaker_queries as spk_q
 
 router = APIRouter()
 
@@ -60,7 +61,7 @@ def purge_video(video_id: int, session: Session = Depends(get_session)):
     video.processed = False
     session.add(video)
     session.commit()
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     return {"status": "purged", "deleted_segments": len(segments), "deleted_funny_moments": len(funny_moments)}
 
 @router.post("/videos/{video_id}/redo-diarization")
@@ -76,7 +77,7 @@ def redo_diarization(video_id: int, session: Session = Depends(get_session)):
         note="Manual redo-diarization request",
         queued_from="redo_diarization",
     )
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
 
     return {
         "status": "diarization_requeued",
@@ -281,7 +282,7 @@ def redo_channel_diarization(
                 })
 
     if not dry_run and (result["counts"]["queued"] > 0 or result["counts"]["deleted_segments"] > 0):
-        _main()._invalidate_speaker_query_caches()
+        spk_q._invalidate_speaker_query_caches()
 
     return result
 
@@ -299,7 +300,7 @@ def redo_transcription(video_id: int, session: Session = Depends(get_session)):
         note="Manual redo-transcription request",
         queued_from="redo_transcription",
     )
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     return {
         "status": "transcription_requeued",
         "deleted_segments": segment_count,
@@ -341,7 +342,7 @@ def consolidate_video_transcript(video_id: int, session: Session = Depends(get_s
         session.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to consolidate transcript: {e}")
 
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     return TranscriptRepairResultRead(**result)
 
 
@@ -438,7 +439,7 @@ def consolidate_channel_transcripts(
                 })
 
     if result["counts"]["eligible"] > 0:
-        _main()._invalidate_speaker_query_caches()
+        spk_q._invalidate_speaker_query_caches()
     return result
 
 # --- Video Controls ---

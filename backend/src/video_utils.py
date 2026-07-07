@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException
@@ -26,6 +27,30 @@ def _main():
     from . import main
 
     return main
+
+
+def _apply_ytdlp_auth_opts(ydl_opts: dict) -> dict:
+    opts = dict(ydl_opts or {})
+    cookies_file = (os.getenv("YTDLP_COOKIES_FILE") or "").strip()
+    cookies_from_browser = (os.getenv("YTDLP_COOKIES_FROM_BROWSER") or "").strip()
+
+    if cookies_file:
+        path = Path(cookies_file).expanduser()
+        if path.exists():
+            opts["cookiefile"] = str(path)
+
+    if cookies_from_browser and "cookiefile" not in opts:
+        if ":" in cookies_from_browser:
+            browser, profile = cookies_from_browser.split(":", 1)
+            browser = browser.strip()
+            profile = profile.strip() or None
+        else:
+            browser = cookies_from_browser.strip()
+            profile = None
+        if browser:
+            opts["cookiesfrombrowser"] = (browser, profile, None, None)
+
+    return opts
 
 
 def _extract_publish_datetime(info: dict) -> Optional[datetime]:
@@ -77,7 +102,7 @@ def _fetch_remote_video_info(url: str) -> dict:
     import yt_dlp
 
     ydl_opts = {"quiet": True, "no_warnings": True}
-    ydl_opts = _main()._apply_ytdlp_auth_opts(ydl_opts)
+    ydl_opts = _apply_ytdlp_auth_opts(ydl_opts)
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
     if not isinstance(info, dict):

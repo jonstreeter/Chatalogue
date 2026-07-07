@@ -16,6 +16,7 @@ from ..db.database import (
 )
 from ..deps import get_ingestion_service, get_session
 from ..schemas import AssignSpeakerRequest, SegmentTextUpdateRequest
+from ..services import speaker_queries as spk_q
 
 router = APIRouter()
 
@@ -43,7 +44,7 @@ def assign_segment_speaker(segment_id: int, body: AssignSpeakerRequest, session:
     segment.matched_profile_id = None
     session.add(segment)
     session.commit()
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     session.refresh(segment)
     return {"id": segment.id, "speaker_id": body.speaker_id, "speaker_name": speaker.name, "matched_profile_id": None}
 

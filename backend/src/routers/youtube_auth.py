@@ -18,6 +18,7 @@ from ..youtube_utils import (
     YOUTUBE_OAUTH_AUTH_URL,
     YOUTUBE_OAUTH_SCOPE,
 )
+from ..services import youtube_api as yt_api
 
 router = APIRouter()
 
@@ -34,11 +35,11 @@ def _main():
 
 @router.get("/youtube/oauth/status")
 def youtube_oauth_status():
-    cfg = _main()._youtube_get_cfg()
-    expiry = _main()._youtube_parse_expiry(cfg["token_expiry"])
+    cfg = yt_api._youtube_get_cfg()
+    expiry = yt_api._youtube_parse_expiry(cfg["token_expiry"])
     connected = bool(cfg["refresh_token"] or cfg["access_token"])
     return {
-        "configured": _main()._youtube_oauth_is_configured(),
+        "configured": yt_api._youtube_oauth_is_configured(),
         "connected": connected,
         "channel_id": cfg["channel_id"] or None,
         "channel_title": cfg["channel_title"] or None,
@@ -51,8 +52,8 @@ def youtube_oauth_status():
 
 @router.post("/youtube/oauth/start")
 def youtube_oauth_start():
-    cfg = _main()._youtube_get_cfg()
-    if not _main()._youtube_oauth_is_configured():
+    cfg = yt_api._youtube_get_cfg()
+    if not yt_api._youtube_oauth_is_configured():
         raise HTTPException(status_code=400, detail="Configure YouTube OAuth client ID/secret and redirect URI in Settings first.")
 
     # Clear expired pending states.
@@ -103,7 +104,7 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
     youtube_oauth_pending_states.pop(state, None)
 
     try:
-        token_data = _main()._youtube_exchange_code_for_tokens(code)
+        token_data = yt_api._youtube_exchange_code_for_tokens(code)
         access_token = str(token_data.get("access_token") or "").strip()
         refresh_token = str(token_data.get("refresh_token") or "").strip() or (os.getenv("YOUTUBE_OAUTH_REFRESH_TOKEN") or "").strip()
         expires_in = int(token_data.get("expires_in") or 3600)
@@ -117,7 +118,7 @@ def youtube_oauth_callback(code: Optional[str] = None, state: Optional[str] = No
         _set_env_persist("YOUTUBE_OAUTH_REFRESH_TOKEN", refresh_token)
         _set_env_persist("YOUTUBE_OAUTH_TOKEN_EXPIRY", expiry.isoformat())
 
-        ch_info = _main()._youtube_fetch_authenticated_channel_info()
+        ch_info = yt_api._youtube_fetch_authenticated_channel_info()
         _set_env_persist("YOUTUBE_OAUTH_CHANNEL_ID", ch_info["channel_id"])
         _set_env_persist("YOUTUBE_OAUTH_CHANNEL_TITLE", ch_info["channel_title"])
 
@@ -143,7 +144,7 @@ def youtube_oauth_disconnect():
 @router.post("/youtube/oauth/test")
 def youtube_oauth_test():
     try:
-        info = _main()._youtube_fetch_authenticated_channel_info()
+        info = yt_api._youtube_fetch_authenticated_channel_info()
         return {"status": "ok", "channel_id": info["channel_id"], "channel_title": info["channel_title"]}
     except Exception as e:
         return {"status": "error", "error": str(e)}
@@ -154,7 +155,7 @@ def youtube_data_api_test(body: Optional[YouTubeDataApiTestRequest] = None):
     api_key = str(getattr(body, "api_key", "") or os.getenv("YOUTUBE_DATA_API_KEY") or "").strip()
     test_video_id = "dQw4w9WgXcQ"
     try:
-        data = _main()._youtube_data_api_key_request(
+        data = yt_api._youtube_data_api_key_request(
             "/videos",
             api_key=api_key,
             query={

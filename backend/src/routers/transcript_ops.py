@@ -63,6 +63,7 @@ from ..schemas import (
     TranscriptRollbackOptionRead,
     TranscriptRunRead,
 )
+from ..services import speaker_queries as spk_q
 
 router = APIRouter()
 
@@ -887,7 +888,7 @@ def queue_transcript_diarization_rebuild(
         note=request.note,
         queued_from="video_rebuild",
     )
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     return TranscriptDiarizationRebuildQueueResponse(
         job_id=int(job.id),
         video_id=int(video_id),
@@ -918,7 +919,7 @@ def queue_transcript_diarization_benchmark(
         diarization_sensitivity_override=request.diarization_sensitivity,
         speaker_match_threshold_override=request.speaker_match_threshold,
     )
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     return TranscriptDiarizationRebuildQueueResponse(
         job_id=int(job.id),
         video_id=int(video_id),
@@ -989,7 +990,7 @@ def queue_channel_transcript_diarization_rebuilds(
             else:
                 raise
 
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     return TranscriptDiarizationRebuildBulkQueueResponse(
         channel_id=int(channel_id),
         queued=len(jobs),
@@ -1019,7 +1020,7 @@ def queue_transcript_retranscription(
         note=request.note,
         queued_from="video_retranscription",
     )
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     return TranscriptRetranscriptionQueueResponse(
         job_id=int(job.id),
         video_id=int(video_id),
@@ -1087,7 +1088,7 @@ def queue_channel_transcript_retranscriptions(
             else:
                 raise
 
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     return TranscriptRetranscriptionBulkQueueResponse(
         channel_id=int(channel_id),
         queued=len(jobs),

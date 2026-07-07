@@ -20,6 +20,7 @@ from ..deps import get_ingestion_service, get_session
 from ..job_utils import PIPELINE_ACTIVE_STATUSES
 from ..schemas import ChannelBatchPublishRequest, VideoListItemRead
 from ..video_utils import _archive_video_description_if_needed, _enqueue_unique_job
+from ..services import youtube_api as yt_api
 
 router = APIRouter()
 
@@ -309,7 +310,7 @@ def _publish_video_ai_description_internal(
             )
 
         if push_to_youtube:
-            _main()._youtube_update_video_description_remote(video.youtube_id, draft)
+            yt_api._youtube_update_video_description_remote(video.youtube_id, draft)
             remote_pushed = True
 
         if current_desc != draft:
@@ -340,7 +341,7 @@ def publish_youtube_ai_description(video_id: int, push_to_youtube: Optional[bool
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     is_youtube_video = str(getattr(video, "media_source_type", "") or "youtube").lower() == "youtube" and bool(video.youtube_id)
-    should_push = (_main()._youtube_get_cfg()["push_enabled"] and is_youtube_video) if push_to_youtube is None else bool(push_to_youtube and is_youtube_video)
+    should_push = (yt_api._youtube_get_cfg()["push_enabled"] and is_youtube_video) if push_to_youtube is None else bool(push_to_youtube and is_youtube_video)
     try:
         result = _publish_video_ai_description_internal(session, video, push_to_youtube=should_push)
         return result["video"]
@@ -387,11 +388,11 @@ def batch_publish_channel_youtube_descriptions(channel_id: int, req: ChannelBatc
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
 
-    should_push = _main()._youtube_get_cfg()["push_enabled"] if req.push_to_youtube is None else bool(req.push_to_youtube)
+    should_push = yt_api._youtube_get_cfg()["push_enabled"] if req.push_to_youtube is None else bool(req.push_to_youtube)
     limit = None if req.limit is None else max(1, min(int(req.limit), 1000))
     ownership_check = None
     if should_push:
-        ownership_check = _main()._youtube_channel_ownership_check_for_app_channel(channel)
+        ownership_check = yt_api._youtube_channel_ownership_check_for_app_channel(channel)
 
     videos = session.exec(
         select(Video)
@@ -450,7 +451,7 @@ def batch_publish_channel_youtube_descriptions(channel_id: int, req: ChannelBatc
     if not req.confirm:
         raise HTTPException(status_code=400, detail="Batch publish requires confirm=true when dry_run=false")
     if should_push:
-        ownership_check = ownership_check or _main()._youtube_channel_ownership_check_for_app_channel(channel)
+        ownership_check = ownership_check or yt_api._youtube_channel_ownership_check_for_app_channel(channel)
         if ownership_check.get("status") != "owned":
             raise HTTPException(
                 status_code=400,

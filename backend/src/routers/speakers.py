@@ -35,6 +35,7 @@ from ..schemas import (
     SpeakerSample,
     SpeakerVoiceProfileRead,
 )
+from ..services import speaker_queries as spk_q
 
 router = APIRouter()
 
@@ -136,7 +137,7 @@ def read_speakers(
 ):
     safe_offset = max(0, int(offset or 0))
     safe_limit = None if limit is None else max(1, min(int(limit), 500))
-    page_rows = _main()._query_speaker_page_rows(
+    page_rows = spk_q._query_speaker_page_rows(
         session=session,
         channel_id=channel_id,
         video_id=video_id,
@@ -191,14 +192,14 @@ def read_speaker_overview(
 ):
     safe_offset = max(0, int(offset or 0))
     safe_limit = None if limit is None else max(1, min(int(limit), 500))
-    full_rows = _main()._query_full_speaker_scope_rows(
+    full_rows = spk_q._query_full_speaker_scope_rows(
         session=session,
         channel_id=channel_id,
         video_id=video_id,
         search=search,
     )
     page_rows = full_rows[safe_offset:] if safe_limit is None else full_rows[safe_offset:safe_offset + safe_limit]
-    counts = SpeakerCountsRead(**_main()._summarize_speaker_scope_rows(full_rows))
+    counts = SpeakerCountsRead(**spk_q._summarize_speaker_scope_rows(full_rows))
     return SpeakerOverviewRead(
         items=_build_speaker_reads(session, page_rows),
         counts=counts,
@@ -214,11 +215,11 @@ def read_speaker_counts(
     video_id: Optional[int] = None,
     session: Session = Depends(get_session)
 ):
-    cache_key = _main()._speaker_scope_key(channel_id, video_id)
-    cached = _main()._get_speaker_counts_cache(cache_key)
+    cache_key = spk_q._speaker_scope_key(channel_id, video_id)
+    cached = spk_q._get_speaker_counts_cache(cache_key)
     if cached is not None:
         return SpeakerCountsRead(**cached)
-    summary = _main()._query_speaker_count_summary(session=session, channel_id=channel_id, video_id=video_id)
+    summary = spk_q._query_speaker_count_summary(session=session, channel_id=channel_id, video_id=video_id)
     counts = SpeakerCountsRead(
         total=int(summary.get("total") or 0),
         identified=int(summary.get("identified") or 0),
@@ -226,7 +227,7 @@ def read_speaker_counts(
         main=int(summary.get("main") or 0),
         extras=int(summary.get("extras") or 0),
     )
-    _main()._set_speaker_counts_cache(cache_key, counts.model_dump())
+    spk_q._set_speaker_counts_cache(cache_key, counts.model_dump())
     return counts
 
 @router.get("/speakers/{speaker_id}", response_model=SpeakerRead)
@@ -425,7 +426,7 @@ def delete_speaker_profile(speaker_id: int, profile_id: int, session: Session = 
 
     session.delete(profile)
     session.commit()
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
 
     remaining = session.exec(
         select(func.count(SpeakerEmbedding.id)).where(SpeakerEmbedding.speaker_id == speaker_id)
@@ -477,7 +478,7 @@ def reassign_segments_for_profile(profile_id: int, session: Session = Depends(ge
             .values(speaker_id=target_speaker.id)
         )
         session.commit()
-        _main()._invalidate_speaker_query_caches()
+        spk_q._invalidate_speaker_query_caches()
 
     return {
         "status": "reassigned",
@@ -511,7 +512,7 @@ def move_speaker_profile(
         target_speaker_id=req.target_speaker_id,
         new_speaker_name=req.new_speaker_name,
     )
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     return {
         "status": "moved",
         **result,
@@ -598,7 +599,7 @@ def extract_speaker_thumbnail(speaker_id: int, req: ExtractThumbnailRequest, ses
                     speaker.thumbnail_path = thumb_path
                     write_session.add(speaker)
                     write_session.commit()
-                    _main()._invalidate_speaker_query_caches()
+                    spk_q._invalidate_speaker_query_caches()
                     write_session.refresh(speaker)
                     return read_speaker(speaker_id, write_session)
             except OperationalError as e:
@@ -626,7 +627,7 @@ def delete_speaker_thumbnail(speaker_id: int, session: Session = Depends(get_ses
     speaker.thumbnail_path = None
     session.add(speaker)
     session.commit()
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     session.refresh(speaker)
 
     # Best-effort cleanup of local image files we own.
@@ -660,7 +661,7 @@ async def upload_thumbnail(speaker_id: int, file: UploadFile = File(...), sessio
     speaker.thumbnail_path = f"/images/{safe_name}"
     session.add(speaker)
     session.commit()
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     session.refresh(speaker)
     return read_speaker(speaker_id, session)
 
@@ -686,7 +687,7 @@ def upload_thumbnail_base64(speaker_id: int, data: dict, session: Session = Depe
     speaker.thumbnail_path = f"/images/{filename}"
     session.add(speaker)
     session.commit()
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     session.refresh(speaker)
     return read_speaker(speaker_id, session)
 
@@ -733,7 +734,7 @@ def update_speaker(speaker_id: int, data: dict, session: Session = Depends(get_s
     if not updated_speaker:
         raise HTTPException(status_code=503, detail="Database busy. Please retry in a moment.")
 
-    _main()._invalidate_speaker_query_caches()
+    spk_q._invalidate_speaker_query_caches()
     
     # Calculate total speaking time for the response
     total_time_result = session.exec(
@@ -785,7 +786,7 @@ def merge_speakers(req: MergeRequest, session: Session = Depends(get_session)):
         # and to keep all speaker-owned rows consistent before deleting the sources.
         merge_speakers_in_session(session, target_id=req.target_id, source_ids=source_ids)
         session.commit()
-        _main()._invalidate_speaker_query_caches()
+        spk_q._invalidate_speaker_query_caches()
     except Exception:
         session.rollback()
         raise

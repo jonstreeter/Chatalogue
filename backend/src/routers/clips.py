@@ -26,6 +26,7 @@ from ..schemas import (
     ClipRead,
     ClipYoutubeUploadRequest,
 )
+from ..services import youtube_api as yt_api
 
 router = APIRouter()
 
@@ -405,7 +406,7 @@ def _upload_clip_to_youtube_internal(
         safe_title = f"Clip from {video.title}"
     safe_title = safe_title[:100]
 
-    safe_description = (description or _main()._build_default_clip_upload_description(video, clip)).strip()[:5000]
+    safe_description = (description or yt_api._build_default_clip_upload_description(video, clip)).strip()[:5000]
     safe_category = (category_id or "22").strip()
     safe_tags = [str(t).strip() for t in (tags or []) if str(t).strip()][:40]  # YouTube max 500 chars across tags
 
@@ -423,11 +424,11 @@ def _upload_clip_to_youtube_internal(
 
     try:
         export_path = get_ingestion_service().render_clip_export_mp4(clip_id)
-        uploaded = _main()._youtube_upload_video_resumable(export_path, snippet=snippet, status=status)
+        uploaded = yt_api._youtube_upload_video_resumable(export_path, snippet=snippet, status=status)
         new_video_id = str(uploaded.get("id") or "").strip()
         if not new_video_id:
             raise RuntimeError(f"YouTube upload response missing video id: {uploaded}")
-        ch_info = _main()._youtube_fetch_authenticated_channel_info()
+        ch_info = yt_api._youtube_fetch_authenticated_channel_info()
         return {
             "clip_id": clip.id,
             "source_video_id": video.id,
@@ -468,7 +469,7 @@ def upload_clips_to_youtube_batch(req: ClipBatchYoutubeUploadRequest, session: S
 
     # Ensure OAuth is valid before starting the batch.
     try:
-        auth_channel = _main()._youtube_fetch_authenticated_channel_info()
+        auth_channel = yt_api._youtube_fetch_authenticated_channel_info()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"YouTube not connected/authorized: {e}")
 

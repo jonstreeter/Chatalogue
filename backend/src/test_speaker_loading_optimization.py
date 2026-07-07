@@ -7,14 +7,14 @@ from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine
 
 from src.db.database import Channel, Speaker, SpeakerEmbedding, TranscriptSegment, Video
-from src import main as main_mod
+from src.services import speaker_queries as speaker_queries_mod
 from src.routers import speakers as speakers_routes
 
 
 def test_read_speaker_overview_returns_counts_without_stats_query(monkeypatch):
-    main_mod._invalidate_speaker_query_caches()
+    speaker_queries_mod._invalidate_speaker_query_caches()
     monkeypatch.setattr(
-        main_mod,
+        speaker_queries_mod,
         "_query_speaker_count_summary",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stats summary should not be used by speaker overview")),
     )
@@ -79,15 +79,15 @@ def test_read_speaker_overview_returns_counts_without_stats_query(monkeypatch):
 
 
 def test_query_speaker_count_summary_prefers_cached_scope_rows(monkeypatch):
-    main_mod._invalidate_speaker_query_caches()
+    speaker_queries_mod._invalidate_speaker_query_caches()
     monkeypatch.setattr(
-        main_mod,
+        speaker_queries_mod,
         "_build_speaker_scope_list_query",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cached count summary should not rebuild query")),
     )
 
-    cache_key = main_mod._speaker_scope_key(channel_id=5, video_id=None)
-    main_mod._set_speaker_scope_cache(
+    cache_key = speaker_queries_mod._speaker_scope_key(channel_id=5, video_id=None)
+    speaker_queries_mod._set_speaker_scope_cache(
         cache_key,
         [
             {"id": 1, "channel_id": 5, "name": "Host", "is_extra": False, "total_speaking_time": 120.0, "created_at": None},
@@ -96,7 +96,7 @@ def test_query_speaker_count_summary_prefers_cached_scope_rows(monkeypatch):
         ],
     )
 
-    summary = main_mod._query_speaker_count_summary(
+    summary = speaker_queries_mod._query_speaker_count_summary(
         session=None,
         channel_id=5,
         video_id=None,
