@@ -25,25 +25,32 @@ can be extracted the same way.
 | `src/routers/search.py` | 5 keyword/semantic search + semantic-index endpoints |
 | `src/routers/segments.py` | 4 segment editing endpoints |
 | `src/routers/video_maintenance.py` | 7 purge/redo/consolidate/mute endpoints |
+| `src/routers/avatars.py` | 33 avatar + personality-training endpoints |
 | `src/deps.py` | `get_session` dependency, `get_ingestion_service()` lazy accessor |
 | `src/job_utils.py` | Job-state helpers + `PIPELINE_ACTIVE_STATUSES` constants |
 | `src/env_utils.py` | `ENV_PATH` + `_set_env_persist` (.env persistence) |
 | `src/paths.py` | Data/runtime directory constants (`IMAGES_DIR`, `AVATARS_DIR`, ...) |
 | `src/youtube_utils.py` | YouTube API/OAuth URL constants |
 | `src/video_utils.py` | Shared video helpers: `_enqueue_unique_job`, queue builders, remote info fetch |
-| `src/main.py` | Avatars domain (33 routes + large helper web), YouTube metadata helpers, share/middleware helpers, app lifespan (~8.2k lines) |
+| `src/main.py` | App/lifespan/middleware + helper layers only — zero routes (~7.2k lines) |
 
 Routers are registered at the **end** of `main.py` via `app.include_router(...)`.
 
 ## Remaining domains to extract (largest first)
 
-Only `/avatars` (33 routes) remains, plus its large helper web
-(personality scoring, dataset building, training orchestration —
-several thousand lines). Budget a full session; consider moving the
-helper web to `src/services/avatar_personality.py` rather than into the
-router. After that, migrate remaining `_main().x` call sites
-(`grep -rn "_main()." src/routers/ src/video_utils.py`) to direct
-imports as helpers find permanent homes.
+**Route extraction is complete** — all 242 API routes live in the 17
+domain routers. The remaining work is helper migration out of main.py
+(~7.2k lines) into permanent service/util modules, replacing the
+transitional `_main().x` call sites with direct imports as you go
+(`grep -rn "_main()." src/routers/ src/video_utils.py` lists the debt).
+The big clusters still in main.py:
+
+1. Avatar personality web (~50 functions: dataset building, judge
+   passes, training orchestration) -> `src/services/avatar_personality.py`
+2. YouTube metadata/token-refresh helpers -> `src/services/youtube_api.py`
+3. External-share state + helpers (used by the HTTP middleware) ->
+   could stay in main.py or move to `src/services/external_share.py`
+4. Speaker query caches, ollama helpers, LLM-provider test helpers
 
 Caution from phase 8-9: never cut two ranges where one lies inside the
 other — the bottom-up deletion shifts the outer range and eats an extra
