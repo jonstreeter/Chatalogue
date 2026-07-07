@@ -8,6 +8,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from src.db.database import Channel, Speaker, SpeakerEmbedding, TranscriptSegment, Video
 from src import main as main_mod
+from src.routers import speakers as speakers_routes
 
 
 def test_read_speaker_overview_returns_counts_without_stats_query(monkeypatch):
@@ -59,7 +60,7 @@ def test_read_speaker_overview_returns_counts_without_stats_query(monkeypatch):
         session.add(TranscriptSegment(video_id=video.id, speaker_id=unknown.id, start_time=210.0, end_time=260.0, text="Unknown segment"))
         session.commit()
 
-        overview = main_mod.read_speaker_overview(
+        overview = speakers_routes.read_speaker_overview(
             channel_id=channel.id,
             offset=0,
             limit=1,

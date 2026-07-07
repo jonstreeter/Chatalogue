@@ -11,18 +11,28 @@ can be extracted the same way.
 |---|---|
 | `src/routers/jobs.py` | 14 job-queue + pipeline-focus endpoints |
 | `src/routers/settings.py` | 12 settings, LLM-provider-test, and Ollama endpoints |
+| `src/routers/system.py` | 21 system endpoints: CUDA health, component installers, version/restart/update, worker status |
+| `src/routers/youtube_auth.py` | 6 YouTube OAuth + data-api-test endpoints (owns the pending-state dict) |
+| `src/routers/speakers.py` | 17 speaker profile/sample/thumbnail/merge endpoints |
 | `src/deps.py` | `get_session` dependency, `get_ingestion_service()` lazy accessor |
 | `src/job_utils.py` | Job-state helpers + `PIPELINE_ACTIVE_STATUSES` constants |
 | `src/env_utils.py` | `ENV_PATH` + `_set_env_persist` (.env persistence) |
-| `src/main.py` | Everything else (~15.7k lines, shrinking) |
+| `src/paths.py` | Data/runtime directory constants (`IMAGES_DIR`, `AVATARS_DIR`, ...) |
+| `src/youtube_utils.py` | YouTube API/OAuth URL constants |
+| `src/main.py` | Everything else (~14k lines, shrinking) |
 
 Routers are registered at the **end** of `main.py` via `app.include_router(...)`.
 
 ## Remaining domains to extract (largest first)
 
-`/videos` (67 routes), `/avatars` (33), `/channels` (29), `/system` (21),
-`/speakers` (16), `/clips` (10), `/share`+`/auth` (7), `/episode-chat` (6),
-`/youtube` OAuth cluster (5), transcript-optimization (11), search (3).
+`/videos` (67 routes), `/avatars` (33), `/channels` (29), `/clips` (10),
+`/share` (6), `/episode-chat` (6), transcript-optimization (11), search (3),
+plus YouTube metadata/token-refresh helpers still in main.py.
+
+When a test fails after an extraction with
+`module 'src.main' has no attribute '<route_fn>'`, update the test to import
+the route function from its router module (helpers it monkeypatches on
+`src.main` keep working — routers resolve them via `_main()` at call time).
 
 ## The extraction pattern
 
