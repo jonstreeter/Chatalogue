@@ -455,17 +455,3 @@ def toggle_video_mute(video_id: int, session: Session = Depends(get_session)):
     return video
 
 # --- Jobs ---
-
-def _invalidate_voicefixer_output(video: Video) -> None:
-    apply_scope = str(getattr(video, "voicefixer_apply_scope", "none") or "none").strip().lower()
-    video.voicefixer_cleaned_path = None
-    video.voicefixer_use_cleaned = False
-    video.voicefixer_status = "disabled" if apply_scope == "none" else None
-    video.voicefixer_error = None
-
-
-def _invalidate_reconstruction_output(video: Video) -> None:
-    video.reconstruction_audio_path = None
-    video.reconstruction_use_for_playback = False
-    video.reconstruction_status = None
-    video.reconstruction_error = None

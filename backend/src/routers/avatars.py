@@ -13,6 +13,7 @@ from ..db.database import (
     Speaker,
 )
 from ..deps import get_session
+from ..services import avatar_personality as avatar_svc
 from ..services import semantic_search as sem_svc
 from ..schemas import (
     AvatarCreateRequest,
@@ -72,7 +73,7 @@ def read_avatars(
         query = query.where(Avatar.speaker_id == speaker_id)
     query = query.order_by(Avatar.updated_at.desc(), Avatar.id.desc())
     avatars = session.exec(query).all()
-    return [_main()._serialize_avatar(avatar) for avatar in avatars]
+    return [avatar_svc._serialize_avatar(avatar) for avatar in avatars]
 
 
 @router.post("/avatars", response_model=AvatarRead)
@@ -91,11 +92,11 @@ def create_avatar(body: AvatarCreateRequest, session: Session = Depends(get_sess
     session.add(avatar)
     session.commit()
     session.refresh(avatar)
-    _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
     session.commit()
     session.refresh(avatar)
-    _main()._avatar_artifacts_dir(avatar)
-    return _main()._serialize_avatar(avatar)
+    avatar_svc._avatar_artifacts_dir(avatar)
+    return avatar_svc._serialize_avatar(avatar)
 
 
 @router.post("/speakers/{speaker_id}/avatar", response_model=AvatarRead)
@@ -119,11 +120,11 @@ def create_or_open_speaker_avatar(speaker_id: int, session: Session = Depends(ge
         session.commit()
         session.refresh(avatar)
 
-    _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
     session.commit()
     session.refresh(avatar)
-    _main()._avatar_artifacts_dir(avatar)
-    return _main()._serialize_avatar(avatar)
+    avatar_svc._avatar_artifacts_dir(avatar)
+    return avatar_svc._serialize_avatar(avatar)
 
 
 @router.get("/avatars/{avatar_id}", response_model=AvatarRead)
@@ -131,7 +132,7 @@ def read_avatar(avatar_id: int, session: Session = Depends(get_session)):
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    return _main()._serialize_avatar(avatar)
+    return avatar_svc._serialize_avatar(avatar)
 
 
 @router.patch("/avatars/{avatar_id}", response_model=AvatarRead)
@@ -141,7 +142,7 @@ def update_avatar(avatar_id: int, body: AvatarUpdateRequest, session: Session = 
         raise HTTPException(status_code=404, detail="Avatar not found")
 
     source_speaker = session.get(Speaker, avatar.speaker_id)
-    personality, appearance, voice = _main()._ensure_avatar_profiles(
+    personality, appearance, voice = avatar_svc._ensure_avatar_profiles(
         session,
         avatar,
         speaker_name=source_speaker.name if source_speaker else avatar.name,
@@ -179,7 +180,7 @@ def update_avatar(avatar_id: int, body: AvatarUpdateRequest, session: Session = 
     session.add(voice)
     session.commit()
     session.refresh(avatar)
-    return _main()._serialize_avatar(avatar)
+    return avatar_svc._serialize_avatar(avatar)
 
 
 @router.get("/avatars/{avatar_id}/workbench", response_model=AvatarWorkbenchRead)
@@ -187,7 +188,7 @@ def get_avatar_workbench(avatar_id: int, session: Session = Depends(get_session)
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    return _main()._build_avatar_workbench(session, avatar)
+    return avatar_svc._build_avatar_workbench(session, avatar)
 
 
 @router.get("/avatars/{avatar_id}/personality/dataset-preview", response_model=AvatarPersonalityDatasetRead)
@@ -198,9 +199,9 @@ def get_avatar_personality_dataset_preview(avatar_id: int, session: Session = De
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found for this avatar")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
     session.commit()
-    return _main()._load_avatar_personality_dataset(avatar, personality)
+    return avatar_svc._load_avatar_personality_dataset(avatar, personality)
 
 
 @router.post("/avatars/{avatar_id}/personality/build-dataset", response_model=AvatarPersonalityDatasetRead)
@@ -211,10 +212,10 @@ def build_avatar_personality_dataset(avatar_id: int, session: Session = Depends(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found for this avatar")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
     session.commit()
     session.refresh(personality)
-    return _main()._build_avatar_personality_dataset(session, avatar, speaker, personality)
+    return avatar_svc._build_avatar_personality_dataset(session, avatar, speaker, personality)
 
 
 @router.post("/avatars/{avatar_id}/personality/run-judge-pass", response_model=AvatarPersonalityDatasetRead)
@@ -229,10 +230,10 @@ def run_avatar_personality_judge_pass(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found for this avatar")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
     session.commit()
     session.refresh(personality)
-    dataset = _main()._run_avatar_personality_judge_pass(
+    dataset = avatar_svc._run_avatar_personality_judge_pass(
         avatar,
         personality,
         max_examples=body.max_examples,
@@ -254,7 +255,7 @@ def start_avatar_personality_judge_pass(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    return _main()._start_avatar_personality_judge_pass(
+    return avatar_svc._start_avatar_personality_judge_pass(
         avatar_id=int(avatar_id),
         max_examples=int(body.max_examples or 40),
         overwrite_existing=bool(body.overwrite_existing),
@@ -270,7 +271,7 @@ def read_avatar_personality_judge_status(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    return _main()._load_avatar_personality_judge_status(avatar)
+    return avatar_svc._load_avatar_personality_judge_status(avatar)
 
 
 @router.post("/avatars/{avatar_id}/personality/stop-judge-pass", response_model=AvatarPersonalityJudgeStatusRead)
@@ -282,15 +283,15 @@ def stop_avatar_personality_judge_pass(
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
     is_active = False
-    with _main()._avatar_judge_runs_lock:
-        stop_event = _main()._avatar_judge_stop_events.get(int(avatar_id))
-        active_thread = _main()._avatar_judge_threads.get(int(avatar_id))
+    with avatar_svc._avatar_judge_runs_lock:
+        stop_event = avatar_svc._avatar_judge_stop_events.get(int(avatar_id))
+        active_thread = avatar_svc._avatar_judge_threads.get(int(avatar_id))
         if stop_event and active_thread and active_thread.is_alive():
             stop_event.set()
             is_active = True
     if not is_active:
-        return _main()._load_avatar_personality_judge_status(avatar)
-    return _main()._write_avatar_personality_judge_status(
+        return avatar_svc._load_avatar_personality_judge_status(avatar)
+    return avatar_svc._write_avatar_personality_judge_status(
         avatar,
         {
             "status": "stopping",
@@ -312,7 +313,7 @@ def read_avatar_personality_long_form_samples(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    return _main()._read_avatar_personality_long_form_page(
+    return avatar_svc._read_avatar_personality_long_form_page(
         session,
         avatar,
         offset=max(0, int(offset)),
@@ -331,10 +332,10 @@ def update_avatar_personality_long_form_sample_state(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    state_map = _main()._load_avatar_personality_long_form_states(avatar)
+    state_map = avatar_svc._load_avatar_personality_long_form_states(avatar)
     state_map[str(sample_id)] = str(body.state or "included")
-    _main()._write_avatar_personality_long_form_states(avatar, state_map)
-    page = _main()._read_avatar_personality_long_form_page(session, avatar, offset=0, limit=200, state="all")
+    avatar_svc._write_avatar_personality_long_form_states(avatar, state_map)
+    page = avatar_svc._read_avatar_personality_long_form_page(session, avatar, offset=0, limit=200, state="all")
     for item in page.items:
         if item.sample_id == sample_id:
             return item
@@ -349,7 +350,7 @@ def read_avatar_personality_long_form_config(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    return _main()._load_avatar_personality_long_form_config(avatar)
+    return avatar_svc._load_avatar_personality_long_form_config(avatar)
 
 
 @router.patch("/avatars/{avatar_id}/personality/long-form-config", response_model=AvatarPersonalityLongFormConfigRead)
@@ -361,8 +362,8 @@ def update_avatar_personality_long_form_config(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    page = _main()._read_avatar_personality_long_form_page(session, avatar, offset=0, limit=1, state="all")
-    return _main()._write_avatar_personality_long_form_config(
+    page = avatar_svc._read_avatar_personality_long_form_page(session, avatar, offset=0, limit=1, state="all")
+    return avatar_svc._write_avatar_personality_long_form_config(
         avatar,
         take_count=max(0, int(body.take_count or 0)),
         included_count=page.included_count,
@@ -382,8 +383,8 @@ def read_avatar_personality_training_config(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
-    return _main()._read_avatar_personality_training_config(session, avatar, personality)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    return avatar_svc._read_avatar_personality_training_config(session, avatar, personality)
 
 
 @router.get("/avatars/{avatar_id}/personality/base-model-support", response_model=AvatarPersonalityBaseModelSupportRead)
@@ -395,9 +396,9 @@ def read_avatar_personality_base_model_support(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    config = _main()._load_avatar_personality_training_config(avatar)
+    config = avatar_svc._load_avatar_personality_training_config(avatar)
     selected = str(model_id or config.base_model_id or "Qwen/Qwen3-8B").strip()
-    return _main()._read_avatar_base_model_support(selected)
+    return avatar_svc._read_avatar_base_model_support(selected)
 
 
 @router.post("/avatars/{avatar_id}/personality/base-model-download", response_model=AvatarPersonalityBaseModelSupportRead)
@@ -409,10 +410,10 @@ def download_avatar_personality_base_model(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    config = _main()._load_avatar_personality_training_config(avatar)
+    config = avatar_svc._load_avatar_personality_training_config(avatar)
     selected = str(body.model_id or config.base_model_id or "Qwen/Qwen3-8B").strip()
-    _main()._start_avatar_hf_model_download(selected)
-    return _main()._read_avatar_base_model_support(selected)
+    avatar_svc._start_avatar_hf_model_download(selected)
+    return avatar_svc._read_avatar_base_model_support(selected)
 
 
 @router.patch("/avatars/{avatar_id}/personality/training-config", response_model=AvatarPersonalityTrainingConfigRead)
@@ -424,7 +425,7 @@ def update_avatar_personality_training_config(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    normalized = _main()._write_avatar_personality_training_config(
+    normalized = avatar_svc._write_avatar_personality_training_config(
         avatar,
         base_model_id=body.base_model_id,
         dataset_profile=body.dataset_profile,
@@ -440,10 +441,10 @@ def update_avatar_personality_training_config(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
     payload = normalized.model_dump()
-    payload["dataset_profiles"] = [option.model_dump() for option in _main()._avatar_training_dataset_profile_options()]
-    payload["training_plan"] = _main()._build_avatar_personality_training_plan(
+    payload["dataset_profiles"] = [option.model_dump() for option in avatar_svc._avatar_training_dataset_profile_options()]
+    payload["training_plan"] = avatar_svc._build_avatar_personality_training_plan(
         avatar=avatar,
         personality=personality,
         config=normalized,
@@ -463,13 +464,13 @@ def read_avatar_personality_training_package(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
-    package = _main()._read_avatar_personality_training_package(avatar)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    package = avatar_svc._read_avatar_personality_training_package(avatar)
     if package.training_plan is not None:
         return package
-    config = _main()._load_avatar_personality_training_config(avatar)
+    config = avatar_svc._load_avatar_personality_training_config(avatar)
     payload = package.model_dump()
-    payload["training_plan"] = _main()._build_avatar_personality_training_plan(
+    payload["training_plan"] = avatar_svc._build_avatar_personality_training_plan(
         avatar=avatar,
         personality=personality,
         config=config,
@@ -493,8 +494,8 @@ def prepare_avatar_personality_training_package(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
-    package = _main()._prepare_avatar_personality_training_package(session, avatar, personality)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    package = avatar_svc._prepare_avatar_personality_training_package(session, avatar, personality)
     session.add(personality)
     session.commit()
     session.refresh(personality)
@@ -509,10 +510,10 @@ def read_avatar_personality_training_status(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    status = _main()._reconcile_avatar_personality_training_runtime(avatar)
-    resolved_snapshots = _main()._avatar_resolve_training_snapshots(avatar, selected_adapter_path=status.adapter_path)
+    status = avatar_svc._reconcile_avatar_personality_training_runtime(avatar)
+    resolved_snapshots = avatar_svc._avatar_resolve_training_snapshots(avatar, selected_adapter_path=status.adapter_path)
     if resolved_snapshots:
-        status = _main()._write_avatar_personality_training_status(
+        status = avatar_svc._write_avatar_personality_training_status(
             avatar,
             {
                 "snapshots": [
@@ -522,7 +523,7 @@ def read_avatar_personality_training_status(
             },
         )
     if status.status in {"completed", "failed", "stopped"}:
-        _main()._sync_avatar_personality_training_completion(int(avatar_id))
+        avatar_svc._sync_avatar_personality_training_completion(int(avatar_id))
     return status
 
 
@@ -538,8 +539,8 @@ def start_avatar_personality_training(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
-    status = _main()._start_avatar_personality_training(avatar, personality, body)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    status = avatar_svc._start_avatar_personality_training(avatar, personality, body)
     session.add(personality)
     session.commit()
     session.refresh(personality)
@@ -554,13 +555,13 @@ def stop_avatar_personality_training(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    status = _main()._reconcile_avatar_personality_training_runtime(avatar)
+    status = avatar_svc._reconcile_avatar_personality_training_runtime(avatar)
     if not status.active or status.status in {"idle", "completed", "failed", "stopped"}:
         return status
 
-    status_path, stop_path = _main()._avatar_personality_training_runtime_paths(avatar)
+    status_path, stop_path = avatar_svc._avatar_personality_training_runtime_paths(avatar)
     stop_path.write_text("stop", encoding="utf-8")
-    status = _main()._write_avatar_personality_training_status(
+    status = avatar_svc._write_avatar_personality_training_status(
         avatar,
         {
             "status": "stopping",
@@ -586,12 +587,12 @@ def promote_avatar_personality_snapshot(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
-    status = _main()._reconcile_avatar_personality_training_runtime(avatar)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    status = avatar_svc._reconcile_avatar_personality_training_runtime(avatar)
     if status.active:
         raise HTTPException(status_code=400, detail="Stop training before promoting a snapshot.")
     selected = str(body.adapter_path or "").strip()
-    snapshot = _main()._avatar_find_training_snapshot(avatar, selected)
+    snapshot = avatar_svc._avatar_find_training_snapshot(avatar, selected)
     if snapshot is None or not Path(selected).exists():
         raise HTTPException(status_code=404, detail="Snapshot not found.")
     personality.lora_adapter_path = selected
@@ -599,10 +600,10 @@ def promote_avatar_personality_snapshot(
     personality.updated_at = datetime.now()
     session.add(personality)
     session.commit()
-    _main()._avatar_release_cached_chat_model(int(avatar.id))
-    return _main()._avatar_update_training_snapshots(
+    avatar_svc._avatar_release_cached_chat_model(int(avatar.id))
+    return avatar_svc._avatar_update_training_snapshots(
         avatar,
-        _main()._avatar_resolve_training_snapshots(avatar, selected_adapter_path=selected),
+        avatar_svc._avatar_resolve_training_snapshots(avatar, selected_adapter_path=selected),
         selected_adapter_path=selected,
     )
 
@@ -616,23 +617,23 @@ def delete_other_avatar_personality_snapshots(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    status = _main()._reconcile_avatar_personality_training_runtime(avatar)
+    status = avatar_svc._reconcile_avatar_personality_training_runtime(avatar)
     if status.active:
         raise HTTPException(status_code=400, detail="Stop training before deleting snapshots.")
     keep_path = str(body.keep_adapter_path or "").strip()
-    snapshot = _main()._avatar_find_training_snapshot(avatar, keep_path)
+    snapshot = avatar_svc._avatar_find_training_snapshot(avatar, keep_path)
     if snapshot is None or not Path(keep_path).exists():
         raise HTTPException(status_code=404, detail="Snapshot to keep was not found.")
     speaker = session.get(Speaker, avatar.speaker_id)
     if speaker:
-        personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+        personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
         personality.lora_adapter_path = keep_path
         personality.status = "trained"
         personality.updated_at = datetime.now()
         session.add(personality)
         session.commit()
 
-    for item in _main()._avatar_resolve_training_snapshots(avatar, selected_adapter_path=keep_path):
+    for item in avatar_svc._avatar_resolve_training_snapshots(avatar, selected_adapter_path=keep_path):
         adapter_path = str(item.adapter_path or "").strip()
         if not adapter_path or adapter_path == keep_path:
             continue
@@ -640,8 +641,8 @@ def delete_other_avatar_personality_snapshots(
             shutil.rmtree(adapter_path, ignore_errors=True)
         except Exception:
             pass
-    _main()._avatar_release_cached_chat_model(int(avatar.id))
-    return _main()._avatar_update_training_snapshots(avatar, [snapshot], selected_adapter_path=keep_path)
+    avatar_svc._avatar_release_cached_chat_model(int(avatar.id))
+    return avatar_svc._avatar_update_training_snapshots(avatar, [snapshot], selected_adapter_path=keep_path)
 
 
 @router.post("/avatars/{avatar_id}/personality/delete-snapshot", response_model=AvatarPersonalityTrainingStatusRead)
@@ -653,16 +654,16 @@ def delete_avatar_personality_snapshot(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    status = _main()._reconcile_avatar_personality_training_runtime(avatar)
+    status = avatar_svc._reconcile_avatar_personality_training_runtime(avatar)
     if status.active:
         raise HTTPException(status_code=400, detail="Stop training before deleting snapshots.")
 
     delete_path = str(body.adapter_path or "").strip()
-    snapshot = _main()._avatar_find_training_snapshot(avatar, delete_path)
+    snapshot = avatar_svc._avatar_find_training_snapshot(avatar, delete_path)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Snapshot was not found.")
 
-    snapshots = _main()._avatar_resolve_training_snapshots(avatar, selected_adapter_path=status.adapter_path)
+    snapshots = avatar_svc._avatar_resolve_training_snapshots(avatar, selected_adapter_path=status.adapter_path)
     remaining = [item for item in snapshots if str(item.adapter_path or "").strip() != delete_path]
     if not remaining:
         raise HTTPException(status_code=400, detail="Cannot delete the last remaining snapshot.")
@@ -674,7 +675,7 @@ def delete_avatar_personality_snapshot(
 
     speaker = session.get(Speaker, avatar.speaker_id)
     if speaker:
-        personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+        personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
         if str(personality.lora_adapter_path or "").strip() == delete_path:
             personality.lora_adapter_path = next_selected_path
             personality.updated_at = datetime.now()
@@ -688,8 +689,8 @@ def delete_avatar_personality_snapshot(
     except Exception:
         pass
 
-    _main()._avatar_release_cached_chat_model(int(avatar.id))
-    return _main()._avatar_update_training_snapshots(avatar, remaining, selected_adapter_path=next_selected_path)
+    avatar_svc._avatar_release_cached_chat_model(int(avatar.id))
+    return avatar_svc._avatar_update_training_snapshots(avatar, remaining, selected_adapter_path=next_selected_path)
 
 
 _AVATAR_FIT_CHECK_PROMPTS: list[tuple[str, str]] = [
@@ -703,16 +704,16 @@ _AVATAR_FIT_CHECK_PROMPTS: list[tuple[str, str]] = [
 
 
 def _avatar_fit_check_reference_examples(avatar: Avatar, *, limit: int = 3) -> list[dict[str, str]]:
-    state_map = _main()._load_avatar_personality_state_map(avatar)
+    state_map = avatar_svc._load_avatar_personality_state_map(avatar)
     ranked: list[tuple[tuple[int, int, int, int, int], dict[str, str]]] = []
-    for row in _main()._iter_avatar_personality_review_examples(avatar):
-        state, _ = _main()._resolve_avatar_personality_example_state(row, state_map)
+    for row in avatar_svc._iter_avatar_personality_review_examples(avatar):
+        state, _ = avatar_svc._resolve_avatar_personality_example_state(row, state_map)
         if state != "approved":
             continue
-        response_text = _main()._clean_avatar_dataset_text(str(row.get("response_text") or ""))
+        response_text = avatar_svc._clean_avatar_dataset_text(str(row.get("response_text") or ""))
         if not response_text:
             continue
-        label = _main()._avatar_normalize_llm_label(str(row.get("llm_label") or row.get("heuristic_label") or row.get("auto_label") or "silver"))
+        label = avatar_svc._avatar_normalize_llm_label(str(row.get("llm_label") or row.get("heuristic_label") or row.get("auto_label") or "silver"))
         ranked.append(
             (
                 (
@@ -741,7 +742,7 @@ def _avatar_run_fit_check_judge(
 ) -> tuple[str, dict[str, object]]:
     import httpx
 
-    ollama_url, judge_model = _main()._avatar_resolve_local_judge_model()
+    ollama_url, judge_model = avatar_svc._avatar_resolve_local_judge_model()
     reference_text = "\n".join(
         f"- {item.get('video_title') or 'Reference'}: {item.get('response_text') or ''}"
         for item in reference_examples
@@ -791,7 +792,7 @@ def _avatar_run_fit_check_judge(
     raw_text = str(body.get("response") or "").strip()
     if not raw_text:
         raise ValueError("Local fit-check judge returned an empty response")
-    data = _main()._avatar_extract_json_object(raw_text)
+    data = avatar_svc._avatar_extract_json_object(raw_text)
     classification = str(data.get("classification") or "").strip().lower()
     if classification not in {"underfit", "balanced", "overfit", "unclear"}:
         classification = "unclear"
@@ -800,14 +801,14 @@ def _avatar_run_fit_check_judge(
             return []
         cleaned: list[str] = []
         for item in value:
-            text = _main()._clean_avatar_dataset_text(str(item))
+            text = avatar_svc._clean_avatar_dataset_text(str(item))
             if text:
                 cleaned.append(text)
         return cleaned
     payload: dict[str, object] = {
         "classification": classification,
         "confidence": max(0, min(100, int(data.get("confidence") or 0))),
-        "summary": _main()._clean_avatar_dataset_text(str(data.get("summary") or "")),
+        "summary": avatar_svc._clean_avatar_dataset_text(str(data.get("summary") or "")),
         "strengths": _clean_string_list(data.get("strengths")),
         "concerns": _clean_string_list(data.get("concerns")),
         "recommendations": _clean_string_list(data.get("recommendations")),
@@ -827,22 +828,22 @@ def test_avatar_personality_chat(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
-    status = _main()._load_avatar_personality_training_status(avatar)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    status = avatar_svc._load_avatar_personality_training_status(avatar)
     requested_adapter_path = str(body.adapter_path or "").strip()
     adapter_path = requested_adapter_path or str(status.adapter_path or personality.lora_adapter_path or "").strip()
-    base_model_id = str(status.base_model_id or personality.base_model_id or _main()._load_avatar_personality_training_config(avatar).base_model_id).strip()
+    base_model_id = str(status.base_model_id or personality.base_model_id or avatar_svc._load_avatar_personality_training_config(avatar).base_model_id).strip()
     if not adapter_path or not Path(adapter_path).exists():
         raise HTTPException(status_code=400, detail="No trained adapter is available yet.")
     if not str(body.message or "").strip():
         raise HTTPException(status_code=400, detail="Message is required.")
-    snapshot = _main()._avatar_find_training_snapshot(avatar, adapter_path)
+    snapshot = avatar_svc._avatar_find_training_snapshot(avatar, adapter_path)
     if requested_adapter_path and snapshot is None:
         raise HTTPException(status_code=404, detail="Selected snapshot was not found.")
 
     try:
-        system_prompt = str(personality.system_prompt or _main()._default_avatar_personality_prompt(speaker.name)).strip()
-        reply = _main()._avatar_generate_personality_reply(
+        system_prompt = str(personality.system_prompt or avatar_svc._default_avatar_personality_prompt(speaker.name)).strip()
+        reply = avatar_svc._avatar_generate_personality_reply(
             avatar_id=int(avatar.id),
             base_model_id=base_model_id,
             adapter_path=adapter_path,
@@ -879,22 +880,22 @@ def run_avatar_personality_fit_check(
     speaker = session.get(Speaker, avatar.speaker_id)
     if not speaker:
         raise HTTPException(status_code=404, detail="Source speaker not found")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
-    status = _main()._load_avatar_personality_training_status(avatar)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar, speaker_name=speaker.name)
+    status = avatar_svc._load_avatar_personality_training_status(avatar)
     requested_adapter_path = str(body.adapter_path or "").strip()
     adapter_path = requested_adapter_path or str(status.adapter_path or personality.lora_adapter_path or "").strip()
-    base_model_id = str(status.base_model_id or personality.base_model_id or _main()._load_avatar_personality_training_config(avatar).base_model_id).strip()
+    base_model_id = str(status.base_model_id or personality.base_model_id or avatar_svc._load_avatar_personality_training_config(avatar).base_model_id).strip()
     if not adapter_path or not Path(adapter_path).exists():
         raise HTTPException(status_code=400, detail="No trained adapter is available yet.")
-    snapshot = _main()._avatar_find_training_snapshot(avatar, adapter_path)
+    snapshot = avatar_svc._avatar_find_training_snapshot(avatar, adapter_path)
     if requested_adapter_path and snapshot is None:
         raise HTTPException(status_code=404, detail="Selected snapshot was not found.")
 
-    system_prompt = str(personality.system_prompt or _main()._default_avatar_personality_prompt(speaker.name)).strip()
+    system_prompt = str(personality.system_prompt or avatar_svc._default_avatar_personality_prompt(speaker.name)).strip()
     results: list[AvatarPersonalityFitCheckPromptResultRead] = []
     try:
         for key, prompt in _AVATAR_FIT_CHECK_PROMPTS:
-            reply = _main()._avatar_generate_personality_reply(
+            reply = avatar_svc._avatar_generate_personality_reply(
                 avatar_id=int(avatar.id),
                 base_model_id=base_model_id,
                 adapter_path=adapter_path,
@@ -950,7 +951,7 @@ def read_avatar_personality_examples(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    return _main()._read_avatar_personality_dataset_page(
+    return avatar_svc._read_avatar_personality_dataset_page(
         avatar,
         offset=offset,
         limit=limit,
@@ -968,10 +969,10 @@ def update_avatar_personality_example_state(
     avatar = session.get(Avatar, avatar_id)
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
-    personality, _, _ = _main()._ensure_avatar_profiles(session, avatar)
+    personality, _, _ = avatar_svc._ensure_avatar_profiles(session, avatar)
 
     found = False
-    for row in _main()._iter_avatar_personality_review_examples(avatar):
+    for row in avatar_svc._iter_avatar_personality_review_examples(avatar):
         try:
             if int(row.get("example_id")) == int(example_id):
                 found = True
@@ -981,7 +982,7 @@ def update_avatar_personality_example_state(
     if not found:
         raise HTTPException(status_code=404, detail="Dataset example not found")
 
-    state_map = _main()._load_avatar_personality_state_map(avatar)
+    state_map = avatar_svc._load_avatar_personality_state_map(avatar)
     next_state = str(body.state or "").strip().lower()
     if next_state not in {"approved", "rejected", "inherit"}:
         raise HTTPException(status_code=400, detail="Invalid dataset example state")
@@ -990,8 +991,8 @@ def update_avatar_personality_example_state(
     else:
         state_map[int(example_id)] = next_state
 
-    _main()._write_avatar_personality_state_map(avatar, state_map)
-    refreshed = _main()._refresh_avatar_personality_dataset_exports(avatar, personality)
+    avatar_svc._write_avatar_personality_state_map(avatar, state_map)
+    refreshed = avatar_svc._refresh_avatar_personality_dataset_exports(avatar, personality)
     session.add(personality)
     session.commit()
     session.refresh(personality)
@@ -1009,13 +1010,13 @@ def get_avatar_personality_duplicate_group(
     if not avatar:
         raise HTTPException(status_code=404, detail="Avatar not found")
 
-    state_map = _main()._load_avatar_personality_state_map(avatar)
+    state_map = avatar_svc._load_avatar_personality_state_map(avatar)
     items: List[AvatarPersonalityDatasetExampleRead] = []
-    for row in _main()._iter_avatar_personality_review_examples(avatar):
+    for row in avatar_svc._iter_avatar_personality_review_examples(avatar):
         try:
             if int(row.get("duplicate_group_id") or -1) == group_id:
-                state, manual_state = _main()._resolve_avatar_personality_example_state(row, state_map)
-                items.append(_main()._row_to_example_read(row, state, manual_state))
+                state, manual_state = avatar_svc._resolve_avatar_personality_example_state(row, state_map)
+                items.append(avatar_svc._row_to_example_read(row, state, manual_state))
         except Exception:
             continue
     return items
@@ -1038,7 +1039,7 @@ def find_similar_passages_for_example(
         raise HTTPException(status_code=404, detail="Avatar not found")
 
     target_row: Optional[dict] = None
-    for row in _main()._iter_avatar_personality_review_examples(avatar):
+    for row in avatar_svc._iter_avatar_personality_review_examples(avatar):
         try:
             if int(row.get("example_id")) == example_id:
                 target_row = row

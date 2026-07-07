@@ -14,6 +14,9 @@ from ..db.database import (
     Video,
 )
 from ..deps import get_ingestion_service, get_session
+from ..video_utils import (
+    _enqueue_unique_job,
+)
 from ..schemas import (
     ChannelClipRead,
     ClipBatchYoutubeUploadRequest,
@@ -263,7 +266,7 @@ def queue_export_clip_mp4(clip_id: int, session: Session = Depends(get_session))
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
     payload = {"clip_id": int(clip_id)}
-    job = _main()._enqueue_unique_job(session, video_id=clip.video_id, job_type="clip_export_mp4", payload=payload)
+    job = _enqueue_unique_job(session, video_id=clip.video_id, job_type="clip_export_mp4", payload=payload)
     return {"job_id": job.id, "video_id": job.video_id, "job_type": job.job_type, "status": job.status}
 
 @router.post("/clips/{clip_id}/export/captions")
@@ -371,7 +374,7 @@ def queue_export_clip_captions(clip_id: int, body: ClipCaptionExportRequest, ses
         raise HTTPException(status_code=400, detail="format must be srt or vtt")
     speaker_labels = clip.caption_speaker_labels if body.speaker_labels is None else bool(body.speaker_labels)
     payload = {"clip_id": int(clip_id), "format": fmt, "speaker_labels": bool(speaker_labels)}
-    job = _main()._enqueue_unique_job(session, video_id=clip.video_id, job_type="clip_export_captions", payload=payload)
+    job = _enqueue_unique_job(session, video_id=clip.video_id, job_type="clip_export_captions", payload=payload)
     return {"job_id": job.id, "video_id": job.video_id, "job_type": job.job_type, "status": job.status}
 
 

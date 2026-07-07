@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 
 from ..deps import get_ingestion_service
+from ..services import avatar_personality as avatar_svc
 from ..schemas import (
     ClearVoiceInstallInfo,
     ClearVoiceTestResult,
@@ -35,7 +36,7 @@ def system_cuda_health():
     try:
         payload = get_ingestion_service().get_cuda_health_status()
         if isinstance(payload, dict):
-            training_memory = _main()._collect_avatar_training_process_memory()
+            training_memory = avatar_svc._collect_avatar_training_process_memory()
             component_memory = payload.get("component_memory")
             if not isinstance(component_memory, dict):
                 component_memory = {}

@@ -46,6 +46,85 @@ def _main():
     return main
 
 
+def _move_profile_between_speakers(
+    session: Session,
+    source_speaker: Speaker,
+    profile: SpeakerEmbedding,
+    *,
+    target_speaker_id: Optional[int] = None,
+    new_speaker_name: Optional[str] = None,
+):
+    from sqlalchemy import func
+
+    has_target = target_speaker_id is not None
+    has_new = bool((new_speaker_name or "").strip())
+    if has_target == has_new:
+        raise HTTPException(status_code=400, detail="Provide exactly one of target_speaker_id or new_speaker_name")
+
+    profile_count = session.exec(
+        select(func.count(SpeakerEmbedding.id)).where(SpeakerEmbedding.speaker_id == source_speaker.id)
+    ).first() or 0
+    if int(profile_count) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot move the last voice profile")
+
+    target_speaker = None
+    created_target = False
+
+    if has_target:
+        target_speaker = session.get(Speaker, int(target_speaker_id))
+        if not target_speaker:
+            raise HTTPException(status_code=404, detail="Target speaker not found")
+        if target_speaker.channel_id != source_speaker.channel_id:
+            raise HTTPException(status_code=400, detail="Target speaker must be in the same channel")
+        if target_speaker.id == source_speaker.id:
+            raise HTTPException(status_code=400, detail="Target speaker must be different from source speaker")
+    else:
+        new_name = (new_speaker_name or "").strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="New speaker name is required")
+        target_speaker = Speaker(
+            channel_id=source_speaker.channel_id,
+            name=new_name,
+            embedding_blob=profile.embedding_blob,
+            is_extra=False,
+        )
+        session.add(target_speaker)
+        session.commit()
+        session.refresh(target_speaker)
+        created_target = True
+
+    profile.speaker_id = target_speaker.id
+    session.add(profile)
+
+    # Keep legacy single-embedding blob fields aligned with current profiles.
+    source_replacement = session.exec(
+        select(SpeakerEmbedding)
+        .where(SpeakerEmbedding.speaker_id == source_speaker.id, SpeakerEmbedding.id != profile.id)
+        .order_by(SpeakerEmbedding.created_at.desc(), SpeakerEmbedding.id.desc())
+    ).first()
+    if source_replacement:
+        source_speaker.embedding_blob = source_replacement.embedding_blob
+        session.add(source_speaker)
+    if not created_target:
+        target_speaker.embedding_blob = profile.embedding_blob
+        session.add(target_speaker)
+
+    session.commit()
+
+    remaining_source = session.exec(
+        select(func.count(SpeakerEmbedding.id)).where(SpeakerEmbedding.speaker_id == source_speaker.id)
+    ).first() or 0
+
+    return {
+        "profile_id": int(profile.id),
+        "source_speaker_id": int(source_speaker.id),
+        "target_speaker_id": int(target_speaker.id),
+        "target_speaker_name": target_speaker.name,
+        "created_target": created_target,
+        "remaining_source_profiles": int(remaining_source),
+    }
+
+
 @router.get("/speakers", response_model=List[SpeakerRead])
 def read_speakers(
     channel_id: Optional[int] = None,
@@ -425,7 +504,7 @@ def move_speaker_profile(
     profile = session.get(SpeakerEmbedding, profile_id)
     if not profile or profile.speaker_id != speaker_id:
         raise HTTPException(status_code=404, detail="Voice profile not found for this speaker")
-    result = _main()._move_profile_between_speakers(
+    result = _move_profile_between_speakers(
         session,
         source_speaker,
         profile,

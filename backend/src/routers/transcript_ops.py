@@ -22,6 +22,11 @@ from ..db.database import (
     Video,
 )
 from ..deps import get_ingestion_service, get_session
+from ..video_utils import (
+    _enqueue_unique_job,
+    _queue_diarization_rebuild_job,
+    _queue_full_retranscription_job,
+)
 from ..job_utils import PIPELINE_ACTIVE_STATUSES
 from ..schemas import (
     TranscriptDiarizationBenchmarkRequest,
@@ -636,7 +641,7 @@ def execute_transcript_optimization_campaign(campaign_id: int, session: Session 
             continue
         try:
             if action_tier == "low_risk_repair":
-                job = _main()._enqueue_unique_job(
+                job = _enqueue_unique_job(
                     session,
                     video_id=int(item.video_id),
                     job_type="transcript_repair",
@@ -648,7 +653,7 @@ def execute_transcript_optimization_campaign(campaign_id: int, session: Session 
                     },
                 )
             elif action_tier == "diarization_rebuild":
-                job, _, _, _ = _main()._queue_diarization_rebuild_job(
+                job, _, _, _ = _queue_diarization_rebuild_job(
                     session,
                     video=video,
                     force=bool(campaign.force_non_eligible),
@@ -656,7 +661,7 @@ def execute_transcript_optimization_campaign(campaign_id: int, session: Session 
                     queued_from=f"campaign:{campaign_id}",
                 )
             else:
-                job, _, _, _ = _main()._queue_full_retranscription_job(
+                job, _, _, _ = _queue_full_retranscription_job(
                     session,
                     video=video,
                     force=bool(campaign.force_non_eligible),
@@ -764,7 +769,7 @@ def queue_transcript_repair(
             detail=f"Video is currently classified as '{quality.get('recommended_tier') or 'none'}', not 'low_risk_repair'. Use force=true to queue anyway.",
         )
 
-    job = _main()._enqueue_unique_job(
+    job = _enqueue_unique_job(
         session,
         video_id=video_id,
         job_type="transcript_repair",
@@ -832,7 +837,7 @@ def queue_channel_transcript_repairs(
             skipped_not_low_risk += 1
             continue
 
-        job = _main()._enqueue_unique_job(
+        job = _enqueue_unique_job(
             session,
             video_id=int(video.id),
             job_type="transcript_repair",
@@ -875,7 +880,7 @@ def queue_transcript_diarization_rebuild(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    job, quality, _, _ = _main()._queue_diarization_rebuild_job(
+    job, quality, _, _ = _queue_diarization_rebuild_job(
         session,
         video=video,
         force=bool(request.force),
@@ -903,7 +908,7 @@ def queue_transcript_diarization_benchmark(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    job, quality, _, _ = _main()._queue_diarization_rebuild_job(
+    job, quality, _, _ = _queue_diarization_rebuild_job(
         session,
         video=video,
         force=bool(request.force),
@@ -956,7 +961,7 @@ def queue_channel_transcript_diarization_rebuilds(
             skipped_unprocessed += 1
             continue
         try:
-            job, quality, _, _ = _main()._queue_diarization_rebuild_job(
+            job, quality, _, _ = _queue_diarization_rebuild_job(
                 session,
                 video=video,
                 force=bool(request.force_non_eligible),
@@ -1007,7 +1012,7 @@ def queue_transcript_retranscription(
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    job, quality, _, _ = _main()._queue_full_retranscription_job(
+    job, quality, _, _ = _queue_full_retranscription_job(
         session,
         video=video,
         force=bool(request.force),
@@ -1056,7 +1061,7 @@ def queue_channel_transcript_retranscriptions(
             skipped_unprocessed += 1
             continue
         try:
-            job, quality, _, _ = _main()._queue_full_retranscription_job(
+            job, quality, _, _ = _queue_full_retranscription_job(
                 session,
                 video=video,
                 force=bool(request.force_non_eligible),

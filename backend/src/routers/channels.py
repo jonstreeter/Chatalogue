@@ -29,6 +29,12 @@ from ..db.database import (
     engine,
 )
 from ..deps import get_ingestion_service, get_session
+from ..video_utils import (
+    _extract_best_thumbnail_url,
+    _fetch_remote_video_info,
+    _make_unique_external_video_id,
+    _normalize_tiktok_video_url,
+)
 from ..job_utils import PIPELINE_ACTIVE_STATUSES
 from ..paths import MANUAL_MEDIA_DIR
 from ..schemas import ChannelOverviewRead
@@ -352,7 +358,7 @@ def add_video_to_channel(channel_id: int, url: str, session: Session = Depends(g
     elif channel_source == "tiktok":
         if "tiktok.com" not in normalized_url.lower():
             raise HTTPException(status_code=400, detail="Invalid TikTok URL")
-        normalized_url = _main()._normalize_tiktok_video_url(normalized_url)
+        normalized_url = _normalize_tiktok_video_url(normalized_url)
         lookup_url = normalized_url
         existing = session.exec(select(Video).where(Video.source_url == normalized_url)).first()
         if existing:
@@ -361,7 +367,7 @@ def add_video_to_channel(channel_id: int, url: str, session: Session = Depends(g
         raise HTTPException(status_code=409, detail="This channel type does not support remote add-video ingest yet.")
 
     try:
-        info = _main()._fetch_remote_video_info(lookup_url)
+        info = _fetch_remote_video_info(lookup_url)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to fetch video info: {e}")
 
@@ -374,7 +380,7 @@ def add_video_to_channel(channel_id: int, url: str, session: Session = Depends(g
 
     external_url = str(info.get("webpage_url") or normalized_url).strip() or normalized_url
     if channel_source == "tiktok":
-        external_url = _main()._normalize_tiktok_video_url(external_url)
+        external_url = _normalize_tiktok_video_url(external_url)
     if channel_source == "tiktok":
         existing = session.exec(select(Video).where(Video.source_url == external_url)).first()
         if existing:
@@ -387,7 +393,7 @@ def add_video_to_channel(channel_id: int, url: str, session: Session = Depends(g
         media_kind = None
     else:
         external_id = str(info.get("id") or "").strip()
-        unique_video_id = _main()._make_unique_external_video_id("tiktok", external_id, session)
+        unique_video_id = _make_unique_external_video_id("tiktok", external_id, session)
         media_source_type = "tiktok"
         media_kind = "video"
 
@@ -402,7 +408,7 @@ def add_video_to_channel(channel_id: int, url: str, session: Session = Depends(g
         published_at=get_ingestion_service()._extract_published_at_from_info(youtube_api_meta or info),
         duration=youtube_api_meta.get("duration") if youtube_api_meta.get("duration") is not None else info.get("duration"),
         view_count=youtube_api_meta.get("view_count") if youtube_api_meta.get("view_count") is not None else info.get("view_count"),
-        thumbnail_url=youtube_api_meta.get("thumbnail") or _main()._extract_best_thumbnail_url(info),
+        thumbnail_url=youtube_api_meta.get("thumbnail") or _extract_best_thumbnail_url(info),
         status="pending",
     )
     session.add(video)

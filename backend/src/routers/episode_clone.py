@@ -8,6 +8,9 @@ from sqlmodel import Session, select
 
 from ..db.database import Channel, Job, TranscriptSegment, Video
 from ..deps import get_ingestion_service, get_session
+from ..video_utils import (
+    _enqueue_unique_job,
+)
 from ..services import episode_clone as clone_svc
 from ..schemas import (
     EpisodeCloneCandidateRead,
@@ -238,7 +241,7 @@ def queue_episode_clone_generation(
         video_id=video_id,
         request_payload=request_payload,
     )
-    job = _main()._enqueue_unique_job(
+    job = _enqueue_unique_job(
         session,
         video_id=video_id,
         job_type="episode_clone",

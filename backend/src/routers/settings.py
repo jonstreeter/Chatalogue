@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 
 from ..db.database import Job, get_db_metrics_snapshot
 from ..deps import get_ingestion_service, get_session
+from .system import _purge_runtime_models
 from ..env_utils import ENV_PATH
 from ..job_utils import _job_queue_name
 from ..schemas import (
@@ -370,7 +371,7 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     # 4. Reload models in ingestion service
     if get_ingestion_service():
         print("Reloading models with new settings...")
-        _main()._purge_runtime_models(reason="settings_updated")
+        _purge_runtime_models(reason="settings_updated")
         
     return {"status": "updated"}
 
