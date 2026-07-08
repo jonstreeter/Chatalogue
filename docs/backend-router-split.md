@@ -1,5 +1,8 @@
 # Backend router split — status and continuation guide
 
+> Follow-up work: the `IngestionService` monolith this document mentions has
+> since been split into domain mixins — see `docs/ingestion-service-split.md`.
+
 `backend/src/main.py` began as a single file holding all API routes (242 of
 them) plus their helpers. It is being split into domain routers under
 `backend/src/routers/`. This documents the pattern so the remaining domains
