@@ -28,7 +28,5 @@ from .runtime import (  # noqa: F401
     ensure_dirs,
     temporary_disabled_blackhole_proxies,
 )
-from .service import (  # noqa: F401
-    IngestionService,
-    TransformersWhisperCompatModel,
-)
+from .service import IngestionService  # noqa: F401
+from .transcription import TransformersWhisperCompatModel  # noqa: F401
