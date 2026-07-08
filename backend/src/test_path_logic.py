@@ -1,5 +1,4 @@
 import re
-import shutil
 from pathlib import Path
 
 def sanitize_filename(name: str) -> str:
@@ -11,7 +10,7 @@ def sanitize_filename(name: str) -> str:
     s = s.strip().strip('.')
     return s or "Unknown"
 
-def test_path_logic():
+def test_path_logic(tmp_path: Path):
     print("Testing sanitize_filename...")
     assert sanitize_filename("Normal Name") == "Normal Name"
     assert sanitize_filename("Name: With / Bad <Chars>") == "Name With  Bad Chars"
@@ -19,10 +18,10 @@ def test_path_logic():
     assert sanitize_filename("...") == "Unknown"
     print("Sanitization OK.")
 
-    # Test file migration logic (mocked)
-    AUDIO_DIR = Path("test_audio_data")
-    if AUDIO_DIR.exists():
-        shutil.rmtree(AUDIO_DIR)
+    # Test file migration logic (mocked). Uses pytest's tmp_path instead of a
+    # fixed repo-relative dir: a fixed dir once got orphaned with a stuck
+    # handle on this exFAT volume and broke every subsequent run.
+    AUDIO_DIR = tmp_path / "audio"
     AUDIO_DIR.mkdir()
 
     # Inputs
@@ -32,7 +31,7 @@ def test_path_logic():
 
     safe_channel = sanitize_filename(channel_name)
     safe_title = sanitize_filename(video_title)
-    
+
     print(f"Safe Channel: '{safe_channel}'")
     print(f"Safe Title: '{safe_title}'")
 
@@ -42,22 +41,16 @@ def test_path_logic():
     # Scenario 1: Old file exists
     old_path = AUDIO_DIR / f"{yt_id}.m4a"
     old_path.touch()
-    
+
     # Simulate logic
     episode_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if expected_path.exists():
         print("New path already exists.")
     elif old_path.exists():
         print(f"Migrating {old_path} -> {expected_path}")
         old_path.rename(expected_path)
-    
+
     assert expected_path.exists()
     assert not old_path.exists()
     print("Migration OK.")
-
-    # Cleanup
-    shutil.rmtree(AUDIO_DIR)
-
-if __name__ == "__main__":
-    test_path_logic()
