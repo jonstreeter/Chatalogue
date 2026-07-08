@@ -5,10 +5,11 @@ os.environ.setdefault("DB_PROVIDER", "sqlite")
 os.environ.setdefault("DATABASE_URL", "sqlite:///backend/data/test_whisper_backend_selection_bootstrap.db")
 
 from src.services import ingestion as ingestion_mod
+from src.services.ingestion import runtime as ingestion_rt
 
 
 def test_resolve_whisper_backend_uses_installed_insanely_fast_whisper_setting(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("WHISPER_BACKEND", "insanely_fast_whisper")
 
     service = ingestion_mod.IngestionService()
@@ -21,7 +22,7 @@ def test_resolve_whisper_backend_uses_installed_insanely_fast_whisper_setting(mo
 
 
 def test_resolve_whisper_backend_falls_back_when_transformers_unavailable(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("WHISPER_BACKEND", "insanely_fast_whisper")
 
     real_find_spec = importlib.util.find_spec
@@ -43,7 +44,7 @@ def test_resolve_whisper_backend_falls_back_when_transformers_unavailable(monkey
 
 
 def test_transcription_engine_test_reports_whisper_backend_resolution(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("WHISPER_BACKEND", "insanely_fast_whisper")
 
     service = ingestion_mod.IngestionService()

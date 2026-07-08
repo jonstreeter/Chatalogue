@@ -5,11 +5,12 @@ os.environ.setdefault("DB_PROVIDER", "sqlite")
 os.environ.setdefault("DATABASE_URL", "sqlite:///backend/data/test_youtube_metadata_api_bootstrap.db")
 
 from src.services import ingestion as ingestion_mod
+from src.services.ingestion import runtime as ingestion_rt
 
 
 def test_fetch_youtube_data_api_video_metadata_batch_parses_core_fields(monkeypatch):
     monkeypatch.setenv("YOUTUBE_DATA_API_KEY", "test-key")
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
 
     service = ingestion_mod.IngestionService()
 

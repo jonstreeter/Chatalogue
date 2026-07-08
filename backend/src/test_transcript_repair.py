@@ -10,10 +10,11 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from src.db.database import Channel, Speaker, TranscriptQualitySnapshot, TranscriptRun, TranscriptSegment, TranscriptSegmentRevision, Video
 from src.services import ingestion as ingestion_mod
+from src.services.ingestion import runtime as ingestion_rt
 
 
 def test_repair_existing_transcript_creates_run_snapshot_and_backup(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
 
     engine = create_engine("sqlite://")
@@ -87,7 +88,7 @@ def test_repair_existing_transcript_creates_run_snapshot_and_backup(monkeypatch)
 
 
 def test_repair_existing_transcript_applies_entity_repair_and_revision_history(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
 
     engine = create_engine("sqlite://")
@@ -166,7 +167,7 @@ def test_repair_existing_transcript_applies_entity_repair_and_revision_history(m
 
 
 def test_repair_existing_transcript_applies_formatting_cleanup_and_revision_history(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
 
     engine = create_engine("sqlite://")
@@ -245,7 +246,7 @@ def test_repair_existing_transcript_applies_formatting_cleanup_and_revision_hist
 
 
 def test_consolidation_merges_same_speaker_into_turns_with_pause_and_continuation(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
 
     segments = [
@@ -276,7 +277,7 @@ def test_consolidation_merges_same_speaker_into_turns_with_pause_and_continuatio
 
 
 def test_consolidation_preserves_same_speaker_sentence_break_after_meaningful_pause(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
 
     segments = [

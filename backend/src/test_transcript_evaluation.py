@@ -8,10 +8,11 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from src.db.database import Channel, Speaker, TranscriptEvaluationResult, TranscriptGoldWindow, TranscriptSegment, Video
 from src.services import ingestion as ingestion_mod
+from src.services.ingestion import runtime as ingestion_rt
 
 
 def test_gold_window_evaluation_scores_current_transcript(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
 
     engine = create_engine("sqlite://")
@@ -94,7 +95,7 @@ def test_gold_window_evaluation_scores_current_transcript(monkeypatch):
 
 
 def test_gold_window_evaluation_handles_transcript_miss(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
 
     engine = create_engine("sqlite://")

@@ -8,10 +8,11 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from src.db.database import Channel, Job, Video
 from src.services import ingestion as ingestion_mod
+from src.services.ingestion import runtime as ingestion_rt
 
 
 def test_load_parakeet_model_aborts_after_excessive_reload_thrash(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("PARAKEET_MAX_RELOADS_DURING_TRANSCRIBE", "2")
     service = ingestion_mod.IngestionService()
     monkeypatch.setattr(
@@ -26,7 +27,7 @@ def test_load_parakeet_model_aborts_after_excessive_reload_thrash(monkeypatch):
         conn.execute(text("PRAGMA foreign_keys=ON"))
         SQLModel.metadata.create_all(conn)
 
-    monkeypatch.setattr(ingestion_mod, "engine", engine, raising=False)
+    monkeypatch.setattr(ingestion_rt, "engine", engine, raising=False)
 
     with Session(engine) as session:
         channel = Channel(url="https://example.com/@parakeet-guard", name="Parakeet Guard")

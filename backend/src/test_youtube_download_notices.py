@@ -4,10 +4,11 @@ os.environ.setdefault("DB_PROVIDER", "sqlite")
 os.environ.setdefault("DATABASE_URL", "sqlite:///backend/data/test_youtube_download_notices_bootstrap.db")
 
 from src.services import ingestion as ingestion_mod
+from src.services.ingestion import runtime as ingestion_rt
 
 
 def test_classify_ytdlp_download_notice_for_upcoming_premiere(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
 
     exc = Exception("ERROR: [youtube] Y9Y5M9lSDzg: Premieres in 4 days")

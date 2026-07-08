@@ -19,54 +19,50 @@ import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Literal
-from contextlib import contextmanager
 from fastapi.encoders import jsonable_encoder
 from sqlmodel import Session, select, func
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
 # NOTE: Heavy ML libraries (torch, faster_whisper, pyannote, numpy, scipy)
 # are imported lazily inside _load_models() and related methods to avoid
 # blocking the process at startup. Only download/queue operations run
 # without them.
 
-from ..db.database import engine, Video, Channel, Speaker, SpeakerEmbedding, TranscriptSegment, TranscriptSegmentRevision, TranscriptRun, TranscriptQualitySnapshot, TranscriptGoldWindow, TranscriptEvaluationResult, TranscriptEvaluationReview, TranscriptOptimizationCampaign, TranscriptOptimizationCampaignItem, Clip, ClipExportArtifact, Job, FunnyMoment, create_db_and_tables
-from .logger import log, log_verbose, is_verbose
-from . import episode_clone as clone_svc
-
-class JobPausedException(Exception):
-    """Raised when a job is paused by the user during processing."""
-    pass
-
-
-class JobCancelledException(Exception):
-    """Raised when a job is cancelled by the user during processing."""
-    pass
-
-
-class JobDeferredException(Exception):
-    """Raised when a queued job should be deferred and retried later."""
-    pass
-
-
-class JobNoticeException(Exception):
-    """Raised when a job should surface a user-facing notice instead of a hard error."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str = "notice",
-        video_status: str = "pending",
-        technical_detail: str | None = None,
-    ):
-        super().__init__(message)
-        self.notice_message = str(message or "Notice")
-        self.notice_code = str(code or "notice")
-        self.video_status = str(video_status or "pending")
-        self.technical_detail = str(technical_detail or self.notice_message)
-
+from ...db.database import Video, Channel, Speaker, SpeakerEmbedding, TranscriptSegment, TranscriptSegmentRevision, TranscriptRun, TranscriptQualitySnapshot, TranscriptGoldWindow, TranscriptEvaluationResult, TranscriptEvaluationReview, TranscriptOptimizationCampaign, TranscriptOptimizationCampaignItem, Clip, ClipExportArtifact, Job, FunnyMoment
+from ..logger import log, log_verbose, is_verbose
+from .. import episode_clone as clone_svc
+from .exceptions import (
+    JobCancelledException,
+    JobNoticeException,
+    JobPausedException,
+)
+from . import runtime
+from .runtime import (
+    AUDIO_DIR,
+    BACKEND_DIR,
+    CLIP_JOB_TYPES,
+    CUDA_MAX_AUTO_RESTARTS,
+    CUDA_RESTART_STATE_FILE,
+    CUDA_RESTART_WINDOW_SECONDS,
+    DATA_DIR,
+    DIARIZE_JOB_TYPES,
+    EXPORT_DIR,
+    HEARTBEAT_FILE,
+    MANUAL_MEDIA_DIR,
+    PROCESS_JOB_TYPES,
+    RECONSTRUCTION_JOB_TYPES,
+    RUNTIME_DIR,
+    TEMP_DIR,
+    TRANSCRIPT_REPAIR_JOB_TYPES,
+    VOICEFIXER_JOB_TYPES,
+    YOUTUBE_DATA_API_BASE_URL,
+    YOUTUBE_JOB_TYPES,
+    _env_float,
+    _truncate_error,
+    ensure_dirs,
+    temporary_disabled_blackhole_proxies,
+)
 
 class TransformersWhisperCompatModel:
     """Compatibility adapter that presents a faster-whisper-like interface."""
@@ -98,84 +94,6 @@ class TransformersWhisperCompatModel:
         )
 
 
-def _env_float(name: str, default: str) -> float:
-    """Parse a float from an environment variable with a fallback default."""
-    try:
-        return float((os.getenv(name) or default).strip() or default)
-    except (ValueError, TypeError):
-        return float(default)
-
-
-def _truncate_error(error: str | None, max_len: int = 4000) -> str:
-    """Truncate an error message to a safe DB storage length."""
-    return (error or "Unknown error")[:max_len]
-
-
-# Configuration
-DATA_DIR = Path(__file__).parent.parent.parent / "data"
-AUDIO_DIR = DATA_DIR / "audio"
-MANUAL_MEDIA_DIR = DATA_DIR / "manual_media"
-TEMP_DIR = DATA_DIR / "temp"
-PYTHON_TEMP_DIR = TEMP_DIR / "python_runtime"
-EXPORT_DIR = DATA_DIR / "exports"
-HEARTBEAT_FILE = DATA_DIR / "worker_heartbeat"
-RUNTIME_DIR = Path(__file__).parent.parent.parent / "runtime"
-CUDA_RESTART_STATE_FILE = RUNTIME_DIR / "cuda_restart_state.json"
-CUDA_MAX_AUTO_RESTARTS = int(os.getenv("CUDA_MAX_AUTO_RESTARTS", "3"))
-CUDA_RESTART_WINDOW_SECONDS = int(os.getenv("CUDA_RESTART_WINDOW_SECONDS", "600"))
-
-# Load .env from backend root
-load_dotenv(Path(__file__).parent.parent.parent / ".env")
-HF_TOKEN = os.getenv("HF_TOKEN")
-YOUTUBE_DATA_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
-
-def ensure_dirs():
-    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    MANUAL_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    PYTHON_TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    create_db_and_tables()
-
-
-def configure_python_temp_dir():
-    PYTHON_TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    temp_path = str(PYTHON_TEMP_DIR)
-    os.environ["TMP"] = temp_path
-    os.environ["TEMP"] = temp_path
-    os.environ["TMPDIR"] = temp_path
-    tempfile.tempdir = temp_path
-
-
-configure_python_temp_dir()
-
-
-@contextmanager
-def temporary_disabled_blackhole_proxies():
-    proxy_keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
-    removed: dict[str, str] = {}
-    try:
-        for key in proxy_keys:
-            value = str(os.environ.get(key) or "").strip()
-            lowered = value.lower()
-            if "127.0.0.1:9" in lowered or "localhost:9" in lowered:
-                removed[key] = value
-                os.environ.pop(key, None)
-        yield
-    finally:
-        for key, value in removed.items():
-            os.environ[key] = value
-
-
-PROCESS_JOB_TYPES = {"process"}
-VOICEFIXER_JOB_TYPES = {"voicefixer_cleanup"}
-RECONSTRUCTION_JOB_TYPES = {"conversation_reconstruct"}
-DIARIZE_JOB_TYPES = {"diarize"}
-FUNNY_JOB_TYPES = {"funny_detect", "funny_explain"}
-YOUTUBE_JOB_TYPES = {"youtube_metadata", "episode_clone"}
-CLIP_JOB_TYPES = {"clip_export_mp4", "clip_export_captions"}
-TRANSCRIPT_REPAIR_JOB_TYPES = {"transcript_repair"}
-
 class IngestionService:
     def __init__(self):
         ensure_dirs()
@@ -193,7 +111,7 @@ class IngestionService:
 
         # Ensure local bin (with ffmpeg DLLs) is in PATH for torchaudio/torchcodec
         # This must be done before loading models
-        bin_dir = str(Path(__file__).parent.parent.parent / "bin")
+        bin_dir = str(BACKEND_DIR / "bin")
         if bin_dir not in os.environ["PATH"]:
             log_verbose(f"Adding {bin_dir} to PATH for FFmpeg DLLs")
             os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
@@ -2370,7 +2288,7 @@ class IngestionService:
         payload = dict(payload or {})
         result = None
         evaluation = None
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             result = (
                 self.create_diarization_rebuild_run(session, video_id, payload=payload)
                 or self.create_full_retranscription_run(session, video_id, payload=payload)
@@ -3251,7 +3169,7 @@ class IngestionService:
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
-                with Session(engine) as session:
+                with Session(runtime.engine) as session:
                     job = session.get(Job, job_id)
                     if not job:
                         return
@@ -3288,7 +3206,7 @@ class IngestionService:
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
-                with Session(engine) as session:
+                with Session(runtime.engine) as session:
                     job = session.get(Job, job_id)
                     if not job:
                         return
@@ -3325,7 +3243,7 @@ class IngestionService:
         max_attempts = 6
         for attempt in range(max_attempts):
             try:
-                with Session(engine) as session:
+                with Session(runtime.engine) as session:
                     job = session.get(Job, job_id)
                     if not job:
                         return
@@ -3363,7 +3281,7 @@ class IngestionService:
         now_iso = datetime.now().isoformat()
         payload = {}
         try:
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 job = session.get(Job, job_id)
                 if job and job.payload_json:
                     payload = self._load_job_payload(job.payload_json)
@@ -3520,7 +3438,7 @@ class IngestionService:
         """Atomically claim the next queued job for a given queue."""
         from sqlalchemy import update as sa_update
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             candidates = session.exec(
                 select(Job.id, Job.video_id, Job.job_type, Job.payload_json)
                 .where(Job.status == "queued", Job.job_type.in_(list(allowed_job_types)))
@@ -3560,7 +3478,7 @@ class IngestionService:
             return None
 
     def _mark_job_success(self, job_id: int):
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             job = session.get(Job, job_id)
             if not job:
                 return
@@ -3576,14 +3494,14 @@ class IngestionService:
     def _trigger_semantic_index(self, video_id: int) -> None:
         """Fire-and-forget semantic index build for a single video after transcription."""
         try:
-            from .semantic_search import start_index_job
+            from ..semantic_search import start_index_job
             start_index_job([video_id])
             log(f"[semantic] Queued semantic indexing for video {video_id}.")
         except Exception as exc:
             log(f"[semantic] Failed to queue semantic index for video {video_id}: {exc}")
 
     def _mark_job_failure(self, job_id: int, error: str):
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             job = session.get(Job, job_id)
             if not job:
                 return
@@ -3631,7 +3549,7 @@ class IngestionService:
     def _recover_inactive_video_status(self, video_id: int) -> str | None:
         """Restore a video from an active-looking state when no active job exists."""
         active_job_statuses = ["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 return None
@@ -3670,7 +3588,7 @@ class IngestionService:
         video_status: str = "pending",
     ):
         restricted_codes = {"youtube_members_only", "youtube_private_video", "youtube_auth_required"}
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             if job_id:
                 job = session.get(Job, job_id)
                 if job:
@@ -3717,7 +3635,7 @@ class IngestionService:
     def _has_jobs_of_types(self, job_types: set[str], statuses: set[str]) -> bool:
         if not job_types or not statuses:
             return False
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             row = session.exec(
                 select(Job.id)
                 .where(Job.job_type.in_(list(job_types)), Job.status.in_(list(statuses)))
@@ -3726,7 +3644,7 @@ class IngestionService:
             return row is not None
 
     def _set_oldest_queued_job_status_detail(self, job_type: str, detail: str | None):
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             job = session.exec(
                 select(Job)
                 .where(Job.status == "queued", Job.job_type == job_type)
@@ -3746,7 +3664,7 @@ class IngestionService:
         return self._has_jobs_of_types(PROCESS_JOB_TYPES | DIARIZE_JOB_TYPES, active_statuses)
 
     def _get_detached_video(self, video_id: int) -> Video:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise RuntimeError(f"Video {video_id} not found")
@@ -3884,7 +3802,7 @@ class IngestionService:
         return segments, total_duration, engine_from_raw
 
     def _queue_diarize_followup(self, video_id: int, parent_job_id: int):
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             parent = session.get(Job, parent_job_id)
             if not parent:
                 raise RuntimeError(f"Parent process job {parent_job_id} not found")
@@ -3895,7 +3813,7 @@ class IngestionService:
             return int(child.id)
 
     def _mark_process_job_waiting_for_diarize(self, job_id: int, diarize_job_id: int):
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             job = session.get(Job, job_id)
             if not job:
                 return
@@ -3937,7 +3855,7 @@ class IngestionService:
 
     def _finalize_process_job_from_child(self, parent_job_id: int, child_job_id: int, status: str, error: str = None):
         """Update a parent process job based on its child job's outcome."""
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             parent = session.get(Job, parent_job_id)
             child = session.get(Job, child_job_id)
             if not parent:
@@ -3963,7 +3881,7 @@ class IngestionService:
     def _enqueue_job(self, video_id: int, job_type: str, payload: dict | None = None):
         """Add a queued job if one of the same type+payload isn't already active/queued."""
         payload_text = json.dumps(payload or {}, sort_keys=True) if payload is not None else None
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             existing = session.exec(
                 select(Job).where(
                     Job.video_id == video_id,
@@ -4075,7 +3993,7 @@ class IngestionService:
                 provider_override=str(request_payload.get("provider_override") or ""),
                 model_override=str(request_payload.get("model_override") or ""),
             )
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 result = clone_svc.generate_episode_clone(
                     session,
                     video_id=video_id,
@@ -4144,7 +4062,7 @@ class IngestionService:
     def _handle_transcript_repair_job(self, job_id: int, video_id: int, payload: dict):
         self._update_job_status_detail(job_id, "Repairing transcript segmentation...")
         self._update_job_progress(job_id, 5)
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             result = self.repair_existing_transcript(
                 session,
                 video_id,
@@ -4182,7 +4100,7 @@ class IngestionService:
         self._update_job_status_detail(job_id, None)
 
     def _run_voicefixer_cleanup(self, video_id: int, *, job_id: int | None = None, force: bool = False) -> Path:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -4379,7 +4297,7 @@ class IngestionService:
                     pass
 
     def _run_conversation_reconstruction(self, video_id: int, *, job_id: int | None = None, force: bool = False) -> Path:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -4855,14 +4773,14 @@ class IngestionService:
 
     def _get_ffmpeg_cmd(self):
         """Return path to ffmpeg executable."""
-        ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+        ffmpeg_bin = BACKEND_DIR / "bin"
         if (ffmpeg_bin / "ffmpeg.exe").exists():
             return str(ffmpeg_bin / "ffmpeg.exe")
         return "ffmpeg"
 
     def _get_ffprobe_cmd(self):
         """Return path to ffprobe executable."""
-        ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+        ffmpeg_bin = BACKEND_DIR / "bin"
         if (ffmpeg_bin / "ffprobe.exe").exists():
             return str(ffmpeg_bin / "ffprobe.exe")
         return "ffprobe"
@@ -4917,7 +4835,6 @@ class IngestionService:
     def _analyze_audio_file(self, audio_path: Path, *, source_label: str) -> dict:
         import numpy as np
         import soundfile as sf  # type: ignore
-        import tempfile
 
         probe = self._probe_audio_file(audio_path)
         with tempfile.TemporaryDirectory(prefix="cleanup-analysis-") as tmp_dir:
@@ -4963,7 +4880,6 @@ class IngestionService:
         This bypasses torchaudio/torchcodec which have compatibility issues with dev PyTorch.
         Returns: dict with 'waveform' (torch.Tensor) and 'sample_rate' (int)
         """
-        import tempfile
         import soundfile as sf
         import torch
 
@@ -5577,7 +5493,7 @@ class IngestionService:
 
         # Signal restart: touch main.py for --reload mode, then exit the process.
         # In non-reload mode (run_windows.bat), the exit code tells the wrapper to respawn.
-        main_py = Path(__file__).parent.parent / "main.py"
+        main_py = BACKEND_DIR / "src" / "main.py"
         try:
             main_py.touch()
         except Exception:
@@ -7199,7 +7115,7 @@ class IngestionService:
         payload = {}
         if job_id:
             try:
-                with Session(engine) as session:
+                with Session(runtime.engine) as session:
                     job = session.get(Job, job_id)
                     if job and job.payload_json:
                         payload = self._load_job_payload(job.payload_json)
@@ -8412,7 +8328,7 @@ class IngestionService:
 
     def _transcription_queue_pressure(self, current_job_id: int | None = None) -> int:
         try:
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 statement = select(func.count()).select_from(Job).where(
                     Job.job_type == "process",
                     Job.status.in_(("queued", "downloading", "transcribing", "diarizing", "processing")),
@@ -8958,7 +8874,7 @@ class IngestionService:
             channel_name = info.get('uploader') or info.get('channel') or "Unknown Channel"
             icon_url, header_image_url = self._extract_channel_artwork(info)
             
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             existing = session.exec(select(Channel).where(Channel.url == url)).first()
             if existing:
                 return existing
@@ -8983,7 +8899,7 @@ class IngestionService:
         safe_slug = self.sanitize_filename(clean_name).replace(" ", "_").lower()
         manual_url = f"manual://channel/{safe_slug}"
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             existing = session.exec(select(Channel).where(Channel.url == manual_url)).first()
             if existing:
                 return existing
@@ -9020,7 +8936,7 @@ class IngestionService:
         safe_slug = self.sanitize_filename(clean_name).replace(" ", "_").lower()
         channel_url = normalized_url or f"tiktok://channel/{safe_slug}"
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             existing = session.exec(select(Channel).where(Channel.url == channel_url)).first()
             if existing:
                 return existing
@@ -9180,7 +9096,7 @@ class IngestionService:
         return candidate_path
 
     def build_cleanup_workbench(self, video_id: int) -> dict:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -9240,7 +9156,7 @@ class IngestionService:
             }
 
     def analyze_cleanup_workbench_audio(self, video_id: int) -> dict:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -9261,7 +9177,7 @@ class IngestionService:
             percent=16,
         )
         analysis = self._analyze_audio_file(source_path, source_label="Original upload")
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -9292,7 +9208,7 @@ class IngestionService:
         if model_name not in stage_config["models"]:
             raise ValueError("Unsupported ClearVoice model for this stage.")
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -9358,7 +9274,7 @@ class IngestionService:
         processor.write(result, output_path=str(output_path))
         stats = self._analyze_audio_file(output_path, source_label=f"{model_name} candidate")
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -9390,7 +9306,7 @@ class IngestionService:
         return self.build_cleanup_workbench(video_id)
 
     def select_cleanup_workbench_candidate(self, video_id: int, *, candidate_id: str | None = None) -> dict:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -9419,7 +9335,7 @@ class IngestionService:
         cleaned_path: str | None = None,
         error: str | None = None,
     ) -> None:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 return
@@ -9443,7 +9359,7 @@ class IngestionService:
         error: str | None = None,
         model: str | None = None,
     ) -> None:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 return
@@ -9461,7 +9377,7 @@ class IngestionService:
     def _check_job_not_paused(self, job_id: int | None) -> None:
         if not job_id:
             return
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             job = session.get(Job, int(job_id))
             if not job:
                 return
@@ -9667,7 +9583,6 @@ class IngestionService:
     def _fit_waveform_duration_with_ffmpeg(self, wav, sample_rate: int, stretch_rate: float):
         import numpy as np
         import soundfile as sf  # type: ignore
-        import tempfile
 
         arr = np.asarray(wav, dtype=np.float32).reshape(-1)
         if arr.size == 0:
@@ -9947,7 +9862,7 @@ class IngestionService:
                 message="Loading speaker roster for the workbench...",
                 percent=8,
             )
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             speaker_name_map = {
                 int(row.id): str(row.name or f"Speaker {row.id}")
                 for row in session.exec(select(Speaker).where(Speaker.channel_id == video.channel_id)).all()
@@ -10165,7 +10080,7 @@ class IngestionService:
             percent=6,
         )
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -10374,7 +10289,7 @@ class IngestionService:
         selected: bool | None = None,
         clear_cleaned: bool | None = None,
     ) -> dict:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -10423,7 +10338,7 @@ class IngestionService:
             return state
 
     def add_reconstruction_performance_sample(self, video_id: int, *, speaker_id: int) -> dict:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -10459,7 +10374,7 @@ class IngestionService:
             raise ValueError("No additional performance sample candidates are available for this speaker.")
 
     def set_reconstruction_speaker_approval(self, video_id: int, *, speaker_id: int, approved: bool) -> dict:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -10479,7 +10394,7 @@ class IngestionService:
             message="Preparing the selected performance sample for cleanup...",
             percent=8,
         )
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -10613,7 +10528,7 @@ class IngestionService:
             )
             shutil.copyfile(current_path, cleaned_clip)
 
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 video = session.get(Video, video_id)
                 if not video:
                     raise ValueError("Video not found")
@@ -10647,7 +10562,7 @@ class IngestionService:
         performance_mode: bool | None = None,
     ) -> dict:
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -11016,7 +10931,7 @@ class IngestionService:
         completed_items: int | None = None,
         total_items: int | None = None,
     ) -> None:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             channel = session.get(Channel, channel_id)
             if not channel:
                 return
@@ -11512,7 +11427,7 @@ class IngestionService:
         return new_video_count
 
     def refresh_channel(self, channel_id: int):
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             channel = session.get(Channel, channel_id)
             if not channel:
                 raise ValueError("Channel not found")
@@ -11840,13 +11755,13 @@ class IngestionService:
         return jobs_created
 
     def queue_channel_unprocessed_videos(self, channel_id: int) -> int:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             jobs_created = self._queue_channel_unprocessed_videos(session, channel_id)
             session.commit()
             return jobs_created
 
     def sync_monitored_channel(self, channel_id: int) -> dict[str, int | bool]:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             channel = session.get(Channel, channel_id)
             if not channel or not getattr(channel, "actively_monitored", False):
                 return {"queued": 0, "refreshed": False}
@@ -11873,7 +11788,7 @@ class IngestionService:
 
         while not stop_event.is_set():
             try:
-                with Session(engine) as session:
+                with Session(runtime.engine) as session:
                     channel_ids = session.exec(
                         select(Channel.id).where(Channel.actively_monitored == True).order_by(Channel.id.asc())
                     ).all()
@@ -11925,7 +11840,7 @@ class IngestionService:
             commit_batch = 25
         commit_batch = max(1, min(500, commit_batch))
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             query = (
                 select(Video)
                 .where(
@@ -12182,7 +12097,7 @@ class IngestionService:
             if manual_path is not None:
                 return manual_path
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
              channel = session.get(Channel, video.channel_id)
              channel_name = channel.name if channel else "Unknown Channel"
              same_title_count = session.exec(
@@ -12293,7 +12208,6 @@ class IngestionService:
         It is not a classifier, but works well enough as a laughter candidate generator.
         """
         import os
-        import tempfile
         import numpy as np
         import soundfile as sf
 
@@ -12543,7 +12457,7 @@ class IngestionService:
             percent=2,
         )
         try:
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 video = session.get(Video, video_id)
                 if not video:
                     raise ValueError(f"Video {video_id} not found")
@@ -13912,7 +13826,7 @@ class IngestionService:
         if not self._is_llm_enabled():
             raise RuntimeError("LLM summaries are disabled. Enable LLM in Settings first.")
 
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError(f"Video {video_id} not found")
@@ -14102,7 +14016,7 @@ class IngestionService:
             percent=2,
         )
         try:
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 video = session.get(Video, video_id)
                 if not video:
                     raise ValueError(f"Video {video_id} not found")
@@ -14292,7 +14206,7 @@ class IngestionService:
                 pass
 
         # Determine ffmpeg location
-        ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+        ffmpeg_bin = BACKEND_DIR / "bin"
         ffmpeg_loc = None
         if (ffmpeg_bin / "ffmpeg.exe").exists():
             ffmpeg_loc = str(ffmpeg_bin)
@@ -14316,7 +14230,7 @@ class IngestionService:
                 downloaded = d.get('downloaded_bytes', 0)
                 pct = min(int(downloaded / total * 100), 100) if total > 0 else 0
 
-                with Session(engine) as s:
+                with Session(runtime.engine) as s:
                     job = s.get(Job, job_id)
                     if job:
                         if job.status == 'paused':
@@ -14496,7 +14410,7 @@ class IngestionService:
         orphan_statuses = ["running", "downloading", "transcribing", "diarizing"]
         requeued = 0
         per_type_front_offsets: dict[str, int] = {}
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             jobs = session.exec(select(Job).where(Job.status.in_(orphan_statuses))).all()
             now = datetime.now()
             for job in jobs:
@@ -14558,7 +14472,7 @@ class IngestionService:
         therefore stale UI state, not an active sync.
         """
         cleaned = 0
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             channels = session.exec(select(Channel).where(Channel.status == "refreshing")).all()
             for channel in channels:
                 channel.status = "active"
@@ -14579,7 +14493,7 @@ class IngestionService:
         active_video_statuses = ["queued", "downloading", "transcribing", "diarizing"]
         active_job_statuses = ["queued", "running", "downloading", "transcribing", "diarizing", "waiting_diarize"]
         cleaned = 0
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             videos = session.exec(
                 select(Video).where(Video.status.in_(active_video_statuses))
             ).all()
@@ -14671,7 +14585,7 @@ class IngestionService:
                     # Auto-switch to diarize if threshold is met
                     auto_threshold = int(os.getenv("DIARIZE_AUTO_START_THRESHOLD", "0"))
                     if auto_threshold > 0 and focus_mode == "transcribe":
-                        with Session(engine) as session:
+                        with Session(runtime.engine) as session:
                             diarize_count = session.exec(
                                 select(func.count(Job.id)).where(
                                     Job.job_type.in_(DIARIZE_JOB_TYPES),
@@ -14725,7 +14639,7 @@ class IngestionService:
                         self._process_diarize_phase(video_detached, audio_path, segments, job_id)
                         self._record_transcript_optimization_completion(job_id, video_id, payload)
                         self._mark_job_success(job_id)
-                        with Session(engine) as session:
+                        with Session(runtime.engine) as session:
                             job = session.get(Job, job_id)
                             if job:
                                 self._cleanup_redo_backup_for_job(job.payload_json)
@@ -14757,7 +14671,7 @@ class IngestionService:
                     )
                     # If this was a destructive redo-diarization run, restore backup transcript rows.
                     try:
-                        with Session(engine) as session:
+                        with Session(runtime.engine) as session:
                             job = session.get(Job, job_id)
                             if job:
                                 self._restore_redo_backup_if_needed(session, job, reason="job notice")
@@ -14771,7 +14685,7 @@ class IngestionService:
                     log(tb)
 
                     # 4. Mark failure
-                    with Session(engine) as session:
+                    with Session(runtime.engine) as session:
                         job = session.get(Job, job_id)
                         if job:
                             job.status = "failed"
@@ -14782,7 +14696,7 @@ class IngestionService:
                     self._recover_inactive_video_status(video_id)
                     # If this was a destructive redo-diarization run, restore backup transcript rows.
                     try:
-                        with Session(engine) as session:
+                        with Session(runtime.engine) as session:
                             job = session.get(Job, job_id)
                             if job:
                                 self._restore_redo_backup_if_needed(session, job, reason="job failure")
@@ -14851,7 +14765,7 @@ class IngestionService:
                     self._record_transcript_optimization_completion(job_id, video_id, payload)
                     if parent_job_id:
                         self._finalize_process_job_from_child(parent_job_id, job_id, "completed")
-                        with Session(engine) as session:
+                        with Session(runtime.engine) as session:
                             parent = session.get(Job, parent_job_id)
                             if parent:
                                 self._cleanup_redo_backup_for_job(parent.payload_json)
@@ -14951,7 +14865,7 @@ class IngestionService:
             try:
                 candidate = None
 
-                with Session(engine) as session:
+                with Session(runtime.engine) as session:
                     queued_jobs = session.exec(
                         select(Job)
                         .where(Job.status == "queued", Job.job_type == "process")
@@ -15008,7 +14922,7 @@ class IngestionService:
                     self._validate_and_retry_audio(video, downloaded, job_id=None)
                     # Mark video as downloaded so the UI can show that this queued item
                     # is pre-fetched and ready for transcription when it reaches the front.
-                    with Session(engine) as session:
+                    with Session(runtime.engine) as session:
                         v = session.get(Video, video.id)
                         if v and v.status in ["pending", "failed", "downloaded"] and not v.processed:
                             v.status = "downloaded"
@@ -15070,7 +14984,7 @@ class IngestionService:
 
         # Also delete the raw transcript checkpoint so re-processing actually re-transcribes
         if delete_raw_transcript:
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 video = session.get(Video, video_id)
                 if video:
                     try:
@@ -15225,7 +15139,7 @@ class IngestionService:
         output_path = TEMP_DIR / f"temp_slice_{start_ms}_{dur_tag}_{threading.get_ident()}_{input_path.stem}.wav"
         
         # Determine ffmpeg location (copied from download_audio logic)
-        ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+        ffmpeg_bin = BACKEND_DIR / "bin"
         ffmpeg_cmd = str(ffmpeg_bin / "ffmpeg.exe") if (ffmpeg_bin / "ffmpeg.exe").exists() else "ffmpeg"
 
         cmd = [ffmpeg_cmd, "-y", "-ss", str(start_time), "-i", str(input_path)]
@@ -15256,7 +15170,7 @@ class IngestionService:
                 },
             )
         try:
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 current_video = session.get(Video, video_id)
                 if current_video and current_video.access_restricted:
                     raise JobNoticeException(
@@ -15275,7 +15189,7 @@ class IngestionService:
             self._process_diarize_phase(video_detached, audio_path, segments, job_id)
             payload = {}
             if job_id:
-                with Session(engine) as session:
+                with Session(runtime.engine) as session:
                     job = session.get(Job, job_id)
                     payload = self._load_job_payload(job.payload_json if job else None)
                 self._record_transcript_optimization_completion(job_id, video_id, payload)
@@ -15291,7 +15205,7 @@ class IngestionService:
         except JobPausedException:
             log(f"Video {video_id} paused by user")
             # Update status to pending
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 v = session.get(Video, video_id)
                 if v:
                     v.status = "pending"
@@ -15300,7 +15214,7 @@ class IngestionService:
             raise
         except JobNoticeException as e:
             log(f"Notice processing video {video_id}: {e.notice_message}")
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 v = session.get(Video, video_id)
                 if v:
                     v.status = e.video_status
@@ -15326,7 +15240,7 @@ class IngestionService:
             log(tb)
             
             # Fail status
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 v = session.get(Video, video_id)
                 if v:
                     v.status = "failed"
@@ -15432,7 +15346,7 @@ class IngestionService:
             path = Path(file_path)
             if not path.exists():
                 return None
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 clip = session.get(Clip, clip_id)
                 if not clip:
                     return None
@@ -15457,7 +15371,7 @@ class IngestionService:
     def create_clip(self, video_id: int, start: float, end: float, audio_only: bool = False) -> str:
         if end <= start:
             raise ValueError("Clip end must be greater than start")
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video: raise ValueError("Video not found")
             
@@ -15471,7 +15385,7 @@ class IngestionService:
                     output_path = TEMP_DIR / output_filename
                     
                     # Determine ffmpeg
-                    ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+                    ffmpeg_bin = BACKEND_DIR / "bin"
                     ffmpeg_cmd = "ffmpeg"
                     if (ffmpeg_bin / "ffmpeg.exe").exists():
                         ffmpeg_cmd = str(ffmpeg_bin / "ffmpeg.exe")
@@ -15502,7 +15416,7 @@ class IngestionService:
             output_path = TEMP_DIR / output_filename
 
             url = f"https://www.youtube.com/watch?v={video.youtube_id}"
-            ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+            ffmpeg_bin = BACKEND_DIR / "bin"
             ffmpeg_loc = str(ffmpeg_bin) if (ffmpeg_bin / "ffmpeg.exe").exists() else None
             source_template = TEMP_DIR / f"clipsrc_{video.youtube_id}_{timestamp}.%(ext)s"
 
@@ -15568,7 +15482,7 @@ class IngestionService:
             # Safety check: if yt-dlp unexpectedly returned a long/full file, hard-trim
             # with ffmpeg so the final output always matches [start, end].
             def _probe_duration_seconds(path: Path):
-                ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+                ffmpeg_bin = BACKEND_DIR / "bin"
                 ffprobe_cmd = str(ffmpeg_bin / "ffprobe.exe") if (ffmpeg_bin / "ffprobe.exe").exists() else "ffprobe"
                 try:
                     res = subprocess.run(
@@ -15661,7 +15575,7 @@ class IngestionService:
         return merged
 
     def _probe_media_duration_seconds(self, path: Path) -> float | None:
-        ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+        ffmpeg_bin = BACKEND_DIR / "bin"
         ffprobe_cmd = str(ffmpeg_bin / "ffprobe.exe") if (ffmpeg_bin / "ffprobe.exe").exists() else "ffprobe"
         try:
             res = subprocess.run(
@@ -15727,7 +15641,7 @@ class IngestionService:
                 keep_path = part_paths[0]
                 return str(part_paths[0])
 
-            with Session(engine) as session:
+            with Session(runtime.engine) as session:
                 video = session.get(Video, video_id)
                 if not video:
                     raise ValueError("Video not found")
@@ -15836,7 +15750,7 @@ class IngestionService:
         fmt = (fmt or "srt").lower()
         if fmt not in {"srt", "vtt"}:
             raise ValueError("Caption format must be 'srt' or 'vtt'")
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             clip = session.get(Clip, clip_id)
             if not clip:
                 raise ValueError("Clip not found")
@@ -15936,7 +15850,7 @@ class IngestionService:
         return ",".join(filters) if filters else None
 
     def render_clip_export_mp4(self, clip_id: int) -> Path:
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             clip = session.get(Clip, clip_id)
             if not clip:
                 raise ValueError("Clip not found")
@@ -16041,7 +15955,7 @@ class IngestionService:
                 fallback_format = 'bestaudio[ext=m4a]/bestaudio/best'
 
             # Re-download with fallback format
-            ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+            ffmpeg_bin = BACKEND_DIR / "bin"
             ffmpeg_loc = str(ffmpeg_bin) if (ffmpeg_bin / "ffmpeg.exe").exists() else 'C:/Program Files/ffmpeg'
             base_path = audio_path.with_suffix('')
 
@@ -16104,7 +16018,7 @@ class IngestionService:
         Returns (video_obj, audio_path). video_obj is detached from session."""
         
         # Short-lived session for status update
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError(f"Video {video_id} not found")
@@ -16151,7 +16065,7 @@ class IngestionService:
         import os
         
         # 1. Update status
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             # Re-attach or fetch fresh to update
             v = session.get(Video, video.id)
             if v:
@@ -16193,7 +16107,7 @@ class IngestionService:
         force_retranscription = False
         if job_id:
             try:
-                with Session(engine) as session:
+                with Session(runtime.engine) as session:
                     job = session.get(Job, job_id)
                     payload = self._load_job_payload(job.payload_json if job else None)
                     force_retranscription = bool(payload.get("force_retranscription"))
@@ -16349,7 +16263,7 @@ class IngestionService:
                     raw_language = self._normalize_language_code(data.get("transcript_language"))
                     final_language = raw_language or route_language
                     if final_language:
-                        with Session(engine) as session:
+                        with Session(runtime.engine) as session:
                             v = session.get(Video, video.id)
                             if v:
                                 v.transcript_language = final_language
@@ -16887,7 +16801,7 @@ class IngestionService:
         final_language = route_language or self._normalize_language_code(
             getattr(whisper_info, "language", None) if whisper_info is not None else None
         )
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             v = session.get(Video, video.id)
             if v:
                 if final_language:
@@ -16907,7 +16821,7 @@ class IngestionService:
         job_payload = {}
         
         # 1. Update Status
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             v = session.get(Video, video.id)
             if v: 
                 v.status = "diarizing"
@@ -16924,7 +16838,7 @@ class IngestionService:
         self._record_job_stage_start(job_id, "diarize")
         if job_id:
             try:
-                with Session(engine) as session:
+                with Session(runtime.engine) as session:
                     job = session.get(Job, job_id)
                     if job:
                         job_payload = self._load_job_payload(getattr(job, "payload_json", None))
@@ -17047,7 +16961,7 @@ class IngestionService:
             audio_input = self._load_audio_for_pyannote(str(audio_path))
 
         # 3. Speaker ID & Final Save (Open Session)
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             # Re-fetch video attached to this session
             video_attached = session.get(Video, video.id)
             if not video_attached:
@@ -17530,7 +17444,7 @@ class IngestionService:
         """
         import subprocess
         
-        with Session(engine) as session:
+        with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError("Video not found")
@@ -17657,7 +17571,7 @@ class IngestionService:
         output_path = thumb_dir / filename
         
         # Determine ffmpeg
-        ffmpeg_bin = Path(__file__).parent.parent.parent / "bin"
+        ffmpeg_bin = BACKEND_DIR / "bin"
         ffmpeg_cmd = "ffmpeg"
         if (ffmpeg_bin / "ffmpeg.exe").exists():
             ffmpeg_cmd = str(ffmpeg_bin / "ffmpeg.exe")

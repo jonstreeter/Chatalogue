@@ -6,10 +6,11 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///backend/data/test_transcription
 
 from src.db.database import Video
 from src.services import ingestion as ingestion_mod
+from src.services.ingestion import runtime as ingestion_rt
 
 
 def test_multilingual_routing_uses_metadata_hints_for_spanish_episode(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("TRANSCRIPTION_ENGINE", "parakeet")
     monkeypatch.setenv("MULTILINGUAL_ROUTING_ENABLED", "true")
     monkeypatch.setenv("MULTILINGUAL_WHISPER_MODEL", "large-v3")
@@ -33,7 +34,7 @@ def test_multilingual_routing_uses_metadata_hints_for_spanish_episode(monkeypatc
 
 
 def test_multilingual_routing_uses_audio_probe_when_metadata_is_ambiguous(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("TRANSCRIPTION_ENGINE", "parakeet")
     monkeypatch.setenv("MULTILINGUAL_ROUTING_ENABLED", "true")
     monkeypatch.setenv("MULTILINGUAL_WHISPER_MODEL", "large-v3")
@@ -65,7 +66,7 @@ def test_multilingual_routing_uses_audio_probe_when_metadata_is_ambiguous(monkey
 
 
 def test_english_probe_keeps_default_engine(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("TRANSCRIPTION_ENGINE", "parakeet")
     monkeypatch.setenv("MULTILINGUAL_ROUTING_ENABLED", "true")
     monkeypatch.setenv("MULTILINGUAL_WHISPER_MODEL", "large-v3")
@@ -96,7 +97,7 @@ def test_english_probe_keeps_default_engine(monkeypatch):
 
 
 def test_sequential_backlog_reroutes_long_cold_parakeet_job_to_whisper(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("TRANSCRIPTION_ENGINE", "auto")
     monkeypatch.setenv("MULTILINGUAL_ROUTING_ENABLED", "true")
     monkeypatch.setenv("PIPELINE_EXECUTION_MODE", "sequential")
@@ -132,7 +133,7 @@ def test_sequential_backlog_reroutes_long_cold_parakeet_job_to_whisper(monkeypat
 
 
 def test_sequential_backlog_respects_explicit_parakeet_preference(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("TRANSCRIPTION_ENGINE", "parakeet")
     monkeypatch.setenv("MULTILINGUAL_ROUTING_ENABLED", "true")
     monkeypatch.setenv("PIPELINE_EXECUTION_MODE", "sequential")
@@ -165,7 +166,7 @@ def test_sequential_backlog_respects_explicit_parakeet_preference(monkeypatch):
 
 
 def test_sequential_backlog_keeps_warm_parakeet_for_long_job(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     monkeypatch.setenv("TRANSCRIPTION_ENGINE", "parakeet")
     monkeypatch.setenv("MULTILINGUAL_ROUTING_ENABLED", "true")
     monkeypatch.setenv("PIPELINE_EXECUTION_MODE", "sequential")

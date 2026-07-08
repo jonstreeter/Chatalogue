@@ -22,10 +22,11 @@ from src.db.database import (
 from src.routers import jobs as jobs_routes
 from src.routers import transcript_ops as transcript_ops_routes
 from src.services import ingestion as ingestion_mod
+from src.services.ingestion import runtime as ingestion_rt
 
 
 def test_restore_transcript_from_run_creates_restore_run(monkeypatch, tmp_path):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
     monkeypatch.setattr(service, "save_transcript_files", lambda video, session: None, raising=False)
     monkeypatch.setattr(service, "reindex_video_semantic_embeddings", lambda video_id: None, raising=False)
@@ -112,7 +113,7 @@ def test_restore_transcript_from_run_creates_restore_run(monkeypatch, tmp_path):
 
 
 def test_campaign_creation_and_diarization_benchmark_summary(monkeypatch):
-    monkeypatch.setattr(ingestion_mod, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(ingestion_rt, "create_db_and_tables", lambda: None)
     service = ingestion_mod.IngestionService()
 
     engine = create_engine("sqlite://")
