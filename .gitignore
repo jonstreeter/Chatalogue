@@ -90,3 +90,4 @@ frontend/tmp_*.png
 frontend/build-errors.txt
 frontend/clear-errors.txt
 tmp_segments_*.json
+backend/test_audio_data/
