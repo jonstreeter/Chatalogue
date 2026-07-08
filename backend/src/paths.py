@@ -5,6 +5,7 @@ Importing this module ensures the directories exist.
 from pathlib import Path
 
 _BACKEND_DIR = Path(__file__).parent.parent
+BACKEND_DIR = _BACKEND_DIR
 
 BACKEND_RUNTIME_DIR = _BACKEND_DIR / "runtime"
 IMAGES_DIR = _BACKEND_DIR / "data" / "images"

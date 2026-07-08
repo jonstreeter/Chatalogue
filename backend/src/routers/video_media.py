@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlmodel import Session, select
 
+from ..services import component_installers as installers
 from ..db.database import Job, TranscriptSegment, Video
 from ..deps import get_ingestion_service, get_session
 from ..job_utils import PIPELINE_ACTIVE_STATUSES
@@ -138,7 +139,7 @@ def queue_conversation_reconstruction(video_id: int, force: bool = False, sessio
     if str(getattr(video, "media_source_type", "") or "").lower() != "upload":
         raise HTTPException(status_code=409, detail="Conversation reconstruction is currently available for manually uploaded media only.")
 
-    install_info = _main()._get_reconstruction_install_info()
+    install_info = installers._get_reconstruction_install_info()
     if not install_info.installed:
         raise HTTPException(status_code=409, detail="The reconstruction runtime is not installed yet. Install and test it from Settings first.")
 
@@ -317,7 +318,7 @@ def test_reconstruction_speaker(
     if str(getattr(video, "media_source_type", "") or "").lower() != "upload":
         raise HTTPException(status_code=409, detail="Conversation reconstruction is currently available for manually uploaded media only.")
 
-    install_info = _main()._get_reconstruction_install_info()
+    install_info = installers._get_reconstruction_install_info()
     if not install_info.installed:
         raise HTTPException(status_code=409, detail="The reconstruction runtime is not installed yet. Install and test it from Settings first.")
 
@@ -362,7 +363,7 @@ def cleanup_reconstruction_workbench_sample(
         raise HTTPException(status_code=404, detail="Video not found")
     if str(getattr(video, "media_source_type", "") or "").lower() != "upload":
         raise HTTPException(status_code=409, detail="Conversation reconstruction is currently available for manually uploaded media only.")
-    if not _main()._get_voicefixer_install_info().installed:
+    if not installers._get_voicefixer_install_info().installed:
         raise HTTPException(status_code=409, detail="VoiceFixer is not installed yet. Install and test it from Settings first.")
     try:
         get_ingestion_service().cleanup_reconstruction_sample(
@@ -455,7 +456,7 @@ def preview_reconstruction_segment(
         raise HTTPException(status_code=404, detail="Video not found")
     if str(getattr(video, "media_source_type", "") or "").lower() != "upload":
         raise HTTPException(status_code=409, detail="Conversation reconstruction is currently available for manually uploaded media only.")
-    install_info = _main()._get_reconstruction_install_info()
+    install_info = installers._get_reconstruction_install_info()
     if not install_info.installed:
         raise HTTPException(status_code=409, detail="The reconstruction runtime is not installed yet. Install and test it from Settings first.")
     try:
@@ -618,7 +619,7 @@ def get_cleanup_workbench(video_id: int, session: Session = Depends(get_session)
         workbench = get_ingestion_service().build_cleanup_workbench(video_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load the cleanup workbench: {e}")
-    clearvoice_info = _main()._get_clearvoice_install_info()
+    clearvoice_info = installers._get_clearvoice_install_info()
     workbench["clearvoice_available"] = bool(clearvoice_info.installed and clearvoice_info.runtime_ready)
     return CleanupWorkbenchRead(**workbench)
 
@@ -642,7 +643,7 @@ def analyze_cleanup_workbench(video_id: int, session: Session = Depends(get_sess
             message=str(e)[:240] or "Cleanup analysis failed.",
         )
         raise HTTPException(status_code=500, detail=f"Cleanup analysis failed: {e}")
-    clearvoice_info = _main()._get_clearvoice_install_info()
+    clearvoice_info = installers._get_clearvoice_install_info()
     workbench["clearvoice_available"] = bool(clearvoice_info.installed and clearvoice_info.runtime_ready)
     return CleanupWorkbenchRead(**workbench)
 
@@ -658,7 +659,7 @@ def run_cleanup_clearvoice_candidate(
         raise HTTPException(status_code=404, detail="Video not found")
     if str(getattr(video, "media_source_type", "") or "").lower() != "upload":
         raise HTTPException(status_code=409, detail="Cleanup workbench is only available for manually uploaded media.")
-    clearvoice_info = _main()._get_clearvoice_install_info()
+    clearvoice_info = installers._get_clearvoice_install_info()
     if not clearvoice_info.installed:
         raise HTTPException(status_code=409, detail="ClearVoice is not installed yet. Install and test it from the cleanup workbench first.")
     if not clearvoice_info.runtime_ready:
@@ -704,7 +705,7 @@ def select_cleanup_workbench_candidate(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update the selected pre-cleanup candidate: {e}")
-    clearvoice_info = _main()._get_clearvoice_install_info()
+    clearvoice_info = installers._get_clearvoice_install_info()
     workbench["clearvoice_available"] = bool(clearvoice_info.installed and clearvoice_info.runtime_ready)
     return CleanupWorkbenchRead(**workbench)
 
@@ -732,7 +733,7 @@ def queue_voicefixer_cleanup(video_id: int, force: bool = False, session: Sessio
     if str(getattr(video, "media_source_type", "") or "").lower() != "upload":
         raise HTTPException(status_code=409, detail="VoiceFixer is only available for manually uploaded media.")
 
-    install_info = _main()._get_voicefixer_install_info()
+    install_info = installers._get_voicefixer_install_info()
     if not install_info.installed:
         raise HTTPException(status_code=409, detail="VoiceFixer is not installed yet. Install and test it from Settings first.")
 

@@ -45,13 +45,13 @@ Routers are registered at the **end** of `main.py` via `app.include_router(...)`
 
 ## Remaining domains to extract (largest first)
 
-**The split is essentially done.** main.py is ~1.3k lines: app assembly,
-lifespan, queue workers, HTTP middleware, and the external-share +
-component-installer helpers that the middleware and share/system routers
-use. The remaining `_main().x` debt (40 names, all share/installer
-helpers) is intentional — those helpers are coupled to app/middleware
-state and can stay in main.py, or move to
-`src/services/external_share.py` in a future pass if desired.
+**The split is done.** main.py is ~300 lines: app assembly, lifespan,
+HTTP middleware, and router registration. The external-share and
+component-installer helpers moved to `src/services/external_share.py`
+and `src/services/component_installers.py` (July 2026); routers import
+them directly. The only remaining `_main().x` names are
+`worker_threads` and `configure_logging`, which genuinely belong to
+app/lifespan state.
 
 **Lesson from phase 15:** when a helper moves out of main.py, every
 `_main().<name>` site pointing at it breaks at runtime, and ruff cannot

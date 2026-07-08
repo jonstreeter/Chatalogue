@@ -8,6 +8,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 
+from ..services import external_share as share_svc
+from ..services import component_installers as installers
+from ..paths import BACKEND_RUNTIME_DIR
 from ..deps import get_ingestion_service
 from ..services import avatar_personality as avatar_svc
 from ..schemas import (
@@ -72,7 +75,7 @@ def system_cuda_health():
 
 @router.get("/system/cuda-restart-state")
 def get_cuda_restart_state():
-    state_file = _main().BACKEND_RUNTIME_DIR / "cuda_restart_state.json"
+    state_file = BACKEND_RUNTIME_DIR / "cuda_restart_state.json"
     if not state_file.exists():
         return {"restart_timestamps": [], "permanent_cpu_mode": False}
     try:
@@ -83,7 +86,7 @@ def get_cuda_restart_state():
 
 @router.post("/system/cuda-restart-state/reset")
 def reset_cuda_restart_state():
-    state_file = _main().BACKEND_RUNTIME_DIR / "cuda_restart_state.json"
+    state_file = BACKEND_RUNTIME_DIR / "cuda_restart_state.json"
     try:
         state_file.unlink(missing_ok=True)
     except Exception:
@@ -93,26 +96,26 @@ def reset_cuda_restart_state():
 
 @router.get("/system/cloudflared/install-info")
 def get_cloudflared_install_info(request: Request):
-    _main()._require_local_operator(request)
-    target = _main()._cloudflared_install_target()
+    share_svc._require_local_operator(request)
+    target = share_svc._cloudflared_install_target()
     return {
         **target,
-        "installed": bool(_main()._refresh_cloudflared_availability()),
+        "installed": bool(share_svc._refresh_cloudflared_availability()),
     }
 
 
 @router.post("/system/cloudflared/install")
 def install_cloudflared(request: Request):
-    _main()._require_local_operator(request)
-    if _main()._refresh_cloudflared_availability():
-        info = _main()._cloudflared_install_target()
+    share_svc._require_local_operator(request)
+    if share_svc._refresh_cloudflared_availability():
+        info = share_svc._cloudflared_install_target()
         return {
             "status": "already_installed",
             **info,
             "installed": True,
         }
 
-    target = _main()._cloudflared_install_target()
+    target = share_svc._cloudflared_install_target()
     if not bool(target.get("package_manager_available")):
         raise HTTPException(
             status_code=400,
@@ -124,7 +127,7 @@ def install_cloudflared(request: Request):
         )
 
     try:
-        result = _main()._install_cloudflared_via_package_manager()
+        result = share_svc._install_cloudflared_via_package_manager()
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Timed out while installing cloudflared.")
     except Exception as e:
@@ -134,7 +137,7 @@ def install_cloudflared(request: Request):
         detail = str(result.get("stderr") or result.get("stdout") or "unknown installer failure")
         raise HTTPException(status_code=500, detail=f"cloudflared install did not complete successfully: {detail[:700]}")
 
-    _main()._append_share_event(f"cloudflared installed via {result.get('package_manager')}")
+    share_svc._append_share_event(f"cloudflared installed via {result.get('package_manager')}")
     return {
         "status": "installed",
         **result,
@@ -144,20 +147,20 @@ def install_cloudflared(request: Request):
 
 @router.get("/system/voicefixer/install-info", response_model=VoiceFixerInstallInfo)
 def get_voicefixer_install_info(request: Request):
-    _main()._require_local_operator(request)
-    return _main()._get_voicefixer_install_info()
+    share_svc._require_local_operator(request)
+    return installers._get_voicefixer_install_info()
 
 
 @router.post("/system/voicefixer/install", response_model=VoiceFixerInstallInfo)
 def install_voicefixer(request: Request):
     import sys
 
-    _main()._require_local_operator(request)
-    info = _main()._get_voicefixer_install_info()
+    share_svc._require_local_operator(request)
+    info = installers._get_voicefixer_install_info()
     if info.installed:
         return info
 
-    cmd = [sys.executable, "-m", "pip", "install", _main().VOICEFIXER_PACKAGE_SPEC]
+    cmd = [sys.executable, "-m", "pip", "install", installers.VOICEFIXER_PACKAGE_SPEC]
     try:
         result = subprocess.run(
             cmd,
@@ -177,9 +180,9 @@ def install_voicefixer(request: Request):
         detail = (result.stderr or result.stdout or "unknown installer failure").strip()
         raise HTTPException(status_code=500, detail=f"VoiceFixer install failed: {detail[:900]}")
 
-    refreshed = _main()._get_voicefixer_install_info()
+    refreshed = installers._get_voicefixer_install_info()
     if not refreshed.installed:
-        if _main()._voicefixer_installed_via_pip():
+        if installers._voicefixer_installed_via_pip():
             payload = refreshed.model_dump()
             payload.update({
                 "installed": False,
@@ -196,8 +199,8 @@ def install_voicefixer(request: Request):
 
 @router.post("/system/voicefixer/test", response_model=VoiceFixerTestResult)
 def test_voicefixer(request: Request):
-    _main()._require_local_operator(request)
-    info = _main()._get_voicefixer_install_info()
+    share_svc._require_local_operator(request)
+    info = installers._get_voicefixer_install_info()
     if not info.installed:
         raise HTTPException(status_code=400, detail="VoiceFixer is not installed in the backend environment yet.")
 
@@ -228,12 +231,12 @@ def test_voicefixer(request: Request):
 
 @router.post("/system/voicefixer/repair")
 def repair_voicefixer(request: Request):
-    _main()._require_local_operator(request)
-    info = _main()._get_voicefixer_install_info()
+    share_svc._require_local_operator(request)
+    info = installers._get_voicefixer_install_info()
     if not info.installed:
         raise HTTPException(status_code=400, detail="VoiceFixer is not installed in the backend environment yet.")
     try:
-        result = _main()._download_voicefixer_analysis_checkpoint()
+        result = installers._download_voicefixer_analysis_checkpoint()
         return {
             "status": "repaired",
             **result,
@@ -244,19 +247,19 @@ def repair_voicefixer(request: Request):
 
 @router.get("/system/clearvoice/install-info", response_model=ClearVoiceInstallInfo)
 def get_clearvoice_install_info(request: Request):
-    _main()._require_local_operator(request)
-    return _main()._get_clearvoice_install_info()
+    share_svc._require_local_operator(request)
+    return installers._get_clearvoice_install_info()
 
 
 @router.post("/system/clearvoice/install", response_model=ClearVoiceInstallInfo)
 def install_clearvoice(request: Request):
-    _main()._require_local_operator(request)
-    info = _main()._get_clearvoice_install_info()
+    share_svc._require_local_operator(request)
+    info = installers._get_clearvoice_install_info()
     if info.installed and info.runtime_ready:
         return info
 
     if not info.installed:
-        cmd = [sys.executable, "-m", "pip", "install", "--no-deps", _main().CLEARVOICE_PACKAGE_SPEC]
+        cmd = [sys.executable, "-m", "pip", "install", "--no-deps", installers.CLEARVOICE_PACKAGE_SPEC]
         try:
             result = subprocess.run(
                 cmd,
@@ -276,13 +279,13 @@ def install_clearvoice(request: Request):
             detail = (result.stderr or result.stdout or "unknown installer failure").strip()
             raise HTTPException(status_code=500, detail=f"ClearVoice install failed: {detail[:900]}")
         try:
-            _main()._normalize_clearvoice_metadata()
+            installers._normalize_clearvoice_metadata()
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"ClearVoice metadata normalization failed: {e}")
 
-    refreshed = _main()._get_clearvoice_install_info()
+    refreshed = installers._get_clearvoice_install_info()
     if not refreshed.installed:
-        if _main()._clearvoice_installed_via_pip():
+        if installers._clearvoice_installed_via_pip():
             payload = refreshed.model_dump()
             payload.update({
                 "installed": False,
@@ -296,7 +299,7 @@ def install_clearvoice(request: Request):
         runtime_error_text = str(refreshed.runtime_error or "").lower()
         if "torchaudio import failed" in runtime_error_text:
             try:
-                _main()._repair_clearvoice_runtime()
+                installers._repair_clearvoice_runtime()
             except subprocess.TimeoutExpired:
                 raise HTTPException(status_code=504, detail="Timed out while repairing the ClearVoice torchaudio runtime.")
             except Exception as e:
@@ -306,7 +309,7 @@ def install_clearvoice(request: Request):
                     f"Run ClearVoice runtime repair in Settings. Repair error: {e}"
                 )
                 return ClearVoiceInstallInfo(**payload)
-            refreshed = _main()._get_clearvoice_install_info()
+            refreshed = installers._get_clearvoice_install_info()
 
     return ClearVoiceInstallInfo(
         **refreshed.model_dump(),
@@ -316,11 +319,11 @@ def install_clearvoice(request: Request):
 
 @router.post("/system/clearvoice/test", response_model=ClearVoiceTestResult)
 def test_clearvoice(request: Request):
-    _main()._require_local_operator(request)
-    info = _main()._get_clearvoice_install_info()
+    share_svc._require_local_operator(request)
+    info = installers._get_clearvoice_install_info()
     if not info.installed:
         raise HTTPException(status_code=400, detail="ClearVoice is not installed in the backend environment yet.")
-    runtime = _main()._inspect_clearvoice_runtime()
+    runtime = installers._inspect_clearvoice_runtime()
     return ClearVoiceTestResult(
         status="ok" if bool(runtime.get("runtime_ready")) else "error",
         version=info.version,
@@ -338,18 +341,18 @@ def test_clearvoice(request: Request):
 
 @router.post("/system/clearvoice/repair")
 def repair_clearvoice(request: Request):
-    _main()._require_local_operator(request)
-    info = _main()._get_clearvoice_install_info()
+    share_svc._require_local_operator(request)
+    info = installers._get_clearvoice_install_info()
     if not info.installed:
         raise HTTPException(status_code=400, detail="ClearVoice is not installed in the backend environment yet.")
     try:
-        result = _main()._repair_clearvoice_runtime()
-        metadata_result = _main()._normalize_clearvoice_metadata()
+        result = installers._repair_clearvoice_runtime()
+        metadata_result = installers._normalize_clearvoice_metadata()
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Timed out while repairing the ClearVoice runtime.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"ClearVoice runtime repair failed: {e}")
-    runtime = _main()._inspect_clearvoice_runtime()
+    runtime = installers._inspect_clearvoice_runtime()
     return {
         **result,
         "metadata": metadata_result,
@@ -363,21 +366,21 @@ def repair_clearvoice(request: Request):
 
 @router.get("/system/reconstruction/install-info", response_model=ReconstructionInstallInfo)
 def get_reconstruction_install_info(request: Request):
-    _main()._require_local_operator(request)
-    return _main()._get_reconstruction_install_info()
+    share_svc._require_local_operator(request)
+    return installers._get_reconstruction_install_info()
 
 
 @router.post("/system/reconstruction/install", response_model=ReconstructionInstallInfo)
 def install_reconstruction_runtime(request: Request):
-    _main()._require_local_operator(request)
-    info = _main()._get_reconstruction_install_info()
+    share_svc._require_local_operator(request)
+    info = installers._get_reconstruction_install_info()
     qwen_installed = bool(info.installed)
-    sox_installed = _main()._sox_available()
+    sox_installed = installers._sox_available()
     if qwen_installed and sox_installed:
         return info
 
     if not qwen_installed:
-        cmd = [sys.executable, "-m", "pip", "install", _main().RECONSTRUCTION_PACKAGE_SPEC]
+        cmd = [sys.executable, "-m", "pip", "install", installers.RECONSTRUCTION_PACKAGE_SPEC]
         try:
             result = subprocess.run(
                 cmd,
@@ -398,7 +401,7 @@ def install_reconstruction_runtime(request: Request):
             raise HTTPException(status_code=500, detail=f"Reconstruction runtime install failed: {detail[:900]}")
 
     if not sox_installed:
-        target = _main()._sox_install_target()
+        target = installers._sox_install_target()
         if not bool(target.get("package_manager_available")):
             raise HTTPException(
                 status_code=400,
@@ -409,7 +412,7 @@ def install_reconstruction_runtime(request: Request):
                 ),
             )
         try:
-            sox_result = _main()._install_sox_via_package_manager()
+            sox_result = installers._install_sox_via_package_manager()
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="Timed out while installing SoX.")
         except Exception as e:
@@ -419,9 +422,9 @@ def install_reconstruction_runtime(request: Request):
             detail = str(sox_result.get("stderr") or sox_result.get("stdout") or "unknown installer failure")
             raise HTTPException(status_code=500, detail=f"SoX install did not complete successfully: {detail[:700]}")
 
-    refreshed = _main()._get_reconstruction_install_info()
+    refreshed = installers._get_reconstruction_install_info()
     if not refreshed.installed:
-        if _main()._reconstruction_installed_via_pip():
+        if installers._reconstruction_installed_via_pip():
             payload = refreshed.model_dump()
             payload.update({
                 "installed": False,
@@ -430,8 +433,8 @@ def install_reconstruction_runtime(request: Request):
             })
             return ReconstructionInstallInfo(**payload)
         raise HTTPException(status_code=500, detail="The reconstruction runtime installed but is still unavailable to the backend.")
-    if not _main()._sox_available():
-        target = _main()._sox_install_target()
+    if not installers._sox_available():
+        target = installers._sox_install_target()
         raise HTTPException(status_code=500, detail=f"SoX still is not available on PATH after install. Install it manually from {target.get('download_url')}.")
     return ReconstructionInstallInfo(
         **refreshed.model_dump(),
@@ -441,8 +444,8 @@ def install_reconstruction_runtime(request: Request):
 
 @router.post("/system/reconstruction/test", response_model=ReconstructionTestResult)
 def test_reconstruction_runtime(request: Request):
-    _main()._require_local_operator(request)
-    info = _main()._get_reconstruction_install_info()
+    share_svc._require_local_operator(request)
+    info = installers._get_reconstruction_install_info()
     if not info.installed:
         raise HTTPException(status_code=400, detail="The reconstruction runtime is not installed in the backend environment yet.")
 
@@ -450,8 +453,8 @@ def test_reconstruction_runtime(request: Request):
         from qwen_tts import Qwen3TTSModel  # type: ignore
 
         detail = "Imported qwen_tts and found Qwen3TTSModel. Model weights are not loaded during this self-test."
-        if not _main()._sox_available():
-            target = _main()._sox_install_target()
+        if not installers._sox_available():
+            target = installers._sox_install_target()
             return ReconstructionTestResult(
                 status="error",
                 version=info.version,
