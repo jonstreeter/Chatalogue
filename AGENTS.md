@@ -109,8 +109,9 @@ file before the first such response in a session; do not reconstruct the block
 from memory.
 
 It states where the user is in Track A (feature) or Track B (bug), the single
-next action with its literal command, the step after, whether input is needed
-or what is being monitored, and a worktree verdict.
+next action with its literal command, the step after, whether the agent waits
+for the user to trigger "do next" or waits on a process (no input required),
+and a worktree verdict.
 That is what tells the user when to spec, plan, verify, commit, push, deploy,
 and archive — and whether starting a second task now is safe. Read the real
 state first (`python scripts/check_sdd_docs.py status`, `git status --short`,

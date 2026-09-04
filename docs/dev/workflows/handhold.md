@@ -27,7 +27,7 @@ Append at the very end of the response, after everything else:
 - **You are here:** <track> · step <n>/<total> — <one-phrase task name>
 - **Do next:** <one concrete action; exact command if there is one>
 - **After that:** <the following step, one line>
-- **Input:** <needed — exact user decision/input required | not needed — what is being monitored or awaited>
+- **Input:** <needed — the agent waits for the user to trigger "do next" | not needed — awaited process only, no user input required right now>
 - **Worktree:** <clean | N files: areas> — <keep going | commit now | park it first>
 ```
 
@@ -39,10 +39,14 @@ Rules:
   one and say why in six words.
 - Give the literal command when one exists, not a description of it.
 - Five lines. Anything longer belongs in the body of the response.
-- **Input** is mandatory. Use `needed` with the exact user decision or input
-  required; use `not needed` with what is being monitored or waited on — for
-  example a background worker whose completion is reported automatically. Do
-  not poll: if a report arrives on its own, say you are waiting for it.
+- **Input** is mandatory and only states who is waiting for whom. `needed`
+  means the agent is parked and waits for the user to reply `d` (proceed with
+  "do next") or to act on the named step; the block body may still ask a real
+  question, but that question belongs in the body, not here. `not needed`
+  means the agent waits on a process — a background job, CI, a build — whose
+  completion arrives on its own, and no user input is required right now. Do
+  not use `needed` to fish for answers to unrelated pending items; those are
+  the body of the response.
 - Never present a step as done that has not been verified. If the checks were
   not run, the next step is running them.
 - Read the real state before writing it (see [Reading the current
