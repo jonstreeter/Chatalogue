@@ -1,0 +1,26 @@
+---
+description: Spec-driven development process (harness-neutral)
+alwaysApply: true
+---
+
+This repository uses a harness-neutral spec-driven development process.
+It is defined once, in `docs/dev/`, and is identical for every tool and for
+human contributors. Do not duplicate any of it into this file.
+
+**Read `docs/dev/README.md`** before planning, reviewing, or verifying work.
+
+Conformance contract (full text in `docs/dev/harnesses/README.md`):
+
+1. Start planning/review/verification from `docs/dev/README.md`.
+2. Run `python scripts/check_sdd_docs.py status` at the start of a session to
+   load active plans, handoff notes, and uncommitted state.
+3. Before editing a path mapped in `docs/dev/contracts.json`, run
+   `python scripts/check_sdd_docs.py preflight <paths>` and read what it returns.
+4. Never bypass the commit gates (no `--no-verify`, no `SKIP=`, no disabling
+   hooks). If a gate is wrong, change the gate in a commit of its own.
+5. End every response that touches code, docs, tests, or git with the five-line
+   handhold block from `docs/dev/workflows/handhold.md`.
+
+Repo map, canonical commands, search boundaries, and the escalation tripwire
+are in `AGENTS.md`. Review lenses are in `docs/dev/reviewers/`; task workflows
+are in `docs/dev/workflows/`.

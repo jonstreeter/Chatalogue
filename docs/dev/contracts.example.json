@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "domains": [
+    {
+      "id": "example-domain",
+      "summary": "Replace with a real subsystem. Maps durable code paths to the specs and ADRs that govern them.",
+      "paths": [
+        "src/services/example/**"
+      ],
+      "authorities": [
+        {
+          "path": "docs/dev/specs/YYYY-MM-DD-example-design.md",
+          "role": "contract"
+        },
+        {
+          "path": "docs/dev/adr/ADR-0001-example.md",
+          "role": "refines"
+        }
+      ]
+    }
+  ]
+}

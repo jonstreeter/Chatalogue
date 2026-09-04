@@ -1,10 +1,83 @@
+# The real, harness-neutral gate. Whatever wrote the code -- Claude, Codex,
+# Kilo, or a human -- passes through here. Harness hooks only move some of
+# these checks earlier; none of them replace this file.
+#
+# Install once:  pre-commit install
 repos:
+  # --- Secrets. First, because it is the only irreversible mistake here. ----
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.24.2
+    rev: v8.30.0
     hooks:
       - id: gitleaks
         name: gitleaks (secrets)
 
+  # --- Stop the obvious footguns before they reach a branch. ---------------
+  # Excluded trees mirror AGENTS.md "Search Boundaries" and ruff.toml: legacy,
+  # vendored, generated, and reference-only paths are not live code.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+        exclude: &footgun_excludes >
+          (?x)(
+            backend/\.venv.*/|
+            backend/tools/legacy/|
+            backend/data/|
+            backend/logs/|
+            frontend/node_modules/|
+            frontend/dist/|
+            frontend/test-results/|
+            checkpoints/|
+            snapshots/|
+            REference\ Resources/|
+            docs/archive/
+          )
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+        exclude: *footgun_excludes
+      - id: end-of-file-fixer
+        exclude: *footgun_excludes
+      - id: trailing-whitespace
+        exclude: *footgun_excludes
+      - id: check-json
+        exclude: >-
+          (?x)(
+            ^frontend/tsconfig.*\.json$|
+            backend/\.venv.*/|
+            backend/tools/legacy/|
+            backend/data/|
+            frontend/node_modules/|
+            frontend/dist/|
+            checkpoints/|
+            snapshots/|
+            REference\ Resources/
+          )
+      - id: check-yaml
+        exclude: *footgun_excludes
+
+  # --- SDD process gates. -------------------------------------------------
+  - repo: local
+    hooks:
+      - id: sdd-contracts
+        name: SDD contract structure
+        language: system
+        entry: python scripts/check_sdd_docs.py validate
+        files: ^(docs/dev/|AGENTS\.md$|CLAUDE\.md$|\.claude/settings\.json$|scripts/(check_sdd_docs|sdd_contract_hook|sdd_tripwire|sdd_bypass_guard)\.py$)
+        pass_filenames: false
+
+      - id: sdd-plan-tracker
+        name: SDD plan tracker freshness
+        language: system
+        # Advisory: prints a reminder when code lands without touching an
+        # in-progress plan. Add --strict to make it blocking once the habit is
+        # established -- a gate that misfires teaches people to bypass gates,
+        # and bypassing is what this kit exists to prevent.
+        entry: python scripts/check_sdd_docs.py progress
+        pass_filenames: false
+        always_run: true
+        verbose: true
+
+  # --- This project's own checks. ------------------------------------------
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.20
     hooks:
