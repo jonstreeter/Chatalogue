@@ -111,15 +111,19 @@ from memory.
 It states where the user is in Track A (feature) or Track B (bug), the single
 next action with its literal command, the step after, whether the agent waits
 for the user to trigger "do next" or waits on a process (no input required),
-and a worktree verdict.
+and a worktree verdict. It also defines the one-key replies (`d`, `dd`, `p`):
+`d` does **Do next**, `dd` continues until input, spend, or a machine-leaving
+step, and `p` parks the current task.
 That is what tells the user when to spec, plan, verify, commit, push, deploy,
 and archive — and whether starting a second task now is safe. Read the real
 state first (`python scripts/check_sdd_docs.py status`, `git status --short`,
 `git log --oneline -3`, `git stash list`).
 
-A reply of `d` means "proceed with the **Do next** action": execute the named
-command or step and report back. If the block says input is needed, `d` is not
-an answer to that input — answer the question instead.
+**Input** is waiter state: `needed` means the agent waits for the user to
+trigger **Do next** or act; `not needed` means the agent is monitoring a
+process whose result arrives automatically. Offer `d` only when Input is
+`needed` and it can mechanically trigger **Do next**. A substantive question
+must still be answered in plain words; `d` does not select an answer.
 
 ## Deployment Reminder
 

@@ -25,9 +25,9 @@ Append at the very end of the response, after everything else:
 ---
 🧭 **Handhold**
 - **You are here:** <track> · step <n>/<total> — <one-phrase task name>
-- **Do next:** <one concrete action; exact command if there is one>
+- **Do next:** <one concrete action; exact command if there is one; append "— reply `d`" only when Input is needed and `d` can trigger it>
 - **After that:** <the following step, one line>
-- **Input:** <needed — the agent waits for the user to trigger "do next" | not needed — awaited process only, no user input required right now>
+- **Input:** <needed — the agent waits for the user to trigger "do next" or act | not needed — awaiting/monitoring a process; no user input required>
 - **Worktree:** <clean | N files: areas> — <keep going | commit now | park it first>
 ```
 
@@ -41,16 +41,47 @@ Rules:
 - Five lines. Anything longer belongs in the body of the response.
 - **Input** is mandatory and only states who is waiting for whom. `needed`
   means the agent is parked and waits for the user to reply `d` (proceed with
-  "do next") or to act on the named step; the block body may still ask a real
-  question, but that question belongs in the body, not here. `not needed`
-  means the agent waits on a process — a background job, CI, a build — whose
+  **Do next**) or to perform the named action. `not needed` means the agent is
+  awaiting or monitoring a process — a background job, CI, a build — whose
   completion arrives on its own, and no user input is required right now. Do
-  not use `needed` to fish for answers to unrelated pending items; those are
-  the body of the response.
+  not use `needed` to fish for unrelated answers; substantive questions belong
+  in the response body.
+- **Input gates the `d` shortcut.** Append "— reply `d`" to **Do next** only
+  when **Input** is `needed` and `d` can mechanically trigger that action. Omit
+  it when **Input** is `not needed`; monitored work continues automatically.
+  If the response body requests a substantive answer, `d` or `dd` is not a
+  substitute for that answer.
 - Never present a step as done that has not been verified. If the checks were
   not run, the next step is running them.
 - Read the real state before writing it (see [Reading the current
   state](#reading-the-current-state)); never infer it from the conversation.
+
+## Shortcuts
+
+The person driving should not have to retype the next step. Three one-key
+replies:
+
+| Reply | Means |
+|---|---|
+| `d` | Do the **Do next** exactly as written, then show a fresh block. |
+| `dd` | Keep doing next steps without asking again — stop at the first thing that needs input, costs money, or leaves the machine (push, deploy, anything destructive). |
+| `p` | **Park** the current task: commit it at its next commit point and switch away (see *Starting a second task*), then ask what to work on next. |
+
+`d` is for **do**, not `n` — `n` reads as "no". Never offer `n`/`nn` in the
+block.
+
+An exact `d`, `dd`, or `p` binds only to the **immediately preceding Handhold
+block in this conversation**. Never recover a shortcut target from an older
+block, memory, or another session. If there is no immediately preceding block,
+re-read the repository state and restate the verified next action; do nothing
+consequential. If **Input** is `not needed`, `d` or `dd` cannot accelerate the
+monitored process — restate what is being awaited. If the response body asks a
+substantive question, only an answer to that question resolves it.
+
+`d` is a command, not a conversation: run it, report the result in a line or
+two, re-emit the block. If the **Do next** turns out to be wrong once you look
+at the real state, say so in one sentence and do the correct step instead —
+never do the wrong one literally.
 
 ## Track A — new feature
 

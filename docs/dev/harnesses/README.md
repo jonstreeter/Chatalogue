@@ -48,8 +48,11 @@ that can only read files and run commands.
    tests, or git carries the five-line block from
    [`../workflows/handhold.md`](../workflows/handhold.md): position, one next
    action, the step after, whether input is needed or what is being monitored,
-   and the worktree verdict. It is what makes the process legible to the person
-   driving, not only to the tool.
+   and the worktree verdict. **Input** gates the `d` shortcut: append
+   "— reply `d`" only when the agent is waiting for the user and `d` can
+   trigger **Do next**; omit it while a process is being monitored. The block is what makes the
+   process legible to the person driving, not only to the tool, and its
+   one-key replies (`d`, `dd`, `p`) let them act without retyping.
 
 ## Automation is a convenience, never the guarantee
 
