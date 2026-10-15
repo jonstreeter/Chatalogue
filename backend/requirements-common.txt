@@ -9,6 +9,7 @@ sqlmodel==0.0.37
 aiosqlite==0.22.1
 psycopg[binary]==3.3.3
 python-multipart==0.0.22
+httpx==0.28.1
 
 # Keep setuptools below 81 until the Windows pkg_resources compatibility shim
 # can be removed from the transcription stack.

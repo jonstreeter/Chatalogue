@@ -19,7 +19,7 @@ interface TokenValidation {
 }
 
 type SettingsTab = 'transcription' | 'diarization' | 'llm' | 'youtube' | 'funny' | 'runtimes' | 'system';
-type TranscriptionEngine = 'auto' | 'whisper' | 'parakeet';
+type TranscriptionEngine = 'auto' | 'whisper' | 'parakeet' | 'phonon';
 type WhisperBackend = 'faster_whisper' | 'insanely_fast_whisper';
 type PipelineExecutionMode = 'sequential' | 'staged';
 type LlmProvider = 'ollama' | 'nvidia_nim' | 'openai' | 'anthropic' | 'gemini' | 'groq' | 'openrouter' | 'xai';
@@ -117,6 +117,9 @@ interface TranscriptionEngineTestResult {
     requested_engine: 'auto' | 'whisper' | 'parakeet' | string;
     resolved_engine?: 'whisper' | 'parakeet' | string | null;
     device?: string;
+    model?: string;
+    version?: string;
+    path?: string;
     parakeet_dependencies_available?: boolean;
     whisper_model?: string;
     whisper_compute_type?: string | null;
@@ -416,6 +419,9 @@ export function Settings() {
     const [activeTab, setActiveTab] = useState<SettingsTab>('transcription');
     const [token, setToken] = useState('');
     const [transcriptionEngine, setTranscriptionEngine] = useState<TranscriptionEngine>('auto');
+    const [phononUrl, setPhononUrl] = useState('http://127.0.0.1:8010');
+    const [phononApiKey, setPhononApiKey] = useState('');
+    const [phononDeadline, setPhononDeadline] = useState('');
     const [pipelineExecutionMode, setPipelineExecutionMode] = useState<PipelineExecutionMode>('sequential');
     const [whisperBackend, setWhisperBackend] = useState<WhisperBackend>('faster_whisper');
     const [transcriptionModel, setTranscriptionModel] = useState('medium');
@@ -592,8 +598,11 @@ export function Settings() {
             setToken(res.data.hf_token);
             {
                 const rawEngine = String(res.data.transcription_engine || 'auto').toLowerCase();
-                const engine: TranscriptionEngine = rawEngine === 'whisper' || rawEngine === 'parakeet' ? rawEngine : 'auto';
+                const engine: TranscriptionEngine = rawEngine === 'whisper' || rawEngine === 'parakeet' || rawEngine === 'phonon' ? rawEngine : 'auto';
                 setTranscriptionEngine(engine);
+                setPhononUrl(res.data.phonon_url ?? 'http://127.0.0.1:8010');
+                setPhononApiKey(res.data.phonon_api_key ?? '');
+                setPhononDeadline(res.data.phonon_request_timeout_seconds == null ? '' : String(res.data.phonon_request_timeout_seconds));
             }
             {
                 const rawPipelineMode = String(res.data.pipeline_execution_mode || 'sequential').toLowerCase();
@@ -1442,6 +1451,8 @@ export function Settings() {
             const res = await api.post<TranscriptionEngineTestResult>('/settings/test-transcription-engine', {
                 engine: transcriptionEngine,
                 whisper_backend: whisperBackend,
+                phonon_url: phononUrl,
+                phonon_api_key: phononApiKey,
             });
             setTranscriptionEngineTestResult(res.data);
         } catch (e) {
@@ -1464,6 +1475,9 @@ export function Settings() {
             await api.post('/settings', {
                 hf_token: token,
                 transcription_engine: transcriptionEngine,
+                phonon_url: phononUrl,
+                phonon_api_key: phononApiKey,
+                phonon_request_timeout_seconds: phononDeadline === '' ? null : Number(phononDeadline),
                 pipeline_execution_mode: pipelineExecutionMode,
                 whisper_backend: whisperBackend,
                 transcription_model: transcriptionModel,
@@ -1647,6 +1661,7 @@ export function Settings() {
                                                             Transcription Engine
                                                         </label>
                                                         <select
+                                                            aria-label="Transcription Engine"
                                                             value={transcriptionEngine}
                                                             onChange={(e) => setTranscriptionEngine((e.target.value || 'auto') as TranscriptionEngine)}
                                                             className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
@@ -1654,6 +1669,7 @@ export function Settings() {
                                                             <option value="auto">Auto (prefer Parakeet when available, fallback to Whisper)</option>
                                                             <option value="parakeet">NVIDIA Parakeet first (fallback to Whisper)</option>
                                                             <option value="whisper">Whisper only</option>
+                                                            <option value="phonon">Phonon-2 (optional local service, English)</option>
                                                         </select>
                                                         <p className="mt-2 text-xs text-slate-500">
                                                             Auto keeps cross-platform behavior: Parakeet is used when supported on host/runtime, otherwise Whisper runs automatically.
@@ -1748,6 +1764,23 @@ export function Settings() {
                                                         )}
                                                     </div>
 
+                                                    {transcriptionEngine === 'phonon' && (
+                                                        <div className="rounded-lg border border-slate-200 p-4 space-y-3">
+                                                            <p className="text-sm text-slate-600">Run a persistent local Phonon-2 service before selecting this engine. English only; enabled language routing still uses Whisper for other languages. Setup: docs/phonon-engine.md in your installation.</p>
+                                                            <label className="block text-sm">Local Phonon URL
+                                                                <input className="block w-full border rounded p-2" value={phononUrl} onChange={e => { setPhononUrl(e.target.value); setTranscriptionEngineTestResult(null); }} />
+                                                            </label>
+                                                            <label className="block text-sm">Phonon API key
+                                                                <input type="password" autoComplete="off" className="block w-full border rounded p-2" value={phononApiKey} onChange={e => { setPhononApiKey(e.target.value); setTranscriptionEngineTestResult(null); }} />
+                                                            </label>
+                                                            <details><summary className="cursor-pointer text-sm">Advanced connection settings</summary>
+                                                                <label className="block text-sm mt-2">Inference deadline (seconds)
+                                                                    <input type="number" step="any" className="block w-full border rounded p-2" value={phononDeadline} onChange={e => setPhononDeadline(e.target.value)} placeholder="Unset: wait for inference" />
+                                                                </label>
+                                                            </details>
+                                                            <p className="text-xs text-slate-500">Test connection uses the unsaved URL/key and a one-second silence request. The service keeps its own GPU memory until stopped; app model purge does not unload it.</p>
+                                                        </div>
+                                                    )}
                                                     {transcriptionEngine === 'parakeet' && (
                                                         <div className="rounded-lg border border-indigo-100 bg-indigo-50/40 p-3 space-y-3">
                                                             <div>
@@ -1963,6 +1996,9 @@ export function Settings() {
                                                                             : ''}
                                                                     </div>
                                                                 )}
+                                                                {transcriptionEngineTestResult.model && (
+                                                                    <div className="mt-1 text-xs">Model: {transcriptionEngineTestResult.model} | Runtime: {transcriptionEngineTestResult.version || 'unknown'}{transcriptionEngineTestResult.path ? ` | ${transcriptionEngineTestResult.path}` : ''}</div>
+                                                                )}
                                                                 {typeof transcriptionEngineTestResult.whisper_backend_available === 'boolean' && (
                                                                     <div className="mt-1 text-xs">
                                                                         Whisper backend available: {transcriptionEngineTestResult.whisper_backend_available ? 'yes' : 'no'}
@@ -2010,8 +2046,9 @@ export function Settings() {
                                             <div className="pt-4 border-t border-slate-100">
                                                 <div className="flex items-center gap-2 mb-4">
                                                     <Zap className="w-5 h-5 text-amber-500" />
-                                                    <h3 className="font-semibold text-slate-800">Speed Optimization</h3>
+                                                    <h3 className="font-semibold text-slate-800">{transcriptionEngine === 'phonon' ? 'Whisper routing options' : 'Speed Optimization'}</h3>
                                                 </div>
+                                                {transcriptionEngine === 'phonon' && <p className="text-sm text-slate-600 mb-4">These controls apply only when language routing selects Whisper. They do not tune Phonon; its persistent service uses upstream decoding defaults and serial GPU requests.</p>}
 
                                                 <div className="space-y-4">
                                                     <div className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">

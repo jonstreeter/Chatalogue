@@ -83,7 +83,7 @@ class TranscriptionEngineMixin:
         if not job_id:
             return
 
-        engine_label = "Parakeet" if str(engine or "").strip().lower() == "parakeet" else "Whisper"
+        engine_label = {"parakeet": "Parakeet", "phonon": "Phonon"}.get(str(engine or "").strip().lower(), "Whisper")
         detail_parts: list[str] = []
         payload_fields: dict[str, object] = {
             "stage_transcribe_engine": engine_label.lower(),
@@ -2076,6 +2076,8 @@ class TranscriptionEngineMixin:
                     pass
 
     def _select_transcription_engine(self):
+        if (os.getenv("TRANSCRIPTION_ENGINE") or "").strip().lower() == "phonon":
+            return "phonon"
         self._ensure_device()
         pref = (os.getenv("TRANSCRIPTION_ENGINE") or "auto").strip().lower()
         if pref not in {"auto", "whisper", "parakeet"}:
@@ -2400,6 +2402,9 @@ class TranscriptionEngineMixin:
         return route
 
     def test_transcription_engine(self, requested_engine: str = "auto", whisper_backend_override: str | None = None) -> dict:
+        if (requested_engine or "").strip().lower() == "phonon":
+            from .phonon import test_connection
+            return test_connection()
         self._ensure_device()
         req = (requested_engine or "auto").strip().lower()
         if req not in {"auto", "whisper", "parakeet"}:

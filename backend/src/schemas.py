@@ -1146,7 +1146,10 @@ class PipelineFocusUpdate(BaseModel):
 
 class Settings(BaseModel):
     hf_token: str
-    transcription_engine: str = "auto"  # auto | whisper | parakeet
+    transcription_engine: str = "auto"  # auto | whisper | parakeet | phonon
+    phonon_url: str = "http://127.0.0.1:8010"
+    phonon_api_key: str = ""
+    phonon_request_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     pipeline_execution_mode: Literal["sequential", "staged"] = "sequential"
     whisper_backend: str = "faster_whisper"
     transcription_model: str = "medium"
@@ -1218,6 +1221,8 @@ class OllamaPullRequest(BaseModel):
 class TranscriptionEngineTestRequest(BaseModel):
     engine: Optional[str] = None
     whisper_backend: Optional[str] = None
+    phonon_url: Optional[str] = None
+    phonon_api_key: Optional[str] = None
 
 
 class YouTubeDataApiTestRequest(BaseModel):

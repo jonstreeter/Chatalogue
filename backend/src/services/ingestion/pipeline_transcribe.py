@@ -15,9 +15,105 @@ from . import runtime
 
 
 class TranscribePhaseMixin:
+    def _process_phonon_phase(self, video, audio_path, job_id, route, force_retranscription=False):
+        """Decode bounded PCM windows on one persistent local service, committing each seam."""
+        import math
+        import subprocess
+        import tempfile
+        import wave
+        from .phonon import CHUNK_SECONDS, OVERLAP_SECONDS, SAMPLE_RATE, PhononClient, PhononError, wav_bytes
+
+        self._check_job_not_paused(job_id)
+        if force_retranscription:
+            self._get_temp_transcript_path(video.id).unlink(missing_ok=True)
+            self._get_temp_transcript_jsonl_path(video.id).unlink(missing_ok=True)
+        partial = self._load_phonon_partial(video.id)
+        segments = partial["segments"]
+        completed = float(partial["completed_until_seconds"])
+        self._release_whisper_model("before_phonon_transcribe", job_id=job_id)
+        self._release_parakeet_model("before_phonon_transcribe", job_id=job_id)
+        self._release_diarization_models("before_phonon_transcribe", job_id=job_id)
+        self._record_job_stage_start(job_id, "transcribe")
+        deadline = os.getenv("PHONON_REQUEST_TIMEOUT_SECONDS")
+        details = {}
+        chunk_count = 0
+        # Normalize once, including WAV inputs whose encoding/rate may differ.
+        with tempfile.TemporaryDirectory(prefix="phonon-", dir=self._get_temp_transcript_path(video.id).parent) as scratch:
+            normalized = Path(scratch) / "audio.wav"
+            result = subprocess.run([self._get_ffmpeg_cmd(), "-v", "error", "-y", "-i", str(audio_path),
+                                     "-vn", "-ac", "1", "-ar", str(SAMPLE_RATE), "-c:a", "pcm_s16le", str(normalized)],
+                                    capture_output=True, check=False)
+            if result.returncode:
+                raise PhononError("Phonon audio normalization failed; check the source audio and FFmpeg")
+            with wave.open(str(normalized), "rb") as source, PhononClient(
+                os.getenv("PHONON_URL", "http://127.0.0.1:8010"), os.getenv("PHONON_API_KEY", ""),
+                float(deadline) if deadline else None,
+            ) as client:
+                duration = source.getnframes() / SAMPLE_RATE
+                if duration <= 0:
+                    raise PhononError("Phonon source contains no audio samples")
+                if not 0 <= completed <= duration or ("total_duration" in partial and abs(float(partial["total_duration"]) - duration) > 1 / SAMPLE_RATE):
+                    raise PhononError("Phonon source duration differs from its partial checkpoint")
+                while completed < duration:
+                    self._check_job_not_paused(job_id)
+                    # Ownership ends at the center of the shared 0.35s seam.
+                    start = max(0., completed - OVERLAP_SECONDS / 2) if completed else 0.
+                    end = min(duration, start + CHUNK_SECONDS + OVERLAP_SECONDS)
+                    boundary = end if end == duration else end - OVERLAP_SECONDS / 2
+                    source.setpos(round(start * SAMPLE_RATE))
+                    pcm = source.readframes(round((end - start) * SAMPLE_RATE))
+                    actual_duration = len(pcm) / (2 * SAMPLE_RATE)
+                    begin = time.perf_counter()
+                    words, runtime_details = client.transcribe(wav_bytes(pcm), actual_duration)
+                    self._check_job_not_paused(job_id)
+                    from bisect import bisect_right
+                    segment_ends = [float(segment["end"]) + start for segment in runtime_details.get("segments", [])]
+                    groups = {}
+                    for word in words:
+                        ws, we = start + word["start"], start + word["end"]
+                        midpoint = (ws + we) / 2
+                        if completed <= midpoint and (midpoint < boundary or boundary == duration):
+                            group = bisect_right(segment_ends, midpoint)
+                            groups.setdefault(group, []).append({"start": max(completed, ws), "end": min(boundary, we), "word": word["word"]})
+                    for new_words in groups.values():
+                        segments.append({"start": new_words[0]["start"], "end": max(w["end"] for w in new_words),
+                                         "text": " ".join(w["word"] for w in new_words), "words": new_words})
+                    self._save_phonon_partial(video.id, segments, duration, boundary)
+                    completed = boundary
+                    chunk_count += 1
+                    details = {"phonon_chunk_count": chunk_count, "phonon_request_seconds": time.perf_counter() - begin}
+                    for key in ("model", "version", "gpu", "device", "path", "dtype", "cuda_graph_steps", "warm_buckets", "decode_seconds"):
+                        if key in runtime_details:
+                            details["phonon_" + key] = runtime_details[key]
+                    self._upsert_job_payload_fields(job_id, {"transcription_engine_used": "phonon", **details})
+                    self._update_transcription_stage_progress(job_id, engine="phonon", completed_seconds=completed,
+                        total_seconds=duration, segments_completed=len(segments), chunk_index=chunk_count,
+                        chunk_total=math.ceil(duration / CHUNK_SECONDS))
+        raw_path = audio_path.parent / f"{self.sanitize_filename(video.title)}_transcript_raw.json"
+        raw = {"video_id": video.id, "transcription_engine_used": "phonon", "transcription_engine_requested": route.get("requested_engine"),
+               "transcription_engine_routed": "phonon", "transcript_language": route.get("language") or "en",
+               "segments": segments, "total_duration": duration, **details}
+        # A failed final write leaves the fully committed partial available for retry.
+        staging = raw_path.with_suffix(".json.tmp")
+        try:
+            staging.write_text(json.dumps(raw, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+            os.replace(staging, raw_path)
+        finally:
+            staging.unlink(missing_ok=True)
+        self._upsert_job_payload_fields(job_id, {"transcription_engine_used": "phonon"})
+        self._update_job_progress(job_id, 100)
+        with Session(runtime.engine) as session:
+            stored = session.get(Video, video.id)
+            if stored:
+                stored.transcript_language = route.get("language") or "en"
+                session.add(stored)
+                session.commit()
+        return [self._build_whisper_style_segment(seg_id=index, start=s["start"], end=s["end"], text=s["text"],
+                    words=[self._build_whisper_style_word(**word) for word in s["words"]]) for index, s in enumerate(segments)], duration
+
     def _process_transcribe_phase(self, video: Video, audio_path: Path, job_id: int = None, force_non_batched: bool = False):
         """Phase 2: Transcribe audio. Checks for existing transcript to skip."""
-        
+
         # 1. Update status
         with Session(runtime.engine) as session:
             # Re-attach or fetch fresh to update
@@ -25,7 +121,7 @@ class TranscribePhaseMixin:
             if v:
                 v.status = "transcribing"
                 session.add(v)
-            
+
             if job_id:
                j = session.get(Job, job_id)
                if j:
@@ -71,7 +167,7 @@ class TranscribePhaseMixin:
         # 2. Check for completed raw transcript (checkpoint)
         safe_title = self.sanitize_filename(video.title)
         raw_transcript_path = audio_path.parent / f"{safe_title}_transcript_raw.json"
-        
+
         existing_segments = []
         total_duration = 0
 
@@ -156,13 +252,13 @@ class TranscribePhaseMixin:
             return with_words / max(len(items), 1)
 
         min_word_coverage = float(os.getenv("TRANSCRIPTION_MIN_WORD_COVERAGE", "0.90"))
-        
+
         if raw_transcript_path.exists() and not force_retranscription:
             try:
                 log(f"Found existing raw transcript at {raw_transcript_path}. Skipping transcription (diarization only).")
                 with open(raw_transcript_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    
+
                 # Reconstruct segments
                 for s in data.get("segments", []):
                      words = _deserialize_words(s.get("words"), seg_start=s.get("start"), seg_end=s.get("end"))
@@ -174,12 +270,14 @@ class TranscribePhaseMixin:
                         words=words,
                     )
                      existing_segments.append(seg_obj)
-                
+
                 # Estimate duration from last segment
                 if existing_segments:
                     total_duration = existing_segments[-1].end
                 if video.duration:
                     total_duration = video.duration
+                if data.get("transcription_engine_used") == "phonon" and data.get("total_duration") is not None:
+                    total_duration = float(data["total_duration"])
 
                 coverage = _word_coverage(existing_segments)
                 if coverage < min_word_coverage:
@@ -204,13 +302,13 @@ class TranscribePhaseMixin:
                         or data.get("engine")
                         or ""
                     ).strip().lower()
-                    if engine_from_raw not in {"parakeet", "whisper"}:
+                    if engine_from_raw not in {"parakeet", "whisper", "phonon"}:
                         engine_from_raw = selected_engine if selected_engine in {"parakeet", "whisper"} else ""
                     payload_fields = {
                         "transcription_reused_existing": True,
                         "transcription_engine_routed": selected_engine,
                     }
-                    if engine_from_raw in {"parakeet", "whisper"}:
+                    if engine_from_raw in {"parakeet", "whisper", "phonon"}:
                         payload_fields["transcription_engine_used"] = engine_from_raw
                     self._upsert_job_payload_fields(job_id, payload_fields)
 
@@ -228,19 +326,22 @@ class TranscribePhaseMixin:
                     self._update_job_progress(job_id, 100)
                     self._reset_partial_checkpoint_state(video.id)
                     return existing_segments, total_duration
-                
+
             except Exception as e:
                 log(f"Failed to load existing raw transcript: {e}. Will re-transcribe.")
                 existing_segments = []
         elif raw_transcript_path.exists() and force_retranscription:
             log(f"Ignoring existing raw transcript at {raw_transcript_path} because force_retranscription is enabled.")
 
+        if selected_engine == "phonon":
+            return self._process_phonon_phase(video, audio_path, job_id, route, force_retranscription)
+
         # 3. Check for PARTIAL resumption (temp files)
         partial_data = self._load_partial_transcript(video.id)
         start_time_offset = 0.0
         transcribe_path = audio_path
         temp_slice_path = None
-        
+
         if partial_data:
             try:
                 saved_segments = partial_data.get("segments", [])
@@ -248,7 +349,7 @@ class TranscribePhaseMixin:
                     last_seg = saved_segments[-1]
                     start_time_offset = last_seg["end"]
                     log_verbose(f"Resuming transcription from {start_time_offset:.2f}s")
-                    
+
                     for s in saved_segments:
                         words = _deserialize_words(s.get("words"), seg_start=s.get("start"), seg_end=s.get("end"))
                         seg_obj = self._build_whisper_style_segment(
@@ -259,7 +360,7 @@ class TranscribePhaseMixin:
                             words=words,
                         )
                         existing_segments.append(seg_obj)
-                    
+
                     temp_slice_path = self._slice_audio(audio_path, start_time_offset)
                     transcribe_path = temp_slice_path
             except Exception as e:
@@ -447,7 +548,7 @@ class TranscribePhaseMixin:
                 self._release_parakeet_model("fallback_to_whisper", job_id=job_id)
                 # Force fresh run from current checkpoint state.
                 segments = existing_segments
-        
+
         if not prefer_parakeet:
             self._upsert_job_payload_fields(job_id, {"transcription_engine_used": "whisper"})
             operational_reason = str(route.get("operational_route_reason") or "").strip()
@@ -713,9 +814,9 @@ class TranscribePhaseMixin:
             try:
                 os.unlink(temp_slice_path)
             except: pass
-            
+
         self._update_job_progress(job_id, 100)
-        
+
         # Save "raw" checkpoint
         try:
             out_dir = audio_path.parent
@@ -765,5 +866,5 @@ class TranscribePhaseMixin:
 
         if transcribe_engine_used == "parakeet" and self._should_unload_parakeet_after_transcribe(job_id=job_id):
             self._release_parakeet_model("post_transcribe_low_vram", job_id=job_id)
-            
+
         return segments, total_duration

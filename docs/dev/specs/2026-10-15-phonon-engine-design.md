@@ -208,7 +208,7 @@ no subagents. Spec-only review and final spec+plan review both completed.
 Final paired review: no necessary design finding remains open. Artifact review
 gate passed. On 2026-10-15 the owner explicitly replied "d approve" and requested
 a prompt to implement in a new session. The separate owner plan-approval gate has
-passed. No implementation code has been written for this feature yet.
+passed. Implementation and verification are now recorded in the plan tracker.
 
 ## Out of scope
 

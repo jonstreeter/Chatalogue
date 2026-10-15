@@ -142,6 +142,9 @@ def get_settings():
     return Settings(
         hf_token=os.getenv("HF_TOKEN") or "",
         transcription_engine=(os.getenv("TRANSCRIPTION_ENGINE") or "auto"),
+        phonon_url=os.getenv("PHONON_URL", "http://127.0.0.1:8010"),
+        phonon_api_key=os.getenv("PHONON_API_KEY", ""),
+        phonon_request_timeout_seconds=float(os.environ["PHONON_REQUEST_TIMEOUT_SECONDS"]) if os.getenv("PHONON_REQUEST_TIMEOUT_SECONDS") else None,
         pipeline_execution_mode=pipeline_execution_mode,
         whisper_backend=(os.getenv("WHISPER_BACKEND") or "faster_whisper"),
         transcription_model=os.getenv("TRANSCRIPTION_MODEL") or "medium",
@@ -208,7 +211,7 @@ def get_settings():
 def update_settings(settings: Settings, session: Session = Depends(get_session)):
     """Update settings and reload models"""
     normalized_transcription_engine = (getattr(settings, "transcription_engine", "auto") or "auto").strip().lower()
-    if normalized_transcription_engine not in {"auto", "whisper", "parakeet"}:
+    if normalized_transcription_engine not in {"auto", "whisper", "parakeet", "phonon"}:
         normalized_transcription_engine = "auto"
     normalized_whisper_backend = (getattr(settings, "whisper_backend", "faster_whisper") or "faster_whisper").strip().lower().replace("-", "_")
     if normalized_whisper_backend not in {"faster_whisper", "insanely_fast_whisper"}:
@@ -238,8 +241,22 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     youtube_redirect_uri = (getattr(settings, "youtube_oauth_redirect_uri", "") or "http://localhost:8000/auth/youtube/callback").strip()
     normalized_ollama_model = ollama_svc._normalize_ollama_model_ref(getattr(settings, "ollama_model", "") or "")
 
+    # Validate the new trust boundary before any persisted settings change.
+    from ..services.ingestion.phonon import validate_url
+    try:
+        validate_url(settings.phonon_url)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
     # 1. Update .env file
     set_key(ENV_PATH, "HF_TOKEN", settings.hf_token)
+    # Omitted new fields from older clients must not erase saved credentials.
+    for field, env_key in (("phonon_url", "PHONON_URL"), ("phonon_api_key", "PHONON_API_KEY"),
+                           ("phonon_request_timeout_seconds", "PHONON_REQUEST_TIMEOUT_SECONDS")):
+        if field in settings.model_fields_set:
+            value = getattr(settings, field)
+            encoded = "" if value is None else str(value)
+            set_key(ENV_PATH, env_key, encoded)
+            os.environ[env_key] = encoded
     set_key(ENV_PATH, "TRANSCRIPTION_ENGINE", normalized_transcription_engine)
     set_key(ENV_PATH, "PIPELINE_EXECUTION_MODE", pipeline_execution_mode)
     set_key(ENV_PATH, "WHISPER_BACKEND", normalized_whisper_backend)
@@ -365,19 +382,23 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     os.environ["FUNNY_MOMENTS_MAX_SAVED"] = str(funny_moments_max_saved)
     os.environ["FUNNY_MOMENTS_EXPLAIN_BATCH_LIMIT"] = str(funny_moments_explain_batch_limit)
     os.environ["SETUP_WIZARD_COMPLETED"] = str(bool(getattr(settings, "setup_wizard_completed", False))).lower()
-    
+
     # 3. Reconfigure logging based on new verbose_logging setting
     _main().configure_logging()
-    
+
     # 4. Reload models in ingestion service
     if get_ingestion_service():
         print("Reloading models with new settings...")
         _purge_runtime_models(reason="settings_updated")
-        
+
     return {"status": "updated"}
 
 @router.post("/settings/test-transcription-engine")
 def test_transcription_engine(request: TranscriptionEngineTestRequest):
+    engine = (request.engine or os.getenv("TRANSCRIPTION_ENGINE") or "auto").strip().lower()
+    if engine == "phonon":
+        from ..services.ingestion.phonon import test_connection
+        return test_connection(request.phonon_url, request.phonon_api_key)
     if not get_ingestion_service():
         raise HTTPException(status_code=503, detail="Ingestion service unavailable")
     engine = (request.engine or os.getenv("TRANSCRIPTION_ENGINE") or "auto").strip().lower()
@@ -397,21 +418,21 @@ def validate_hf_token():
             "error": "No token configured",
             "models": {}
         }
-    
+
     # Required models for diarization
     required_models = [
         "pyannote/speaker-diarization-3.1",
         "pyannote/speaker-diarization-community-1",
-        "pyannote/segmentation-3.0", 
+        "pyannote/segmentation-3.0",
         "pyannote/embedding"
     ]
-    
+
     model_status = {}
     all_valid = True
-    
+
     from huggingface_hub import HfApi
     api = HfApi()
-    
+
     for model_id in required_models:
         try:
             # Try to get model info with the token
@@ -421,22 +442,22 @@ def validate_hf_token():
             error_msg = str(e)
             if "403" in error_msg or "restricted" in error_msg.lower() or "gated" in error_msg.lower():
                 model_status[model_id] = {
-                    "accessible": False, 
+                    "accessible": False,
                     "error": "Access denied - you need to accept the model agreement",
                     "url": f"https://huggingface.co/{model_id}"
                 }
             elif "401" in error_msg or "unauthorized" in error_msg.lower():
                 model_status[model_id] = {
-                    "accessible": False, 
+                    "accessible": False,
                     "error": "Invalid token"
                 }
             else:
                 model_status[model_id] = {
-                    "accessible": False, 
+                    "accessible": False,
                     "error": error_msg[:100]
                 }
             all_valid = False
-    
+
     return {
         "valid": all_valid,
         "token_set": True,

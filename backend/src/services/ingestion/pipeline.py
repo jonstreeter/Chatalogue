@@ -28,6 +28,86 @@ from .runtime import (
 
 
 class PipelineMixin:
+    def _load_phonon_partial(self, video_id):
+        """Recover only committed JSONL records; discard interrupted append tails."""
+        import math
+        from .phonon import PhononError, validate_result
+
+        meta = self._get_temp_transcript_path(video_id)
+        records = self._get_temp_transcript_jsonl_path(video_id)
+        if not meta.exists():
+            if records.exists():
+                raise PhononError("Partial transcript has unknown engine provenance; resume its original engine or deliberately re-transcribe")
+            return {"segments": [], "completed_until_seconds": 0.0}
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            if data.get("engine") != "phonon":
+                raise PhononError("Partial transcript belongs to another or unknown engine; resume that engine or deliberately re-transcribe")
+            count = data["segment_count"]
+            completed = float(data["completed_until_seconds"])
+            duration = float(data["total_duration"])
+            if (type(count) is not int or count < 0 or not math.isfinite(completed)
+                    or not math.isfinite(duration) or not 0 <= completed <= duration):
+                raise ValueError
+            segments = []
+            if count == 0 and not records.exists():
+                records.touch()
+            with records.open("rb+") as stream:
+                for _ in range(count):
+                    line = stream.readline()
+                    item = json.loads(line)
+                    if not isinstance(item, dict):
+                        raise ValueError
+                    segments.append(item)
+                validate_result({"segments": segments, "words": [word for segment in segments for word in segment["words"]],
+                                 "text": " ".join(segment["text"] for segment in segments)}, completed)
+                committed_bytes = stream.tell()
+                stream.truncate(committed_bytes)
+            return {**data, "segments": segments}
+        except PhononError:
+            raise
+        except (OSError, ValueError, KeyError, TypeError):
+            raise PhononError("Phonon partial checkpoint is incomplete or invalid; committed audio cannot safely be skipped") from None
+
+    def _save_phonon_partial(self, video_id, segments, duration, completed):
+        """Append/fsync data first, then atomically publish its commit boundary."""
+        import tempfile
+
+        meta = self._get_temp_transcript_path(video_id)
+        records = self._get_temp_transcript_jsonl_path(video_id)
+
+        def publish(data):
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=meta.parent, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    json.dump(data, stream, allow_nan=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, meta)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+
+        with self._partial_checkpoint_guard:
+            previous = self._load_phonon_partial(video_id)
+            count = len(previous["segments"])
+            if count > len(segments):
+                raise RuntimeError("Phonon checkpoint segment count regressed")
+            data = {"engine": "phonon", "video_id": video_id, "format": "jsonl", "segment_count": count,
+                    "total_duration": duration, "completed_until_seconds": previous["completed_until_seconds"],
+                    "timestamp": time.time(), "segments_path": str(records)}
+            if not meta.exists():
+                # Establish ownership before the first append. A crash can never
+                # leave our uncommitted data indistinguishable from another engine.
+                publish(data)
+            with records.open("ab") as stream:
+                for segment in segments[count:]:
+                    stream.write((json.dumps(segment, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            publish({**data, "segment_count": len(segments), "completed_until_seconds": completed})
+
     def _deserialize_transcript_words(self, raw_words, seg_start=None, seg_end=None):
         from math import isfinite
 
@@ -133,13 +213,15 @@ class PipelineMixin:
         total_duration = float(video.duration or 0)
         if total_duration <= 0 and segments:
             total_duration = float(getattr(segments[-1], "end", 0.0) or 0.0)
+        if data.get("transcription_engine_used") == "phonon" and data.get("total_duration") is not None:
+            total_duration = float(data["total_duration"])
 
         engine_from_raw = str(
             data.get("transcription_engine_used")
             or data.get("engine")
             or ""
         ).strip().lower()
-        if engine_from_raw not in {"parakeet", "whisper"}:
+        if engine_from_raw not in {"parakeet", "whisper", "phonon"}:
             engine_from_raw = ""
 
         payload_fields = {"transcription_reused_existing": True}
@@ -335,10 +417,10 @@ class PipelineMixin:
                     )
             # Phase 1: Download
             video_detached, audio_path = self._process_download_phase(video_id, job_id)
-            
+
             # Phase 2: Transcribe
             segments, duration = self._process_transcribe_phase(video_detached, audio_path, job_id)
-            
+
             # Phase 3: Diarize
             self._process_diarize_phase(video_detached, audio_path, segments, job_id)
             payload = {}
@@ -355,7 +437,7 @@ class PipelineMixin:
             except Exception as e:
                 # Keep process pipeline success even if queueing follow-up fails.
                 log(f"Failed to enqueue follow-up funny_detect for video {video_id}: {e}")
-            
+
         except JobPausedException:
             log(f"Video {video_id} paused by user")
             # Update status to pending
@@ -392,7 +474,7 @@ class PipelineMixin:
             tb = traceback.format_exc()
             log(f"Error processing video {video_id}: {e}")
             log(tb)
-            
+
             # Fail status
             with Session(runtime.engine) as session:
                 v = session.get(Video, video_id)
@@ -423,8 +505,8 @@ class PipelineMixin:
     def _save_transcripts(self, session: Session, video: Video, segments: list, audio_path: Path):
         """Save SRT and Diarized Text files"""
         if not segments:
-            # If we used the stream processing loop, 'segments' valid variable might be 
-            # tricky if we didn't accumulate them in 'final_segments'. 
+            # If we used the stream processing loop, 'segments' valid variable might be
+            # tricky if we didn't accumulate them in 'final_segments'.
             # But the loop above saves into DB. We can re-query DB to be safe and consistent.
             # Rerunning query ensures we have the assigned speaker IDs correctly loaded.
             segments = session.exec(select(TranscriptSegment).where(TranscriptSegment.video_id == video.id).order_by(TranscriptSegment.start_time)).all()
@@ -433,16 +515,16 @@ class PipelineMixin:
         channel_name = channel.name if channel else "Unknown"
         safe_channel = self.sanitize_filename(channel_name)
         safe_title = self.sanitize_filename(video.title)
-        
+
         # Directory logic duplicated? We can assume audio_path parent is the dir.
-        # But audio_path might be the migrated one or not? 
+        # But audio_path might be the migrated one or not?
         # Ideally rely on the passed audio_path parent.
         out_dir = audio_path.parent
         if not out_dir.exists():
             # Fallback
             out_dir = AUDIO_DIR / safe_channel / safe_title
             out_dir.mkdir(parents=True, exist_ok=True)
-            
+
         base_name = safe_title
 
         # 1. Standard SRT (No Speaker Names)
@@ -460,11 +542,11 @@ class PipelineMixin:
             f.write(f"Transcript for: {video.title}\n")
             f.write(f"Channel: {channel_name}\n")
             f.write(f"Date: {video.published_at}\n\n")
-            
+
             for seg in segments:
                 speaker_name = "Unknown"
                 if seg.speaker_id:
-                    # We have ID, need name. Inefficient to query every time? 
+                    # We have ID, need name. Inefficient to query every time?
                     # Prefetch map or accessing .speaker relationship if loaded
                     if seg.speaker:
                         speaker_name = seg.speaker.name
@@ -472,7 +554,7 @@ class PipelineMixin:
                         # Should have been selectinload-ed or lazily loaded
                         spk = session.get(Speaker, seg.speaker_id)
                         if spk: speaker_name = spk.name
-                
+
                 time_str = f"[{self._format_timestamp(seg.start_time).replace(',','.')}]"
                 f.write(f"{time_str} {speaker_name}: {seg.text}\n")
         log_verbose(f"Saved Diarized Text: {txt_path}")
@@ -483,7 +565,7 @@ class PipelineMixin:
              for i, seg in enumerate(segments, 1):
                 start = self._format_timestamp(seg.start_time)
                 end = self._format_timestamp(seg.end_time)
-                
+
                 speaker_name = "Unknown"
                 if seg.speaker:
                     speaker_name = seg.speaker.name
@@ -497,17 +579,17 @@ class PipelineMixin:
     def _process_download_phase(self, video_id: int, job_id: int = None):
         """Phase 1: Update status and download audio.
         Returns (video_obj, audio_path). video_obj is detached from session."""
-        
+
         # Short-lived session for status update
         with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
                 raise ValueError(f"Video {video_id} not found")
-            
+
             # Eagerly load relationship needed for path generation
             if video.channel:
                  _ = video.channel.name # Touch to load
-            
+
             video.status = "downloading"
             session.add(video)
 
@@ -519,7 +601,7 @@ class PipelineMixin:
 
             session.commit()
             session.refresh(video)
-            
+
             # Ensure relationship is loaded before detaching
             _ = video.channel
 
@@ -529,7 +611,7 @@ class PipelineMixin:
                 session.expunge(video.channel)
 
         self._record_job_stage_start(job_id, "download")
-        
+
         # Download (long running, no DB lock). Serialize per-video download work so
         # the background prefetch worker and the active job cannot race each other.
         lock = self._get_video_download_lock(video_id)
@@ -547,7 +629,7 @@ class PipelineMixin:
         crop_coords: {x, y, w, h} (relative 0-1)
         Returns: Path string relative to static route (e.g. /thumbnails/speakers/1.jpg)
         """
-        
+
         with Session(runtime.engine) as session:
             video = session.get(Video, video_id)
             if not video:
@@ -604,7 +686,7 @@ class PipelineMixin:
         # We need absolute pixel coords. We don't verify video resolution?
         # FFmpeg crop filter accepts iw and ih (input width/height)
         # crop=iw*w:ih*h:iw*x:ih*y
-        
+
         x = float(crop_coords.get('x', 0) or 0)
         y = float(crop_coords.get('y', 0) or 0)
         w = float(crop_coords.get('w', 1) or 1)
@@ -664,16 +746,16 @@ class PipelineMixin:
         min_rel = 0.01
         if w < min_rel or h < min_rel:
             raise RuntimeError("Selected crop area is too small. Draw a larger square around the face.")
-        
+
         # Ensure target dir
         thumb_dir = DATA_DIR / "thumbnails" / "speakers"
         thumb_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Temp file name - will be renamed/moved by caller or used as is?
         # Let's generate a unique filename
         filename = f"extract_{video_id}_{int(timestamp)}_{int(time.time())}.jpg"
         output_path = thumb_dir / filename
-        
+
         # Determine ffmpeg
         ffmpeg_bin = BACKEND_DIR / "bin"
         ffmpeg_cmd = "ffmpeg"
@@ -721,7 +803,7 @@ class PipelineMixin:
         # FFmpeg filter: crop=w=iw*0.5:h=ih*0.5:x=iw*0.25:y=ih*0.25
         # floor() keeps ffmpeg crop dimensions integer and stable
         filter_str = f"crop=w=floor(iw*{w}):h=floor(ih*{h}):x=floor(iw*{x}):y=floor(ih*{y})"
-        
+
         cmd = [
             ffmpeg_cmd, "-y",
             "-ss", str(timestamp),
@@ -731,14 +813,14 @@ class PipelineMixin:
             "-q:v", "2", # High quality jpeg
             str(output_path)
         ]
-        
+
         # print(f"RUNNING FFMPEG: {cmd}") # DEBUG
         try:
             log_verbose("Running ffmpeg frame extract...")
-            
+
             # Use temp file for stderr to avoid memory issues and capturing crashes
             stderr_file = Path(output_path).parent / f"{Path(output_path).stem}.err"
-            
+
             kwargs = {}
             if os.name == 'nt':
                 # Prevent console window from popping up
@@ -746,16 +828,16 @@ class PipelineMixin:
 
             with open(stderr_file, "w") as err_log:
                 subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=err_log, **kwargs)
-            
+
             # Clean up error log on success
             if stderr_file.exists():
                 stderr_file.unlink()
 
             log_verbose(f"Extracted thumbnail to {output_path}")
-            
+
             # Return relative path for API
             return f"/thumbnails/speakers/{filename}"
-            
+
         except subprocess.CalledProcessError:
             # Read error from file
             stderr_content = "Unknown error"

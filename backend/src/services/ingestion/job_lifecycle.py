@@ -319,7 +319,7 @@ class JobLifecycleMixin:
     def _strip_transient_job_payload_fields(self, payload: dict | None) -> dict:
         source = payload if isinstance(payload, dict) else {}
         cleaned: dict = {}
-        transient_prefixes = ("stage_", "parakeet_", "whisper_")
+        transient_prefixes = ("stage_", "parakeet_", "whisper_", "phonon_")
         preserved_exact = set()
         transient_exact = {
             "pipeline_started_at",
@@ -743,7 +743,7 @@ class JobLifecycleMixin:
             payload = self._load_job_payload(parent.payload_json)
             child_payload = self._load_job_payload(child.payload_json if child else None)
             for key, value in child_payload.items():
-                if key.startswith("stage_") or key.startswith("parakeet_") or key.startswith("transcription_"):
+                if key.startswith("stage_") or key.startswith("parakeet_") or key.startswith("phonon_") or key.startswith("transcription_"):
                     payload[key] = value
             payload["pipeline_stage"] = status
             payload["diarize_job_id"] = int(child_job_id)

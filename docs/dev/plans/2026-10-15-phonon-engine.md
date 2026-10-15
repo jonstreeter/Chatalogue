@@ -12,7 +12,7 @@ bound uploads, preserve word timings and resumable progress, and make actual
 engine/runtime availability visible. Preserve existing auto, Whisper, Parakeet,
 diarization and database behavior. The owner explicitly approved this reviewed
 plan on 2026-10-15 ("d approve") and requested implementation in a new session.
-The approval gate is satisfied; implementation has not started.
+The approval gate is satisfied; implementation and verification are complete.
 
 ## Affected modules
 
@@ -47,7 +47,7 @@ The approval gate is satisfied; implementation has not started.
 | 3 | Wire explicit selection and actual phase/chunk/progress/resume into existing transcription flow; audit every engine reader/normalizer and keep old-engine behavior | `backend/src/services/ingestion/service.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/services/ingestion/job_lifecycle.py`, `backend/src/test_transcription_routing.py`, `backend/src/test_phonon.py` | L | ✅ done |
 | 4 | Expose optional engine/settings and truthful queue provenance; browser-verify save/reload, health errors and existing engine options | `frontend/src/pages/Settings.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/phonon-settings.spec.ts` | M | ✅ done |
 | 5 | Document and exercise persistent CUDA setup and CPU/MLX equivalent; benchmark integrated app on short/long audio and multiple requests without reloading | `docs/phonon-engine.md`, `scripts/benchmark_asr.py`, `docs/research/2026-10-15-transcription-performance.md` | M | ✅ done |
-| 6 | Run relevant tests/static checks, review final diff with code-reviewer lens, update tracker/handoff and report deployment steps without activating engine or pushing | touched modules and docs | M | ▶ in progress |
+| 6 | Run relevant tests/static checks, review final diff with code-reviewer lens, update tracker/handoff and report deployment steps without activating engine or pushing | touched modules and docs | M | ✅ done |
 
 ## Test plan
 
@@ -160,3 +160,19 @@ review gate passed; the separate owner approval gate passed on 2026-10-15.
 - Final focused readiness/boundary suite: 47 passed (includes CPU API shape, wrong model and loading); live settings probe returned ready, wrong-key 401 and offline errors as expected. Queue/settings screenshots reviewed. Final native CPU/MLX runtime was not run on this host. Commit/commit-impact check pending lint-gate owner decision; no passing claim for an unrun check.
 
 - 2026-10-15: owner explicitly authorized a separate frontend lint cleanup. Treat it as contained maintenance with no API/storage contract changes, tracked here as the prerequisite for task 6; no new spec required. Replaced untyped catch access with shared guarded error extraction, typed existing data/player/event shapes, removed dead preview UI and unused reads, fixed conditional hook order. ESLint rules/config unchanged. Four isolated regression checks passed, including draft open/close, reconstruction visibility and existing Phonon browser flows. Commit cleanup separately from Phonon.
+
+- 2026-10-15 final verification: owner-authorized separate lint cleanup committed as
+  88e2517 after all hooks passed; no lint rules were weakened. Frontend lint has
+  zero errors and 43 existing non-blocking warnings. TypeScript build PASS;
+  four isolated error/hook/settings/queue checks PASS. Stable full backend suite:
+  89 passed, one upstream warning. One earlier run overlapped a pre-commit stash
+  and imported baseline settings; discarded that invalid run and reran with the
+  checkout stable. Ruff, full SDD validation and diff whitespace checks PASS.
+- Inline code-reviewer lens applied to cleanup and feature; no subagents. Required
+  findings resolved and regression-checked; no necessary code finding remains.
+  Commit hooks also enforce required whitespace normalization. No production
+  settings activation, media reprocessing, paid action, push or deployment.
+- Tasks 1–6 complete. Source remains in active SDD folders until authorized shipping
+  and archival. Contract-impact validation follows the feature commit; no passing
+  claim is made before that check runs. Existing live-data E2E tests remain outside
+  this verification environment; four isolated checks cover the changed flows.
