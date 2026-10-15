@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "domains": [{
+    "id": "phonon-adapter",
+    "summary": "Optional persistent local Phonon transcription transport.",
+    "paths": ["backend/src/services/ingestion/phonon.py"],
+    "authorities": [
+      {"path": "docs/dev/specs/2026-10-15-phonon-engine-design.md", "role": "contract"},
+      {"path": "docs/dev/adr/ADR-0001-phonon-local-service.md", "role": "refines"}
+    ]
+  }]
+}

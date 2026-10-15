@@ -23,6 +23,21 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def test_repository_discovery_does_not_traverse_generated_trees(tmp_path, monkeypatch):
+    tracked = {"backend/src/main.py", "docs/dev/adr/ADR-0001.md"}
+    monkeypatch.setattr(check_sdd_docs, "_tracked_files", lambda root: tracked)
+    artifact = "docs/dev/specs/new-design.md"
+    _write(tmp_path / artifact, "# New spec")
+    original = Path.rglob
+
+    def guarded_rglob(path, pattern):
+        assert path != tmp_path, "repository-wide traversal visits generated trees"
+        return original(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", guarded_rglob)
+    assert check_sdd_docs._repository_files(tmp_path) == tracked | {artifact}
+
+
 def _valid_pair(root: Path, *, newline: str = "\n") -> None:
     spec_path = "docs/dev/specs/2026-08-09-example-design.md"
     plan_path = "docs/dev/plans/2026-08-09-example.md"

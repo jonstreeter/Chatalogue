@@ -67,11 +67,9 @@ def _repository_files(root: Path) -> set[str]:
         tracked = _tracked_files(root)
         return tracked | {
             path.relative_to(root).as_posix()
-            for path in root.rglob("*")
+            for category in ("specs", "plans", "handoffs")
+            for path in (root / "docs" / "dev" / category).rglob("*")
             if path.is_file()
-            and path.relative_to(root)
-            .as_posix()
-            .startswith(("docs/dev/specs/", "docs/dev/plans/", "docs/dev/handoffs/"))
         }
     except (FileNotFoundError, subprocess.CalledProcessError):
         return {
