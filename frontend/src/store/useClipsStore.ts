@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import api from '../lib/api';
@@ -271,7 +272,7 @@ export const useClipsStore = create<ClipsState>()(
                     return createdClip;
                 } catch (e) {
                     console.error(e);
-                    alert((e as any)?.response?.data?.detail || 'Failed to save clip');
+                    alert(getErrorDetail(e) || 'Failed to save clip');
                     return null;
                 } finally {
                     set({ creatingClip: false }, false, 'createClip/settled');
@@ -373,8 +374,8 @@ export const useClipsStore = create<ClipsState>()(
                     );
                     get().cancelClipEdit();
                     return true;
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to save clip edits');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to save clip edits');
                     return false;
                 } finally {
                     set({ savingClipEdit: false }, false, 'saveClipEdit/settled');
@@ -385,8 +386,8 @@ export const useClipsStore = create<ClipsState>()(
                 try {
                     const response = await api.get(`/clip-exports/${artifact.id}/download`, { responseType: 'blob' });
                     downloadBlobResponse(response.data, artifact.file_name || `clip_export_${artifact.id}.${artifact.format || 'bin'}`);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to download archived export');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to download archived export');
                 }
             },
 
@@ -400,8 +401,8 @@ export const useClipsStore = create<ClipsState>()(
                     const response = await api.post(`/clips/${clip.id}/export/mp4`, null, { responseType: 'blob' });
                     downloadBlobResponse(response.data, `${sanitizeClipFilename(clip.title || `clip_${clip.id}`, `clip_${clip.id}`)}.mp4`);
                     await get().fetchClipExportArtifacts(clip.video_id);
-                } catch (e: any) {
-                    const detail = e?.response?.data?.detail || 'Failed to export MP4';
+                } catch (e) {
+                    const detail = getErrorDetail(e) || 'Failed to export MP4';
                     try {
                         await api.post(`/clips/${clip.id}/export/mp4/queue`);
                         alert(`${detail}\n\nQueued a background render job for "${clip.title || `Clip #${clip.id}`}". You can download it from archived outputs when complete.`);
@@ -426,8 +427,8 @@ export const useClipsStore = create<ClipsState>()(
                 try {
                     await api.post(`/clips/${clip.id}/export/mp4/queue`);
                     alert(`Queued render job for "${clip.title || `Clip #${clip.id}`}". Check Job Queue > Clip Export.`);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to queue MP4 export');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to queue MP4 export');
                 } finally {
                     get().setExportingClipIds((prev) => {
                         const next = new Set(prev);
@@ -447,8 +448,8 @@ export const useClipsStore = create<ClipsState>()(
                     const response = await api.post(`/clips/${clip.id}/export/captions`, { format }, { responseType: 'blob' });
                     downloadBlobResponse(response.data, `${sanitizeClipFilename(clip.title || `clip_${clip.id}`, `clip_${clip.id}`)}.${format}`);
                     await get().fetchClipExportArtifacts(clip.video_id);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || `Failed to export ${format.toUpperCase()}`);
+                } catch (e) {
+                    alert(getErrorDetail(e) || `Failed to export ${format.toUpperCase()}`);
                 } finally {
                     get().setExportingClipIds((prev) => {
                         const next = new Set(prev);
@@ -477,8 +478,8 @@ export const useClipsStore = create<ClipsState>()(
                     } else {
                         alert(`Uploaded "${title}" successfully.`);
                     }
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to upload clip to YouTube');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to upload clip to YouTube');
                 } finally {
                     get().setUploadingClipIds((prev) => {
                         const next = new Set(prev);
@@ -557,8 +558,8 @@ export const useClipsStore = create<ClipsState>()(
                     const uploaded = Number(res.data?.uploaded || 0);
                     const failed = Number(res.data?.failed || 0);
                     alert(`Batch upload finished. Uploaded: ${uploaded}, Failed: ${failed}.`);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to batch upload clips');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to batch upload clips');
                 } finally {
                     set({ batchUploadingClips: false }, false, 'batchUploadSelectedClips/settled');
                 }

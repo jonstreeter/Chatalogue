@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import api from '../lib/api';
@@ -70,7 +71,7 @@ export const useCleanupStore = create<CleanupState>()(
                 try {
                     const res = await api.get<CleanupWorkbench>(`/videos/${videoId}/cleanup/workbench`);
                     set({ cleanupWorkbench: res.data || null }, false, 'fetchCleanupWorkbench/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to fetch cleanup workbench', e);
                     // Set error state to null to indicate failure
                     set({ cleanupWorkbench: null }, false, 'fetchCleanupWorkbench/rejected');
@@ -103,8 +104,8 @@ export const useCleanupStore = create<CleanupState>()(
                     });
                     onVideoUpdated(res.data);
                     set({ queueingVoiceFixer: false }, false, 'handleQueueVoiceFixer/fulfilled');
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to queue VoiceFixer cleanup');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to queue VoiceFixer cleanup');
                     set({ queueingVoiceFixer: false }, false, 'handleQueueVoiceFixer/rejected');
                 }
             },
@@ -121,8 +122,8 @@ export const useCleanupStore = create<CleanupState>()(
                     });
                     onVideoUpdated(res.data);
                     set({ savingVoiceFixerSettings: false }, false, 'handleSaveVoiceFixerSettings/fulfilled');
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to save VoiceFixer settings');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to save VoiceFixer settings');
                     set({ savingVoiceFixerSettings: false }, false, 'handleSaveVoiceFixerSettings/rejected');
                 }
             },
@@ -132,9 +133,9 @@ export const useCleanupStore = create<CleanupState>()(
                 try {
                     const res = await api.post<CleanupWorkbench>(`/videos/${videoId}/cleanup/workbench/analyze`);
                     set({ cleanupWorkbench: res.data }, false, 'handleAnalyzeCleanupWorkbench/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to analyze cleanup workbench', e);
-                    alert(e?.response?.data?.detail || 'Failed to analyze the uploaded audio');
+                    alert(getErrorDetail(e) || 'Failed to analyze the uploaded audio');
                     set({ analyzingCleanupWorkbench: false }, false, 'handleAnalyzeCleanupWorkbench/rejected');
                 }
             },
@@ -147,9 +148,9 @@ export const useCleanupStore = create<CleanupState>()(
                         { stage: 'enhancement', model_name: modelName }
                     );
                     set({ cleanupWorkbench: res.data }, false, 'handleRunClearVoiceCandidate/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     console.error(`Failed to generate the ${modelName} candidate`, e);
-                    alert(e?.response?.data?.detail || `Failed to generate the ${modelName} candidate`);
+                    alert(getErrorDetail(e) || `Failed to generate the ${modelName} candidate`);
                     set({ runningClearVoiceModel: null }, false, 'handleRunClearVoiceCandidate/rejected');
                 }
             },
@@ -162,9 +163,9 @@ export const useCleanupStore = create<CleanupState>()(
                         { candidate_id: candidateId }
                     );
                     set({ cleanupWorkbench: res.data }, false, 'handleSelectCleanupCandidate/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to update the selected pre-cleanup candidate', e);
-                    alert(e?.response?.data?.detail || 'Failed to update the selected pre-cleanup candidate');
+                    alert(getErrorDetail(e) || 'Failed to update the selected pre-cleanup candidate');
                     set({ selectingCleanupCandidateId: null }, false, 'handleSelectCleanupCandidate/rejected');
                 }
             },
@@ -174,8 +175,8 @@ export const useCleanupStore = create<CleanupState>()(
                 try {
                     const res = await api.post<ClearVoiceInstallInfo>('/system/clearvoice/install');
                     set({ clearVoiceInstallInfo: res.data, clearVoiceTestResult: null }, false, 'handleInstallClearVoice/fulfilled');
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to install ClearVoice');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to install ClearVoice');
                     set({ installingClearVoice: false }, false, 'handleInstallClearVoice/rejected');
                 }
             },
@@ -185,7 +186,7 @@ export const useCleanupStore = create<CleanupState>()(
                 try {
                     const res = await api.post<ClearVoiceTestResult>('/system/clearvoice/test');
                     set({ clearVoiceTestResult: res.data }, false, 'handleTestClearVoice/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to test ClearVoice', e);
                     set({
                         clearVoiceTestResult: {
@@ -195,7 +196,7 @@ export const useCleanupStore = create<CleanupState>()(
                             torch_imported: false,
                             torchaudio_imported: false,
                             runtime_ready: false,
-                            error: e?.response?.data?.detail || 'Failed to test ClearVoice',
+                            error: getErrorDetail(e) || 'Failed to test ClearVoice',
                             detail: 'The backend could not validate the local ClearVoice runtime.',
                         },
                     }, false, 'handleTestClearVoice/rejected');
@@ -213,8 +214,8 @@ export const useCleanupStore = create<CleanupState>()(
                     await get().fetchClearVoiceInstallInfo();
                     await get().handleTestClearVoice();
                     set({ repairingClearVoice: false }, false, 'handleRepairClearVoice/fulfilled');
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to repair the ClearVoice runtime');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to repair the ClearVoice runtime');
                     set({ repairingClearVoice: false }, false, 'handleRepairClearVoice/rejected');
                 }
             },
@@ -246,9 +247,9 @@ export const useCleanupStore = create<CleanupState>()(
                 try {
                     const res = await api.post(`/videos/${videoId}/voicefixer/${action}`);
                     set({ voiceFixerStatus: res.data.status }, false, 'handleVoiceFixer/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     console.error(`Failed to ${action} VoiceFixer`, e);
-                    alert(e?.response?.data?.detail || `Failed to ${action} VoiceFixer`);
+                    alert(getErrorDetail(e) || `Failed to ${action} VoiceFixer`);
                     set({ voiceFixerAction: null }, false, 'handleVoiceFixer/rejected');
                 }
             },

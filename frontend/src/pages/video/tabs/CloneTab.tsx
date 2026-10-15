@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { CloneWorkbenchPanel } from '../../../components/video/CloneWorkbenchPanel';
 import { useCloneStore, useCloneDraftResult, useCloneUsesOllama } from '../../../store/useCloneStore';
 import type { Video } from '../../../types';
@@ -16,10 +16,6 @@ export function CloneTab({ video, segmentsCount, videoId, isActive }: Props) {
     const store = useCloneStore();
     const cloneDraft = useCloneDraftResult();
     const cloneUsesOllama = useCloneUsesOllama();
-
-    // Stable ref so effects can read the latest value without re-running.
-    const cloneEngineKeyRef = useRef(store.cloneEngineKey);
-    cloneEngineKeyRef.current = store.cloneEngineKey;
 
     // Fetch engines + jobs whenever the tab becomes active.
     useEffect(() => {

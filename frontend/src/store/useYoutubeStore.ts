@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import api from '../lib/api';
@@ -46,9 +47,9 @@ export const useYoutubeStore = create<YoutubeState>()(
                 try {
                     const res = await api.post<Video>(`/videos/${videoId}/youtube-ai/generate`, null, { params: { force } });
                     onVideoUpdated(res.data);
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to generate YouTube metadata', e);
-                    alert(e?.response?.data?.detail || 'Failed to generate YouTube summary/chapters');
+                    alert(getErrorDetail(e) || 'Failed to generate YouTube summary/chapters');
                 } finally {
                     set({ generatingYoutubeAi: false }, false, 'handleGenerateYoutubeAi/settled');
                 }
@@ -64,9 +65,9 @@ export const useYoutubeStore = create<YoutubeState>()(
                     const res = await api.post<Video>(`/videos/${videoId}/youtube-ai/publish-description`);
                     onVideoUpdated(res.data);
                     await get().fetchDescriptionHistory(videoId);
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to publish AI description', e);
-                    alert(e?.response?.data?.detail || 'Failed to publish AI description');
+                    alert(getErrorDetail(e) || 'Failed to publish AI description');
                 } finally {
                     set({ publishingYoutubeDescription: false }, false, 'handlePublishYoutubeDescription/settled');
                 }
@@ -80,9 +81,9 @@ export const useYoutubeStore = create<YoutubeState>()(
                     const res = await api.post<Video>(`/videos/${videoId}/description-history/${revision.id}/restore`);
                     onVideoUpdated(res.data);
                     await get().fetchDescriptionHistory(videoId);
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to restore description', e);
-                    alert(e?.response?.data?.detail || 'Failed to restore description');
+                    alert(getErrorDetail(e) || 'Failed to restore description');
                 } finally {
                     set({ restoringDescriptionRevisionId: null }, false, 'handleRestoreDescriptionRevision/settled');
                 }
@@ -131,7 +132,7 @@ export function parseYoutubeAiChapters(chaptersJson?: string): VideoChapterSugge
         if (!Array.isArray(parsed)) return [];
         return parsed
             .filter(Boolean)
-            .map((ch: any) => ({
+            .map((ch: { start_seconds?: unknown; timestamp?: unknown; title?: unknown; description?: unknown }) => ({
                 start_seconds: Number(ch.start_seconds ?? 0),
                 timestamp: String(ch.timestamp ?? '0:00'),
                 title: String(ch.title ?? '').trim(),

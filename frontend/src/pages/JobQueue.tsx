@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
@@ -127,9 +128,9 @@ export function JobQueue() {
 
     const fetchJobs = usePollingFetch<Job[]>({
         mountedRef,
-        request: (signal) => api.get('/jobs', { 
-            params: { limit: JOBS_FETCH_LIMIT, sort_by: sortBy, sort_dir: sortDir }, 
-            signal 
+        request: (signal) => api.get('/jobs', {
+            params: { limit: JOBS_FETCH_LIMIT, sort_by: sortBy, sort_dir: sortDir },
+            signal
         }),
         onSuccess: (data) => {
             setJobs(Array.isArray(data) ? data : []);
@@ -138,7 +139,7 @@ export function JobQueue() {
         onError: (e) => {
             console.error('Failed to fetch jobs:', e);
             const detail = axios.isAxiosError(e)
-                ? String((e.response?.data as any)?.detail || e.message || 'Unable to load queue data.')
+                ? String(getErrorDetail(e) || e.message || 'Unable to load queue data.')
                 : 'Unable to load queue data.';
             setJobsFetchError(detail);
         },
@@ -162,13 +163,13 @@ export function JobQueue() {
             data: [pipelineTerminal, waitingDiarize, funny] as [{ data: Job[] }, { data: Job[] }, { data: Job[] }],
         })),
         onSuccess: ([pipelineTerminalRes, waitingDiarizeRes, funnyCompletedRes]) => {
-            const filterChildDiarize = (jobs: any[]) => {
+            const filterChildDiarize = (jobs: Job[]) => {
                 return (Array.isArray(jobs) ? jobs : []).filter(job => {
                     if ((job.job_type || '').toLowerCase() === 'diarize') {
                         try {
                             const payload = typeof job.payload_json === 'string' ? JSON.parse(job.payload_json) : (job.payload_json || {});
                             if (payload.parent_job_id) return false;
-                        } catch (e) {
+                        } catch {
                             // ignore
                         }
                     }
@@ -352,7 +353,7 @@ export function JobQueue() {
         } catch (e) {
             console.error(e);
             const detail = axios.isAxiosError(e)
-                ? String((e.response?.data as any)?.detail || e.message || 'Unknown error')
+                ? String(getErrorDetail(e) || e.message || 'Unknown error')
                 : String(e || 'Unknown error');
             alert(`Failed to clear queue: ${detail}`);
         }
@@ -397,7 +398,7 @@ export function JobQueue() {
         } catch (e) {
             console.error('Failed to create transcript campaign:', e);
             const detail = axios.isAxiosError(e)
-                ? String((e.response?.data as any)?.detail || e.message || 'Unknown error')
+                ? String(getErrorDetail(e) || e.message || 'Unknown error')
                 : 'Unknown error';
             alert(`Failed to create transcript campaign: ${detail}`);
         } finally {
@@ -416,7 +417,7 @@ export function JobQueue() {
         } catch (e) {
             console.error('Failed to execute transcript campaign:', e);
             const detail = axios.isAxiosError(e)
-                ? String((e.response?.data as any)?.detail || e.message || 'Unknown error')
+                ? String(getErrorDetail(e) || e.message || 'Unknown error')
                 : 'Unknown error';
             alert(`Failed to execute campaign: ${detail}`);
         } finally {
@@ -442,7 +443,7 @@ export function JobQueue() {
         } catch (e) {
             console.error('Failed to delete transcript campaign:', e);
             const detail = axios.isAxiosError(e)
-                ? String((e.response?.data as any)?.detail || e.message || 'Unknown error')
+                ? String(getErrorDetail(e) || e.message || 'Unknown error')
                 : 'Unknown error';
             alert(`Failed to delete campaign: ${detail}`);
         } finally {
@@ -736,7 +737,7 @@ const getStatusLabel = (status: string): string => {
                 ? (processEndMs - diarizeStartMs) / 1000
                 : null;
 
-        let elapsedDuration: number | null =
+        const elapsedDuration: number | null =
             job.status === 'waiting_diarize'
                 ? (transcribeDuration ?? processDuration)
                 : processDuration;
@@ -925,7 +926,7 @@ const getStatusLabel = (status: string): string => {
             if (status === 'running') {
                 return stage === 'download' ? 'active' : 'pending';
             }
-            const currentStageIndex = stages.indexOf(status as any);
+            const currentStageIndex = stages.indexOf(status as typeof stages[number]);
 
             let targetStageIndex = -1;
             if (stage === 'download') targetStageIndex = 0;
@@ -1986,12 +1987,12 @@ const getStatusLabel = (status: string): string => {
                         {(lowerTab === 'transcribe' || (isStagedExecution && lowerTab === 'diarize')) && (
                             <div className="flex items-center gap-2 text-xs">
                                 <span className="text-slate-500 font-medium">Sort Queued:</span>
-                                <select 
+                                <select
                                     value={`${sortBy}-${sortDir}`}
                                     onChange={(e) => {
                                         const [newSort, newDir] = e.target.value.split('-');
-                                        setSortBy(newSort as any);
-                                        setSortDir(newDir as any);
+                                        setSortBy(newSort as 'created_at' | 'duration' | 'name');
+                                        setSortDir(newDir as 'asc' | 'desc');
                                     }}
                                     className="bg-white border border-slate-200 text-slate-700 rounded-md px-2 py-1 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100"
                                 >
@@ -2029,8 +2030,8 @@ const getStatusLabel = (status: string): string => {
                                     <div className="flex items-center gap-1.5">
                                         <span className="text-slate-500 font-medium">Success Rate:</span>
                                         <span className="font-bold text-slate-700">
-                                            {historyJobs.length > 0 
-                                                ? Math.round((historyJobs.filter(j => j.status === 'completed').length / ((historyJobs.filter(j => j.status === 'completed').length + historyJobs.filter(j => j.status === 'failed').length) || 1)) * 100) 
+                                            {historyJobs.length > 0
+                                                ? Math.round((historyJobs.filter(j => j.status === 'completed').length / ((historyJobs.filter(j => j.status === 'completed').length + historyJobs.filter(j => j.status === 'failed').length) || 1)) * 100)
                                                 : 0}%
                                         </span>
                                     </div>

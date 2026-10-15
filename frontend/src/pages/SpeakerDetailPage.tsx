@@ -1,6 +1,8 @@
+import type { UnifiedPlayer } from '../store/usePlayerStore';
+import { getErrorDetail } from '../lib/errors';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import YouTube from 'react-youtube';
+import YouTube, { type YouTubeEvent } from 'react-youtube';
 import api from '../lib/api';
 import { toApiUrl } from '../lib/api';
 import type { Speaker, SpeakerEpisodeAppearance, SpeakerVoiceProfile } from '../types';
@@ -36,7 +38,7 @@ export function SpeakerDetailPage() {
     const [deletingProfileId, setDeletingProfileId] = useState<number | null>(null);
     const [editingSpeaker, setEditingSpeaker] = useState<Speaker | null>(null);
     const [previewProfile, setPreviewProfile] = useState<SpeakerVoiceProfile | null>(null);
-    const [previewPlayer, setPreviewPlayer] = useState<any>(null);
+    const [previewPlayer, setPreviewPlayer] = useState<Required<Pick<UnifiedPlayer, 'getCurrentTime' | 'seekTo' | 'pauseVideo'>> & Pick<UnifiedPlayer, 'playVideo'> & { stopVideo?: () => void } | null>(null);
     const [movingProfile, setMovingProfile] = useState<SpeakerVoiceProfile | null>(null);
     const [moveTargets, setMoveTargets] = useState<Speaker[]>([]);
     const [loadingMoveTargets, setLoadingMoveTargets] = useState(false);
@@ -153,9 +155,9 @@ export function SpeakerDetailPage() {
 
             void fetchAppearances();
             void fetchProfiles();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to load speaker detail', e);
-            setError(e?.response?.data?.detail || 'Failed to load speaker details');
+            setError(getErrorDetail(e) || 'Failed to load speaker details');
             setSpeaker(null);
             setAppearances([]);
             setProfiles([]);
@@ -186,9 +188,9 @@ export function SpeakerDetailPage() {
                 closeProfilePreview();
             }
             setSpeaker(prev => prev ? { ...prev, embedding_count: Number.isFinite(remainingProfiles) ? remainingProfiles : Math.max((prev.embedding_count || 1) - 1, 0) } : prev);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to delete voice profile', e);
-            alert(e?.response?.data?.detail || 'Failed to remove voice profile');
+            alert(getErrorDetail(e) || 'Failed to remove voice profile');
         } finally {
             setDeletingProfileId(null);
         }
@@ -256,9 +258,9 @@ export function SpeakerDetailPage() {
             }
             setMovingProfile(null);
             await fetchData();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to move profile', e);
-            alert(e?.response?.data?.detail || 'Failed to move profile');
+            alert(getErrorDetail(e) || 'Failed to move profile');
         } finally {
             setMovingProfileSubmit(false);
         }
@@ -284,9 +286,9 @@ export function SpeakerDetailPage() {
             if (Number.isFinite(createdTargetId) && createdTargetId > 0) {
                 navigate(`/speakers/${createdTargetId}`);
             }
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to create/move profile', e);
-            alert(e?.response?.data?.detail || 'Failed to move profile');
+            alert(getErrorDetail(e) || 'Failed to move profile');
         } finally {
             setMovingProfileSubmit(false);
         }
@@ -304,9 +306,9 @@ export function SpeakerDetailPage() {
             const updated = Number(res.data?.updated_segments ?? 0);
             const total = Number(res.data?.matched_segments ?? 0);
             alert(`Bulk reassignment complete: ${updated} of ${total} matched segments reassigned.`);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to bulk reassign profile segments', e);
-            alert(e?.response?.data?.detail || 'Failed to bulk reassign matched segments');
+            alert(getErrorDetail(e) || 'Failed to bulk reassign matched segments');
         } finally {
             setReassigningProfileId(null);
         }
@@ -322,15 +324,15 @@ export function SpeakerDetailPage() {
                 throw new Error('Avatar id missing from response');
             }
             navigate(`/avatars/${avatarId}`);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to open avatar studio', e);
-            alert(e?.response?.data?.detail || 'Failed to open avatar studio');
+            alert(getErrorDetail(e) || 'Failed to open avatar studio');
         } finally {
             setOpeningAvatarStudio(false);
         }
     };
 
-    const handleProfilePreviewReady = (event: any) => {
+    const handleProfilePreviewReady = (event: YouTubeEvent<unknown>) => {
         setPreviewPlayer(event.target);
         if (previewProfile?.sample_start_time != null) {
             try {

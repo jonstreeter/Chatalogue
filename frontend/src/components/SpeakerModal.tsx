@@ -1,5 +1,7 @@
+import type { UnifiedPlayer } from '../store/usePlayerStore';
+import { getErrorDetail } from '../lib/errors';
 import { useState, useRef, useEffect, memo, type SyntheticEvent } from 'react';
-import YouTube from 'react-youtube';
+import YouTube, { type YouTubeEvent } from 'react-youtube';
 import api from '../lib/api';
 import { toApiUrl } from '../lib/api';
 import type { Speaker, SpeakerSample } from '../types';
@@ -26,7 +28,7 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
     const [samples, setSamples] = useState<SpeakerSample[]>(initialSample ? [initialSample] : []);
     const [currentSampleIndex, setCurrentSampleIndex] = useState(0);
     const [loading, setLoading] = useState(!initialSample);
-    const [player, setPlayer] = useState<any>(null);
+    const [player, setPlayer] = useState<Required<Pick<UnifiedPlayer, 'getCurrentTime' | 'seekTo' | 'pauseVideo'>> & Pick<UnifiedPlayer, 'playVideo'> & { stopVideo?: () => void } | null>(null);
     const [isCropping, setIsCropping] = useState(false);
     const [extracting, setExtracting] = useState(false);
     const [deletingThumbnail, setDeletingThumbnail] = useState(false);
@@ -240,9 +242,9 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
             const res = await api.patch(`/speakers/${speaker.id}`, { name: trimmed });
             setName(trimmed);
             onUpdate(res.data);
-        } catch (e: any) {
+        } catch (e) {
             console.error("Failed to update name", e);
-            const detail = e?.response?.data?.detail || 'Failed to update name';
+            const detail = getErrorDetail(e) || 'Failed to update name';
             setNameError(detail);
             alert(detail);
         } finally {
@@ -262,7 +264,7 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
     };
 
     // Player Ready
-    const onReady = (event: any) => {
+    const onReady = (event: YouTubeEvent<unknown>) => {
         setPlayer(event.target);
         event.target.seekTo(startTime, true);
         event.target.playVideo();
@@ -444,9 +446,9 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
             setIsCropping(false);
             setCropRect(null);
 
-        } catch (e: any) {
+        } catch (e) {
             console.error("Failed to extract thumbnail", e);
-            alert(e?.response?.data?.detail || "Failed to extract thumbnail");
+            alert(getErrorDetail(e) || "Failed to extract thumbnail");
         } finally {
             setExtracting(false);
         }
@@ -462,9 +464,9 @@ function SpeakerModalComponent({ speaker, initialSample, onClose, onUpdate, onMe
             onUpdate(res.data);
             setIsCropping(false);
             setCropRect(null);
-        } catch (e: any) {
+        } catch (e) {
             console.error("Failed to delete thumbnail", e);
-            alert(e?.response?.data?.detail || "Failed to delete thumbnail");
+            alert(getErrorDetail(e) || "Failed to delete thumbnail");
         } finally {
             setDeletingThumbnail(false);
         }

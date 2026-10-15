@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../../lib/errors';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import api from '../../lib/api';
@@ -73,8 +74,8 @@ export function ChannelClips() {
         try {
             const res = await api.post(`/clips/${clip.id}/export/mp4`, null, { responseType: 'blob' });
             downloadBlob(res.data, `${(clip.title || `clip_${clip.id}`).replace(/[\\/:*?"<>|]/g, '_')}.mp4`);
-        } catch (e: any) {
-            const detail = e?.response?.data?.detail || 'Failed to export clip';
+        } catch (e) {
+            const detail = getErrorDetail(e) || 'Failed to export clip';
             try {
                 await api.post(`/clips/${clip.id}/export/mp4/queue`);
                 alert(`${detail}\n\nQueued a background render job for "${clip.title || `Clip #${clip.id}`}".`);
@@ -91,8 +92,8 @@ export function ChannelClips() {
         try {
             const res = await api.post(`/clips/${clip.id}/export/captions`, { format }, { responseType: 'blob' });
             downloadBlob(res.data, `${(clip.title || `clip_${clip.id}`).replace(/[\\/:*?"<>|]/g, '_')}.${format}`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || `Failed to export ${format.toUpperCase()}`);
+        } catch (e) {
+            alert(getErrorDetail(e) || `Failed to export ${format.toUpperCase()}`);
         } finally {
             setBusy(clip.id, setExportingIds, false);
         }
@@ -106,8 +107,8 @@ export function ChannelClips() {
             if (url && confirm('Uploaded clip to YouTube. Open it now?')) {
                 window.open(url, '_blank', 'noopener,noreferrer');
             }
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to upload clip');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to upload clip');
         } finally {
             setBusy(clip.id, setUploadingIds, false);
         }

@@ -17,7 +17,7 @@ export function useClipPreviewLoop() {
                 if (player && typeof player.playVideo === 'function') {
                     player.playVideo();
                 }
-            } catch { }
+            } catch { /* Playback may not be ready yet. */ }
         }
     }, [currentTime, clipPreviewLoop, player]);
 }

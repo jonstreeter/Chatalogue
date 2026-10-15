@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import api from '../lib/api';
@@ -130,8 +131,8 @@ export const useReconstructionStore = create<ReconstructionState>()(
                     set({ reconstructionWorkbench: res.data }, false, 'loadReconstructionWorkbench/fulfilled');
                     get().syncWorkbenchSelection();
                     return res.data;
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to load the reconstruction workbench');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to load the reconstruction workbench');
                     return null;
                 } finally {
                     set({ loadingReconstructionWorkbench: false }, false, 'loadReconstructionWorkbench/settled');
@@ -146,8 +147,8 @@ export const useReconstructionStore = create<ReconstructionState>()(
                 try {
                     const res = await api.post<Video>(`/videos/${video.id}/reconstruct/queue`, null, { params: { force } });
                     onVideoUpdated(res.data);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to queue conversation reconstruction');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to queue conversation reconstruction');
                 } finally {
                     set({ queueingReconstruction: false }, false, 'queueReconstruction/settled');
                 }
@@ -163,8 +164,8 @@ export const useReconstructionStore = create<ReconstructionState>()(
                     });
                     onVideoUpdated(res.data);
                     await get().loadReconstructionWorkbench(res.data, isUploadedMedia, 1);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to save reconstruction settings');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to save reconstruction settings');
                 } finally {
                     set({ savingReconstructionSettings: false }, false, 'saveReconstructionSettings/settled');
                 }
@@ -186,8 +187,8 @@ export const useReconstructionStore = create<ReconstructionState>()(
                         performance_mode: !!options?.performanceMode,
                     });
                     await get().loadReconstructionWorkbench(video, isUploadedMedia, 1);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to generate a reconstruction test for this speaker');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to generate a reconstruction test for this speaker');
                 } finally {
                     set({ testingReconstructionSpeakerId: null }, false, 'testReconstructionSpeaker/settled');
                 }
@@ -200,8 +201,8 @@ export const useReconstructionStore = create<ReconstructionState>()(
                 try {
                     const res = await api.post<ReconstructionWorkbench>(`/videos/${video.id}/reconstruction/workbench/sample-cleanup`, { speaker_id: speakerId, segment_id: segmentId });
                     set({ reconstructionWorkbench: res.data }, false, 'cleanupReconstructionSample/fulfilled');
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to clean up this performance sample');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to clean up this performance sample');
                 } finally {
                     set({ cleaningReconstructionSampleKey: null }, false, 'cleanupReconstructionSample/settled');
                 }
@@ -214,8 +215,8 @@ export const useReconstructionStore = create<ReconstructionState>()(
                 try {
                     const res = await api.patch<ReconstructionWorkbench>(`/videos/${video.id}/reconstruction/workbench/sample-state`, { speaker_id: speakerId, segment_id: segmentId, ...patch });
                     set({ reconstructionWorkbench: res.data }, false, 'updateReconstructionSampleState/fulfilled');
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to update this performance sample');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to update this performance sample');
                 } finally {
                     set({ updatingReconstructionSampleKey: null }, false, 'updateReconstructionSampleState/settled');
                 }
@@ -227,8 +228,8 @@ export const useReconstructionStore = create<ReconstructionState>()(
                 try {
                     const res = await api.post<ReconstructionWorkbench>(`/videos/${video.id}/reconstruction/workbench/add-sample`, { speaker_id: speakerId });
                     set({ reconstructionWorkbench: res.data }, false, 'addReconstructionSample/fulfilled');
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to add another performance sample');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to add another performance sample');
                 } finally {
                     set({ addingReconstructionSampleSpeakerId: null }, false, 'addReconstructionSample/settled');
                 }
@@ -240,8 +241,8 @@ export const useReconstructionStore = create<ReconstructionState>()(
                 try {
                     const res = await api.patch<ReconstructionWorkbench>(`/videos/${video.id}/reconstruction/workbench/speaker-approval`, { speaker_id: speakerId, approved });
                     set({ reconstructionWorkbench: res.data }, false, 'approveReconstructionSpeaker/fulfilled');
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to update voice approval');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to update voice approval');
                 } finally {
                     set({ approvingReconstructionSpeakerId: null }, false, 'approveReconstructionSpeaker/settled');
                 }
@@ -253,9 +254,9 @@ export const useReconstructionStore = create<ReconstructionState>()(
                 try {
                     const res = await api.post(`/videos/${video.id}/reconstruction/preview-segment`, { segment_id: segmentId, performance_mode: true });
                     set({ reconstructionPreviewAudioUrl: resolveWorkbenchAudioUrl(String(res.data.audio_url || '')), reconstructionPreviewText: String(res.data.text || '') }, false, 'previewReconstructionSegment/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     set({ reconstructionPreviewAudioUrl: '', reconstructionPreviewText: '' }, false, 'previewReconstructionSegment/rejected');
-                    alert(e?.response?.data?.detail || 'Failed to preview this reconstruction segment');
+                    alert(getErrorDetail(e) || 'Failed to preview this reconstruction segment');
                 } finally {
                     set({ previewingReconstructionSegment: false }, false, 'previewReconstructionSegment/settled');
                 }
@@ -267,8 +268,8 @@ export const useReconstructionStore = create<ReconstructionState>()(
                 try {
                     const res = await api.patch<Video>(`/videos/${video.id}/playback-source`, { source });
                     onVideoUpdated(res.data);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to switch playback source');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to switch playback source');
                 } finally {
                     set({ switchingReconstructionPlayback: false }, false, 'setUploadedPlaybackSource/settled');
                 }

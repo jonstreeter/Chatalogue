@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../../../lib/errors';
 import type { ReactNode } from 'react';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import {
@@ -96,7 +97,7 @@ export function TranscriptTab({
             const parsed = JSON.parse(seg.words);
             if (!Array.isArray(parsed)) return [];
             words = parsed
-                .map((w: any) => ({
+                .map((w: { start?: unknown; end?: unknown; word?: unknown } | null) => ({
                     start: Number(w?.start),
                     end: Number.isFinite(Number(w?.end)) ? Number(w?.end) : Number(w?.start),
                     word: String(w?.word || '').trim(),
@@ -281,9 +282,9 @@ export function TranscriptTab({
         if (!sel || sel.isCollapsed) return;
 
         const getSegmentDiv = (node: Node | null): HTMLElement | null => {
-            let curr: any = node;
+            let curr: Node | null = node;
             while (curr && curr !== transcriptRef.current) {
-                if (curr.dataset && curr.dataset.start) return curr;
+                if (curr instanceof HTMLElement && curr.dataset.start) return curr;
                 curr = curr.parentNode;
             }
             return null;
@@ -420,8 +421,8 @@ export function TranscriptTab({
         text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
         try {
             const parsed = JSON.parse(text);
-            if (parsed && typeof parsed === 'object' && typeof (parsed as any).summary === 'string') {
-                return (parsed as any).summary.trim();
+            if (parsed && typeof parsed === 'object' && typeof parsed.summary === 'string') {
+                return parsed.summary.trim();
             }
         } catch {
             const m = text.match(/"summary"\s*:\s*"((?:\\.|[^"\\])*)"/i);
@@ -662,9 +663,9 @@ export function TranscriptTab({
                                                 await api.post(`/videos/${video.id}/process`);
                                                 // Refresh video metadata so status updates
                                                 await onRefreshVideo();
-                                            } catch (e: any) {
+                                            } catch (e) {
                                                 console.error('Failed to start transcription:', e);
-                                                alert(e?.response?.data?.detail || 'Failed to start transcription');
+                                                alert(getErrorDetail(e) || 'Failed to start transcription');
                                             } finally {
                                                 setStartingTranscription(false);
                                             }
@@ -867,7 +868,7 @@ export function TranscriptTab({
                                     ) : (
                                         <p className="text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
                                             {wordsFn.length > 0 ? (
-                                                wordsFn.map((w: any, idx: number) => {
+                                                wordsFn.map((w, idx: number) => {
                                                     const isWordActive =
                                                         transcriptPlaybackTime >= w.start &&
                                                         transcriptPlaybackTime < (w.displayEnd ?? w.end);

@@ -11,7 +11,6 @@ test.describe('Channel Refresh', () => {
     await expect(card).toBeVisible({ timeout: 10_000 });
 
     // Note current video count
-    const videoCountBefore = await card.locator('text=/\\d+/').first().textContent();
 
     // Click Scan button
     await card.getByRole('button', { name: /Scan/i }).click();

@@ -1,5 +1,5 @@
 import { startTransition, useEffect, useRef } from 'react';
-import YouTube from 'react-youtube';
+import YouTube, { type YouTubeEvent } from 'react-youtube';
 import type { Video } from '../../types';
 import { toApiUrl } from '../../lib/api';
 import { AudioLines, Loader2, PlayCircle, Sparkles, type LucideIcon } from 'lucide-react';
@@ -187,7 +187,7 @@ export function VideoPlayer({
         publishCurrentTime(mediaTime, { force: true });
     };
 
-    const sampleYoutubePlayerClock = (ytPlayer: any, options?: { force?: boolean }) => {
+    const sampleYoutubePlayerClock = (ytPlayer: UnifiedPlayer | null, options?: { force?: boolean }) => {
         if (!ytPlayer) return;
         try {
             const mediaTimeRaw = ytPlayer.getCurrentTime?.();
@@ -214,7 +214,7 @@ export function VideoPlayer({
         }
     };
 
-    const handleYoutubeReady = (event: any) => {
+    const handleYoutubeReady = (event: YouTubeEvent<unknown>) => {
         setPlayer(event.target);
         sampleYoutubePlayerClock(event.target, { force: true });
         const rate = Number(event?.target?.getPlaybackRate?.()) || 1;
@@ -239,7 +239,7 @@ export function VideoPlayer({
         }
     };
 
-    const handleYoutubeStateChange = (event: any) => {
+    const handleYoutubeStateChange = (event: YouTubeEvent<unknown>) => {
         const state = Number(event?.data);
         if (!Number.isFinite(state)) return;
         let mediaTime = playerClockRef.current.mediaTime;
@@ -259,7 +259,7 @@ export function VideoPlayer({
         publishCurrentTime(mediaTime, { force: true });
     };
 
-    const handleYoutubePlaybackRateChange = (event: any) => {
+    const handleYoutubePlaybackRateChange = (event: YouTubeEvent<unknown>) => {
         const rate = Number(event?.data ?? event?.target?.getPlaybackRate?.());
         if (!Number.isFinite(rate) || rate <= 0) return;
         let mediaTime = playerClockRef.current.mediaTime;

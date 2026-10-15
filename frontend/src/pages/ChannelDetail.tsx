@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 
 import { NavLink, Outlet, useParams, useNavigate } from 'react-router-dom';
 import { Video, FileText, Users, Scissors, ArrowLeft, Trash2, Download, Loader2, Link2, CheckCircle2, AlertCircle, AudioLines, RotateCcw, MessageSquareText } from 'lucide-react';
@@ -69,8 +70,8 @@ export function ChannelDetail() {
             const merged = Number(res?.data?.counts?.merged_segments || 0);
             const reassigned = Number(res?.data?.counts?.reassigned_islands || 0);
             alert(`Transcript consolidation complete. ${changed} video(s) changed, ${merged} segment merges, ${reassigned} short speaker-island reassignment${reassigned === 1 ? '' : 's'}.`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to consolidate channel transcripts');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to consolidate channel transcripts');
         } finally {
             setConsolidatingTranscripts(false);
         }
@@ -83,8 +84,8 @@ export function ChannelDetail() {
         try {
             const res = await api.post<TranscriptRepairBulkQueueResponse>(`/channels/${id}/transcript-repair/queue`, { limit: 250 });
             alert(`Queued ${res.data.queued} low-risk repair job(s). Skipped ${res.data.skipped_active} active, ${res.data.skipped_no_segments} without transcripts, ${res.data.skipped_not_low_risk} not classified as low-risk repair.`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue low-risk transcript repairs');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to queue low-risk transcript repairs');
         } finally {
             setQueueingTranscriptRepairs(false);
         }
@@ -97,8 +98,8 @@ export function ChannelDetail() {
         try {
             const res = await api.post<TranscriptDiarizationRebuildBulkQueueResponse>(`/channels/${id}/transcript-diarization-rebuild/queue`, { limit: 250 });
             alert(`Queued ${res.data.queued} diarization rebuild job(s). Skipped ${res.data.skipped_active} active, ${res.data.skipped_no_raw_transcript} without raw transcripts, ${res.data.skipped_not_diarization_rebuild} not classified for rebuild.`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue diarization rebuilds');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to queue diarization rebuilds');
         } finally {
             setQueueingDiarizationRebuilds(false);
         }
@@ -111,8 +112,8 @@ export function ChannelDetail() {
         try {
             const res = await api.post<TranscriptRetranscriptionBulkQueueResponse>(`/channels/${id}/transcript-retranscribe/queue`, { limit: 250 });
             alert(`Queued ${res.data.queued} full retranscription job(s). Skipped ${res.data.skipped_active} active, ${res.data.skipped_unprocessed} unprocessed, ${res.data.skipped_muted} muted, ${res.data.skipped_not_full_retranscription} not classified for full retranscription.`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to queue full retranscriptions');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to queue full retranscriptions');
         } finally {
             setQueueingFullRetranscriptions(false);
         }
@@ -281,8 +282,21 @@ function BatchPublishDescriptionsModal({
 }) {
     const [loadingDryRun, setLoadingDryRun] = useState(true);
     const [runningPublish, setRunningPublish] = useState(false);
-    const [dryRun, setDryRun] = useState<any | null>(null);
-    const [result, setResult] = useState<any | null>(null);
+    type PublishResult = {
+        counts: Record<string, number>;
+        estimated_youtube_quota_units?: number;
+        push_to_youtube?: boolean;
+        ownership_check?: {
+            status?: string;
+            connected_channel_title?: string;
+            connected_channel_id?: string;
+            resolved_channel?: { channel_title?: string; channel_id?: string; method?: string };
+            reason?: string;
+        };
+        items?: Array<{ video_id: number; title: string; youtube_id: string; status?: string; eligible?: boolean; reason?: string; error?: string }>;
+    };
+    const [dryRun, setDryRun] = useState<PublishResult | null>(null);
+    const [result, setResult] = useState<PublishResult | null>(null);
     const [pushToYouTube, setPushToYouTube] = useState<boolean | null>(null); // null = use backend setting
 
     const runDryRun = async () => {
@@ -295,8 +309,8 @@ function BatchPublishDescriptionsModal({
             });
             setDryRun(res.data);
             setResult(null);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Dry-run failed');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Dry-run failed');
         } finally {
             setLoadingDryRun(false);
         }
@@ -327,15 +341,15 @@ function BatchPublishDescriptionsModal({
                 push_to_youtube: pushToYouTube,
             });
             setResult(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Batch publish failed');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Batch publish failed');
         } finally {
             setRunningPublish(false);
         }
     };
 
     const display = result || dryRun;
-    const items: any[] = Array.isArray(display?.items) ? display.items : [];
+    const items = Array.isArray(display?.items) ? display.items : [];
     const ownership = display?.ownership_check;
     const pushToYouTubeEffective = !!display?.push_to_youtube;
     const ownershipOkForPush = !pushToYouTubeEffective || ownership?.status === 'owned';

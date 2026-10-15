@@ -149,8 +149,6 @@ export function ReconstructionTab({
     onRefreshWorkbench,
     onSetStudioTab,
 }: ReconstructionStageProps) {
-    if (!isActive) return null;
-
     const {
         selectedReconstructionSpeakerId, setSelectedReconstructionSpeakerId,
         addingReconstructionSampleSpeakerId, approvingReconstructionSpeakerId,
@@ -163,6 +161,8 @@ export function ReconstructionTab({
         queueingReconstruction, reconstructionInstructionDraft, setReconstructionInstructionDraft,
         setReconstructionStudioTab,
     } = useReconstructionStore();
+
+    if (!isActive) return null;
 
     const selectedReconstructionSpeaker = reconstructionWorkbench?.speakers.find(
         (s) => s.speaker_id === selectedReconstructionSpeakerId
@@ -539,7 +539,7 @@ export function ReconstructionTab({
                                                 <span>A performance sample is selected for this speaker.</span>
                                             </li>
                                             <li className="flex items-start gap-2">
-                                                <CheckCircle2 size={14} className={`mt-0.5 ${!!selectedSpeaker.latest_test_audio_url ? 'text-emerald-600' : 'text-slate-300'}`} />
+                                                <CheckCircle2 size={14} className={`mt-0.5 ${selectedSpeaker.latest_test_audio_url ? 'text-emerald-600' : 'text-slate-300'}`} />
                                                 <span>You have listened to at least one TTS test output.</span>
                                             </li>
                                             <li className="flex items-start gap-2">

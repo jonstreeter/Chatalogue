@@ -43,8 +43,8 @@ export function Videos() {
     };
 
     const sortedVideos = [...videos].sort((a, b) => {
-        let valA: any = a[sortField];
-        let valB: any = b[sortField];
+        let valA = a[sortField] ?? 0;
+        let valB = b[sortField] ?? 0;
 
         if (sortField === 'published_at') {
             valA = new Date(a.published_at || 0).getTime();

@@ -1,3 +1,4 @@
+import { getErrorDetail, getErrorMessage } from '../lib/errors';
 import { useState, useEffect, useCallback } from 'react';
 import { X, Eye, EyeOff, CheckCircle2, AlertTriangle, Loader2, ExternalLink, ChevronRight, ChevronLeft, Cpu, Zap, Globe, Server, Download } from 'lucide-react';
 import api from '../lib/api';
@@ -115,7 +116,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
   const [hwRecommendation, setHwRecommendation] = useState<HwRecommendation | null>(null);
   const [hfToken, setHfToken] = useState('');
   const [showToken, setShowToken] = useState(false);
-  const [tokenValidation, setTokenValidation] = useState<{ valid?: boolean; error?: string; models?: Record<string, any> } | null>(null);
+  const [tokenValidation, setTokenValidation] = useState<{ valid?: boolean; error?: string; models?: Record<string, { accessible?: boolean; error?: string }> } | null>(null);
   const [validating, setValidating] = useState(false);
   const [hfSkipped, setHfSkipped] = useState(false);
 
@@ -156,7 +157,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
     ]).then(([s, hw]) => {
       setSettings(s);
       setHfToken(s.hf_token || '');
-      setEngine((s.transcription_engine || 'auto') as any);
+      setEngine((s.transcription_engine || 'auto') as typeof engine);
       setWhisperModel(s.transcription_model || 'medium');
       setParakeetAllowWhisperFallback(s.parakeet_allow_whisper_fallback ?? true);
       setLlmProvider((s.llm_provider || 'ollama') as LlmProvider);
@@ -235,8 +236,8 @@ export function SetupWizard({ onClose, onComplete }: Props) {
       await saveSettings({ hf_token: hfToken });
       const res = await api.post('/settings/validate-token');
       setTokenValidation(res.data);
-    } catch (e: any) {
-      setTokenValidation({ valid: false, error: e.response?.data?.detail || 'Validation failed' });
+    } catch (e) {
+      setTokenValidation({ valid: false, error: getErrorDetail(e) || 'Validation failed' });
     } finally {
       setValidating(false);
     }
@@ -262,15 +263,15 @@ export function SetupWizard({ onClose, onComplete }: Props) {
         fallbackUsed: Boolean(data.fallback_used),
         error: success ? undefined : (data.error || data.detail || 'Engine not available'),
       });
-    } catch (e: any) {
-      setEngineTest({ success: false, error: e.response?.data?.detail || 'Test failed' });
+    } catch (e) {
+      setEngineTest({ success: false, error: getErrorDetail(e) || 'Test failed' });
     } finally {
       setTestingEngine(false);
     }
   };
 
-  const getProviderKeyField = (p: LlmProvider): string => {
-    const map: Record<string, string> = {
+  const getProviderKeyField = (p: LlmProvider): Extract<keyof Settings, `${string}_api_key`> | '' => {
+    const map: Partial<Record<LlmProvider, Extract<keyof Settings, `${string}_api_key`>>> = {
       nvidia_nim: 'nvidia_nim_api_key',
       openai: 'openai_api_key',
       anthropic: 'anthropic_api_key',
@@ -282,8 +283,8 @@ export function SetupWizard({ onClose, onComplete }: Props) {
     return map[p] || '';
   };
 
-  const getProviderModelField = (p: LlmProvider): string => {
-    const map: Record<string, string> = {
+  const getProviderModelField = (p: LlmProvider): Extract<keyof Settings, `${string}_model`> => {
+    const map: Record<LlmProvider, Extract<keyof Settings, `${string}_model`>> = {
       ollama: 'ollama_model',
       nvidia_nim: 'nvidia_nim_model',
       openai: 'openai_model',
@@ -293,7 +294,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
       openrouter: 'openrouter_model',
       xai: 'xai_model',
     };
-    return map[p] || '';
+    return map[p];
   };
 
   const getDefaultModel = (p: LlmProvider): string => {
@@ -313,8 +314,9 @@ export function SetupWizard({ onClose, onComplete }: Props) {
   const handleProviderSelect = (p: LlmProvider) => {
     setLlmProvider(p);
     setLlmTest(null);
-    setLlmKey(settings ? (settings as any)[getProviderKeyField(p)] || '' : '');
-    setLlmModel(settings ? (settings as any)[getProviderModelField(p)] || getDefaultModel(p) : getDefaultModel(p));
+    const keyField = getProviderKeyField(p);
+    setLlmKey(settings && keyField ? settings[keyField] || '' : '');
+    setLlmModel(settings ? settings[getProviderModelField(p)] || getDefaultModel(p) : getDefaultModel(p));
     if (p === 'ollama') {
       setOllamaUrl(settings?.ollama_url || 'http://localhost:11434');
     }
@@ -335,8 +337,8 @@ export function SetupWizard({ onClose, onComplete }: Props) {
       } else {
         const keyField = getProviderKeyField(llmProvider);
         const modelField = getProviderModelField(llmProvider);
-        if (keyField) (overrides as any)[keyField] = llmKey;
-        if (modelField) (overrides as any)[modelField] = llmModel;
+        if (keyField) overrides[keyField] = llmKey;
+        if (modelField) overrides[modelField] = llmModel;
       }
       await saveSettings(overrides);
 
@@ -357,8 +359,8 @@ export function SetupWizard({ onClose, onComplete }: Props) {
         model: d.model || d.model_used,
         error: success ? undefined : (errorText || 'Connection test failed. Check provider settings and server logs.'),
       });
-    } catch (e: any) {
-      const detail = String(e?.response?.data?.error || e?.response?.data?.detail || e?.message || '').trim();
+    } catch (e) {
+      const detail = String(getErrorDetail(e) || getErrorDetail(e) || getErrorMessage(e) || '').trim();
       setLlmTest({ success: false, error: detail || 'Test failed' });
     } finally {
       setTestingLlm(false);
@@ -398,8 +400,8 @@ export function SetupWizard({ onClose, onComplete }: Props) {
         setPullingModel(null);
       };
       void poll();
-    } catch (e: any) {
-      setPullStatus(e.response?.data?.detail || 'Pull failed');
+    } catch (e) {
+      setPullStatus(getErrorDetail(e) || 'Pull failed');
       setPullingModel(null);
     }
   };
@@ -424,8 +426,8 @@ export function SetupWizard({ onClose, onComplete }: Props) {
         } else {
           const keyField = getProviderKeyField(llmProvider);
           const modelField = getProviderModelField(llmProvider);
-          if (keyField) (overrides as any)[keyField] = llmKey;
-          if (modelField) (overrides as any)[modelField] = llmModel;
+          if (keyField) overrides[keyField] = llmKey;
+          if (modelField) overrides[modelField] = llmModel;
         }
       }
       await saveSettings(overrides);
@@ -615,7 +617,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                       <div>
                         <span className="font-medium">Validation failed.</span>
                         {tokenValidation.error && <p className="mt-1">{tokenValidation.error}</p>}
-                        {tokenValidation.models && Object.entries(tokenValidation.models).map(([model, info]: [string, any]) => (
+                        {tokenValidation.models && Object.entries(tokenValidation.models).map(([model, info]) => (
                           info.accessible === false && (
                             <p key={model} className="mt-1">
                               <strong>{model}</strong>: {info.error || 'Access denied — accept the model agreement'}

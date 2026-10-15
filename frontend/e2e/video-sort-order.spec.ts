@@ -17,7 +17,6 @@ test.describe('Video Sort Order', () => {
 
     // Wait for video list to load — look for any video card/row
     // The video list should have items
-    const videoItems = page.locator('[class*="glass-panel"], [class*="rounded"]').filter({ hasText: /Lobstermaxxing/i });
 
     // The newest video "Lobstermaxxing: Frame Mogging" (2026-02-20) should be visible
     // without scrolling (it should be near the top)

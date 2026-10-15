@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { useEffect, useState, useRef, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../lib/api';
@@ -281,7 +282,7 @@ export function Channels() {
             insertCreatedChannel(created);
             resetAddWizard();
             void fetchChannels();
-        } catch (e) {
+        } catch {
             alert('Failed to add channel');
         } finally {
             setAdding(false);
@@ -298,7 +299,7 @@ export function Channels() {
                 next.delete(id);
                 return next;
             });
-        } catch (e) {
+        } catch {
             alert('Failed to refresh');
             setRefreshingIds(prev => {
                 const next = new Set(prev);
@@ -318,7 +319,7 @@ export function Channels() {
                 channel.id === id ? { ...channel, actively_monitored: res.data.actively_monitored } : channel
             )));
             await fetchChannels();
-        } catch (e) {
+        } catch {
             alert('Failed to update active monitoring');
         } finally {
             setMonitorSavingIds(prev => {
@@ -338,8 +339,8 @@ export function Channels() {
             const archive = JSON.parse(text);
             await api.post('/channels/import', archive);
             fetchChannels();
-        } catch (err: any) {
-            const detail = err.response?.data?.detail;
+        } catch (err) {
+            const detail = getErrorDetail(err);
             alert(detail || 'Failed to import archive');
         } finally {
             setImporting(false);

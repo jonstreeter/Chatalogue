@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../../lib/errors';
 import { useCallback, useEffect, useState } from 'react';
 
 import api from '../../lib/api';
@@ -116,8 +117,8 @@ export function useExternalShare() {
                 ip_allowlist: externalShareIpAllowlist,
             });
             setExternalShareStatus(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to start external share mode');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to start external share mode');
         } finally {
             setStartingExternalShare(false);
         }
@@ -128,8 +129,8 @@ export function useExternalShare() {
         try {
             const res = await api.post<ExternalShareStatus>('/share/stop');
             setExternalShareStatus(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to stop external share mode');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to stop external share mode');
         } finally {
             setStoppingExternalShare(false);
         }
@@ -159,8 +160,8 @@ export function useExternalShare() {
                 : 'cloudflared is already installed.');
             await loadCloudflaredInstallInfo();
             await loadExternalShareStatus();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to install cloudflared automatically.');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to install cloudflared automatically.');
         } finally {
             setInstallingCloudflared(false);
         }

@@ -1,9 +1,10 @@
+import { getErrorDetail } from '../../lib/errors';
 import { useState, useEffect, useRef, useMemo } from 'react';
 import api from '../../lib/api';
-import type { 
+import type {
   EpisodeChatCitation,
-  EpisodeChatThread, 
-  EpisodeChatThreadDetail, 
+  EpisodeChatThread,
+  EpisodeChatThreadDetail,
   EpisodeChatSendResponse,
   EpisodeCloneEngine
 } from '../../types';
@@ -34,11 +35,11 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [threadsError, setThreadsError] = useState<string | null>(null);
   const [activeThreadId, setActiveThreadId] = useState<number | null>(null);
-  
+
   const [activeThread, setActiveThread] = useState<EpisodeChatThreadDetail | null>(null);
   const [loadingActiveThread, setLoadingActiveThread] = useState(false);
   const [activeThreadError, setActiveThreadError] = useState<string | null>(null);
-  
+
   const [composerText, setComposerText] = useState('');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -51,7 +52,7 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
   const [availableOllamaModels, setAvailableOllamaModels] = useState<OllamaLocalModel[]>(cloneOllamaModels);
   const [loadingOllamaModels, setLoadingOllamaModels] = useState(false);
   const [ollamaModelsError, setOllamaModelsError] = useState<string | null>(null);
-  
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const temporaryMessageIdRef = useRef(-1);
   const selectedEngine = useMemo(() => cloneEngines.find((engine) => engine.key === engineKey) || cloneEngines[0] || null, [cloneEngines, engineKey]);
@@ -84,9 +85,9 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
       if (res.data.length === 0) {
         setActiveThread(null);
       }
-    } catch (e: any) {
+    } catch (e) {
       console.error("Failed to fetch chat threads:", e);
-      setThreadsError(e?.response?.data?.detail || 'Failed to load saved chats.');
+      setThreadsError(getErrorDetail(e) || 'Failed to load saved chats.');
     } finally {
       setLoadingThreads(false);
     }
@@ -100,9 +101,9 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
       const res = await api.get<EpisodeChatThreadDetail>(`/episode-chat/threads/${threadId}`);
       setActiveThread(res.data);
       syncThreadEngineSelection(res.data);
-    } catch (e: any) {
+    } catch (e) {
       console.error("Failed to fetch thread detail:", e);
-      setActiveThreadError(e?.response?.data?.detail || 'Failed to load this chat thread.');
+      setActiveThreadError(getErrorDetail(e) || 'Failed to load this chat thread.');
     } finally {
       setLoadingActiveThread(false);
     }
@@ -127,9 +128,9 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
       setThreads((current) => [res.data, ...current.filter((thread) => thread.id !== res.data.id)]);
       setActiveThreadId(res.data.id);
       syncThreadEngineSelection(res.data);
-    } catch (e: any) {
+    } catch (e) {
       console.error("Failed to create thread:", e);
-      setThreadsError(e?.response?.data?.detail || 'Failed to create a new chat thread.');
+      setThreadsError(getErrorDetail(e) || 'Failed to create a new chat thread.');
     } finally {
       setCreatingThread(false);
     }
@@ -145,9 +146,9 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
         setActiveThreadId(remaining[0]?.id ?? null);
         setActiveThread(null);
       }
-    } catch (e: any) {
+    } catch (e) {
       console.error("Failed to delete thread:", e);
-      setThreadsError(e?.response?.data?.detail || 'Failed to delete this chat thread.');
+      setThreadsError(getErrorDetail(e) || 'Failed to delete this chat thread.');
     } finally {
       setDeletingThreadId(null);
     }
@@ -162,9 +163,9 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
       });
       setThreads((current) => current.map((thread) => thread.id === res.data.id ? { ...thread, ...res.data } : thread));
       setActiveThread((current) => current ? { ...current, scope_mode: res.data.scope_mode } : current);
-    } catch (e: any) {
+    } catch (e) {
       console.error("Failed to update chat scope:", e);
-      setThreadsError(e?.response?.data?.detail || 'Failed to update chat scope.');
+      setThreadsError(getErrorDetail(e) || 'Failed to update chat scope.');
       if (activeThread) {
         setScopeMode(activeThread.scope_mode === 'episode_related' ? 'episode_related' : 'episode');
       }
@@ -173,23 +174,23 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
 
   const sendMessage = async () => {
     if (!composerText.trim() || !activeThreadId) return;
-    
+
     // Resolve provider overrides
     const selectedEngine = cloneEngines.find(e => e.key === engineKey);
     const resolvedProvider = (!selectedEngine || engineKey === 'default') ? undefined : selectedEngine.provider;
     const resolvedModel = resolvedProvider === 'ollama' ? ollamaModel : (selectedEngine?.model || undefined);
-    
+
     setSending(true);
     setSendError(null);
     const text = composerText.trim();
     setComposerText('');
-    
+
     const optimisticUserId = temporaryMessageIdRef.current--;
     if (activeThread) {
        setActiveThread({
          ...activeThread,
          messages: [
-           ...activeThread.messages, 
+           ...activeThread.messages,
            {
              id: optimisticUserId,
              thread_id: activeThreadId,
@@ -210,7 +211,7 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
         provider_override: resolvedProvider,
         model_override: resolvedModel,
       });
-      
+
       // Merge results
       setActiveThread(current => {
         if (!current) return null;
@@ -222,9 +223,9 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
       });
       setThreads((current) => current.map((thread) => thread.id === res.data.thread.id ? res.data.thread : thread));
       setTimeout(scrollToBottom, 50);
-    } catch (e: any) {
+    } catch (e) {
       console.error("Failed to send message:", e);
-      setSendError(e?.response?.data?.detail || "Failed to generate reply.");
+      setSendError(getErrorDetail(e) || "Failed to generate reply.");
       setComposerText(text); // Restore text
       void fetchThreadDetail(activeThreadId); // Rebuild true state
     } finally {
@@ -272,9 +273,9 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
         if (res.data?.error) {
           setOllamaModelsError(res.data.error);
         }
-      } catch (e: any) {
+      } catch (e) {
         if (controller.signal.aborted) return;
-        setOllamaModelsError(e?.response?.data?.detail || 'Failed to load local Ollama models.');
+        setOllamaModelsError(getErrorDetail(e) || 'Failed to load local Ollama models.');
       } finally {
         if (!controller.signal.aborted) {
           setLoadingOllamaModels(false);
@@ -299,7 +300,7 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
             <MessageCircle size={18} className="text-indigo-600" />
             Chat History
           </span>
-          <button 
+          <button
             onClick={createThread}
             disabled={creatingThread}
             className="rounded-xl border border-slate-200 bg-slate-50 p-2 text-slate-600 hover:text-indigo-600 hover:bg-white hover:border-indigo-200 transition"
@@ -325,8 +326,8 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
              <div className="text-sm text-center text-slate-500 py-6 border border-dashed border-slate-200 rounded-xl">No prior chats.</div>
           ) : (
             threads.map(thread => (
-              <div 
-                key={thread.id} 
+              <div
+                key={thread.id}
                 className={`group flex items-start justify-between rounded-xl p-3 cursor-pointer border transition ${activeThreadId === thread.id ? 'bg-indigo-50 border-indigo-200 shadow-sm' : 'bg-transparent border-transparent hover:bg-slate-50'}`}
                 onClick={() => setActiveThreadId(thread.id)}
               >
@@ -343,7 +344,7 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
                      </span>
                    </div>
                 </div>
-                <button 
+                <button
                   disabled={deletingThreadId === thread.id}
                   className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-rose-600 transition"
                   onClick={(e) => { e.stopPropagation(); deleteThread(thread.id); }}
@@ -405,10 +406,10 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
                      </div>
                    )}
                    {activeThread?.messages.map((msg) => (
-                     <EpisodeChatMessageItem 
-                       key={msg.id} 
-                       message={msg} 
-                       onCitationClick={onCitationClick} 
+                     <EpisodeChatMessageItem
+                       key={msg.id}
+                       message={msg}
+                       onCitationClick={onCitationClick}
                      />
                    ))}
                    {sendError && (
@@ -419,7 +420,7 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
                  </div>
                )}
             </div>
-            
+
             {/* Composer */}
             <div className="w-full bg-white border-t border-slate-200 p-4">
                <div className="max-w-4xl mx-auto flex flex-col gap-3">
@@ -434,18 +435,18 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
                      <option value="episode">Episode Only</option>
                      <option value="episode_related">Episode + Related</option>
                    </select>
-                   <select 
-                     value={engineKey} 
-                     onChange={(e) => setEngineKey(e.target.value)} 
+                   <select
+                     value={engineKey}
+                     onChange={(e) => setEngineKey(e.target.value)}
                      className="text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 outline-none focus:border-indigo-300 text-slate-600"
                    >
                      {cloneEngines.map(e => <option key={e.key} value={e.key} disabled={!e.available}>{e.label}</option>)}
                    </select>
 
                    {chatUsesOllama && (
-                     <select 
-                       value={ollamaModel} 
-                       onChange={(e) => setOllamaModel(e.target.value)} 
+                     <select
+                       value={ollamaModel}
+                       onChange={(e) => setOllamaModel(e.target.value)}
                        disabled={loadingOllamaModels}
                        className="text-xs bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 outline-none focus:border-indigo-300 text-slate-600 max-w-[200px] truncate"
                      >
@@ -454,10 +455,10 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
                      </select>
                    )}
                  </div>
-                 
+
                  {/* Input Box */}
                  <div className="flex items-end gap-3 w-full border border-slate-300 rounded-2xl bg-white p-2 shadow-sm focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100 transition">
-                    <textarea 
+                    <textarea
                       value={composerText}
                       onChange={(e) => setComposerText(e.target.value)}
                       onKeyDown={(e) => {
@@ -471,7 +472,7 @@ export function EpisodeChatWorkbench({ videoId, cloneEngines, cloneOllamaModels,
                       className="flex-1 max-h-32 min-h-11 bg-transparent border-none resize-none p-2 outline-none text-sm text-slate-800 disabled:opacity-50"
                       rows={1}
                     />
-                    <button 
+                    <button
                       onClick={sendMessage}
                       disabled={sending || !composerText.trim()}
                       className="mb-1 mr-1 flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:bg-slate-300 disabled:text-slate-500 transition shadow-sm"

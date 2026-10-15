@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { Link, useLocation } from 'react-router-dom';
 import { Home, ListTodo, Settings as SettingsIcon, Users, Menu, X, RefreshCw, Download, AlertTriangle } from 'lucide-react';
 import { useEffect, useState, useCallback } from 'react';
@@ -77,7 +78,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
                 const res = await api.get<QueueStatus>('/jobs/status');
                 setQueueStatus(res.data);
                 setBackendOnline(true);
-            } catch (e) {
+            } catch {
                 // Ignore errors - backend might not be running
                 setBackendOnline(false);
             }
@@ -157,8 +158,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
             setVersionInfo(res.data);
             const available = Boolean(res.data?.git?.update_available);
             setUpdateMessage(available ? 'Update available.' : 'Already up to date.');
-        } catch (e: any) {
-            setUpdateMessage(String(e?.response?.data?.detail || 'Failed to check updates.'));
+        } catch (e) {
+            setUpdateMessage(String(getErrorDetail(e) || 'Failed to check updates.'));
         } finally {
             setCheckingVersion(false);
         }
@@ -170,9 +171,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
         setUpdateMessage('Updating and restarting backend...');
         try {
             await api.post('/system/update');
-        } catch (e: any) {
+        } catch (e) {
             setUpdating(false);
-            setUpdateMessage(String(e?.response?.data?.detail || 'Update failed.'));
+            setUpdateMessage(String(getErrorDetail(e) || 'Update failed.'));
             return;
         }
 

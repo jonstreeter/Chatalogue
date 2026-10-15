@@ -1,3 +1,5 @@
+import type { Video } from '../../types';
+import { getErrorDetail } from '../../lib/errors';
 import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import api from '../../lib/api';
@@ -499,8 +501,8 @@ export function VideoDetailPage() {
             await api.post(`/videos/${video.id}/purge`);
             setSegments([]);
             fetchData();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to purge');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to purge');
         } finally {
             setPurging(false);
         }
@@ -514,8 +516,8 @@ export function VideoDetailPage() {
             await api.post(`/videos/${video.id}/redo-transcription`);
             setSegments([]);
             fetchData();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to redo transcription');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to redo transcription');
         } finally {
             setRedoing(false);
         }
@@ -532,8 +534,8 @@ export function VideoDetailPage() {
             const merged = Number(res?.data?.merged_count || 0);
             const reassigned = Number(res?.data?.reassigned_islands || 0);
             alert(`Transcript consolidated. ${merged} segment merges, ${reassigned} short speaker-island reassignment${reassigned === 1 ? '' : 's'}.`);
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to consolidate transcript');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to consolidate transcript');
         } finally {
             setConsolidatingTranscript(false);
         }
@@ -723,8 +725,8 @@ export function VideoDetailPage() {
             await api.post(`/videos/${video.id}/redo-diarization`);
             setSegments([]);
             fetchData();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to redo diarization');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to redo diarization');
         } finally {
             setRedoingDiarization(false);
         }
@@ -783,7 +785,7 @@ export function VideoDetailPage() {
 
         const lines: string[] = [];
         lines.push(video.title || `Episode ${video.id}`);
-        const v = video as any;
+        const v = video as Video & { channel_name?: string };
         if (v.channel_name) lines.push(`Channel: ${v.channel_name}`);
         if (video.published_at) {
             lines.push(`Published: ${new Date(video.published_at).toLocaleDateString()}`);

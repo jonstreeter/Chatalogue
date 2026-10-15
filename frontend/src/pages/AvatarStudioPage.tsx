@@ -1,3 +1,4 @@
+import { getErrorDetail, getErrorStatus } from '../lib/errors';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import api, { toApiUrl } from '../lib/api';
@@ -471,9 +472,9 @@ export function AvatarStudioPage() {
             setWorkbench(res.data);
             setNameDraft(res.data.avatar.name || '');
             setDescriptionDraft(res.data.avatar.description || '');
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to load avatar workbench', e);
-            setError(e?.response?.data?.detail || 'Failed to load avatar studio');
+            setError(getErrorDetail(e) || 'Failed to load avatar studio');
         } finally {
             if (shouldShowPageLoader) {
                 setLoading(false);
@@ -487,8 +488,8 @@ export function AvatarStudioPage() {
         try {
             const res = await api.get<AvatarPersonalityDataset>(`/avatars/${id}/personality/dataset-preview`);
             setDataset(res.data);
-        } catch (e: any) {
-            if (e?.response?.status === 404) {
+        } catch (e) {
+            if (getErrorStatus(e) === 404) {
                 setDataset(null);
             } else {
                 console.error('Failed to load avatar dataset preview', e);
@@ -510,7 +511,7 @@ export function AvatarStudioPage() {
                 },
             });
             setDatasetPage(res.data);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to load avatar dataset examples', e);
             setDatasetPage(null);
         } finally {
@@ -530,7 +531,7 @@ export function AvatarStudioPage() {
             ]);
             setLongFormPage(pageRes.data);
             setLongFormConfig(configRes.data);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to load long-form samples', e);
             setLongFormPage(null);
             setLongFormConfig(null);
@@ -550,7 +551,7 @@ export function AvatarStudioPage() {
             ]);
             setTrainingConfig(configRes.data);
             setTrainingPackage(packageRes.data);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to load training package state', e);
             setTrainingConfig(null);
             setTrainingPackage(null);
@@ -575,8 +576,8 @@ export function AvatarStudioPage() {
                 return selectedSnapshot;
             });
             return res.data;
-        } catch (e: any) {
-            if (e?.response?.status !== 404) {
+        } catch (e) {
+            if (getErrorStatus(e) !== 404) {
                 console.error('Failed to load training status', e);
             }
             setTrainingStatus(null);
@@ -593,7 +594,7 @@ export function AvatarStudioPage() {
             });
             setBaseModelSupport(res.data);
             return res.data;
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to load base model support', e);
             setBaseModelSupport(null);
             return null;
@@ -606,8 +607,8 @@ export function AvatarStudioPage() {
             const res = await api.get<AvatarPersonalityJudgeStatus>(`/avatars/${id}/personality/judge-status`);
             setJudgeStatus(res.data);
             return res.data;
-        } catch (e: any) {
-            if (e?.response?.status !== 404) {
+        } catch (e) {
+            if (getErrorStatus(e) !== 404) {
                 console.error('Failed to load avatar judge status', e);
             }
             setJudgeStatus(null);
@@ -742,9 +743,9 @@ export function AvatarStudioPage() {
                 description: descriptionDraft.trim() || null,
             });
             await loadWorkbench();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to update avatar', e);
-            alert(e?.response?.data?.detail || 'Failed to update avatar');
+            alert(getErrorDetail(e) || 'Failed to update avatar');
         } finally {
             setSaving(false);
         }
@@ -759,9 +760,9 @@ export function AvatarStudioPage() {
             setExampleOffset(0);
             await loadWorkbench();
             await loadDatasetExamples(0, exampleStateFilter);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to build avatar personality dataset', e);
-            alert(e?.response?.data?.detail || 'Failed to build personality dataset');
+            alert(getErrorDetail(e) || 'Failed to build personality dataset');
         } finally {
             setBuildingDataset(false);
         }
@@ -783,9 +784,9 @@ export function AvatarStudioPage() {
                 target_filter: 'needs_review',
             });
             setJudgeStatus(res.data);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to run avatar personality judge pass', e);
-            alert(e?.response?.data?.detail || 'Failed to run local judge pass');
+            alert(getErrorDetail(e) || 'Failed to run local judge pass');
         } finally {
             setJudgingDataset(false);
         }
@@ -796,9 +797,9 @@ export function AvatarStudioPage() {
         try {
             const res = await api.post<AvatarPersonalityJudgeStatus>(`/avatars/${id}/personality/stop-judge-pass`);
             setJudgeStatus(res.data);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to stop avatar personality judge pass', e);
-            alert(e?.response?.data?.detail || 'Failed to stop local judge pass');
+            alert(getErrorDetail(e) || 'Failed to stop local judge pass');
         }
     };
 
@@ -808,9 +809,9 @@ export function AvatarStudioPage() {
         try {
             await api.patch(`/avatars/${id}/personality/long-form-samples/${sampleId}`, { state });
             await loadLongFormSamples();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to update long-form sample state', e);
-            alert(e?.response?.data?.detail || 'Failed to update long-form sample state');
+            alert(getErrorDetail(e) || 'Failed to update long-form sample state');
         } finally {
             setUpdatingLongFormId(null);
         }
@@ -825,9 +826,9 @@ export function AvatarStudioPage() {
             });
             setLongFormConfig(res.data);
             await loadLongFormSamples();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to update long-form training count', e);
-            alert(e?.response?.data?.detail || 'Failed to update long-form training count');
+            alert(getErrorDetail(e) || 'Failed to update long-form training count');
         } finally {
             setSavingLongFormCount(false);
         }
@@ -841,9 +842,9 @@ export function AvatarStudioPage() {
             setTrainingConfig(res.data);
             await loadTrainingPackageState();
             await loadBaseModelSupport(res.data.base_model_id);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to update training config', e);
-            alert(e?.response?.data?.detail || 'Failed to update training config');
+            alert(getErrorDetail(e) || 'Failed to update training config');
         } finally {
             setSavingTrainingConfig(false);
         }
@@ -856,9 +857,9 @@ export function AvatarStudioPage() {
             const res = await api.post<AvatarPersonalityTrainingPackage>(`/avatars/${id}/personality/prepare-training-package`);
             setTrainingPackage(res.data);
             await loadWorkbench();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to prepare training package', e);
-            alert(e?.response?.data?.detail || 'Failed to prepare training package');
+            alert(getErrorDetail(e) || 'Failed to prepare training package');
         } finally {
             setPreparingTrainingPackage(false);
         }
@@ -889,9 +890,9 @@ export function AvatarStudioPage() {
             setTrainingBaseModelDraft(configRes.data.base_model_id);
             setLongFormConfig(longFormRes.data);
             await Promise.all([loadTrainingPackageState(), loadLongFormSamples(), loadBaseModelSupport(configRes.data.base_model_id)]);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to reset recommended training settings', e);
-            alert(e?.response?.data?.detail || 'Failed to reset recommended training settings');
+            alert(getErrorDetail(e) || 'Failed to reset recommended training settings');
         } finally {
             setResettingRecommended(false);
         }
@@ -905,9 +906,9 @@ export function AvatarStudioPage() {
                 model_id: modelId || trainingConfig?.base_model_id,
             });
             setBaseModelSupport(res.data);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to start base model download', e);
-            alert(e?.response?.data?.detail || 'Failed to start base model download');
+            alert(getErrorDetail(e) || 'Failed to start base model download');
         } finally {
             setDownloadingBaseModel(false);
         }
@@ -930,9 +931,9 @@ export function AvatarStudioPage() {
             setChatHistory([]);
             setFitCheckResult(null);
             await loadWorkbench();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to start training', e);
-            alert(e?.response?.data?.detail || 'Failed to start training');
+            alert(getErrorDetail(e) || 'Failed to start training');
         } finally {
             setStartingTraining(false);
         }
@@ -944,9 +945,9 @@ export function AvatarStudioPage() {
         try {
             const res = await api.post<AvatarPersonalityTrainingStatus>(`/avatars/${id}/personality/stop-training`);
             setTrainingStatus(res.data);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to stop training', e);
-            alert(e?.response?.data?.detail || 'Failed to stop training');
+            alert(getErrorDetail(e) || 'Failed to stop training');
         } finally {
             setStoppingTraining(false);
         }
@@ -961,9 +962,9 @@ export function AvatarStudioPage() {
             });
             setTrainingStatus(res.data);
             await loadWorkbench();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to promote snapshot', e);
-            alert(e?.response?.data?.detail || 'Failed to promote snapshot');
+            alert(getErrorDetail(e) || 'Failed to promote snapshot');
         } finally {
             setPromotingSnapshot(false);
         }
@@ -978,9 +979,9 @@ export function AvatarStudioPage() {
             });
             setTrainingStatus(res.data);
             await loadWorkbench();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to delete other snapshots', e);
-            alert(e?.response?.data?.detail || 'Failed to delete other snapshots');
+            alert(getErrorDetail(e) || 'Failed to delete other snapshots');
         } finally {
             setCleaningSnapshots(false);
         }
@@ -998,9 +999,9 @@ export function AvatarStudioPage() {
             setChatHistory([]);
             setFitCheckResult(null);
             await loadWorkbench();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to delete snapshot', e);
-            alert(e?.response?.data?.detail || 'Failed to delete snapshot');
+            alert(getErrorDetail(e) || 'Failed to delete snapshot');
         } finally {
             setDeletingSnapshot(false);
         }
@@ -1025,9 +1026,9 @@ export function AvatarStudioPage() {
                 { role: 'assistant', content: res.data.reply },
             ]);
             setChatInput('');
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to send test chat', e);
-            alert(e?.response?.data?.detail || 'Failed to generate test reply');
+            alert(getErrorDetail(e) || 'Failed to generate test reply');
         } finally {
             setSendingChat(false);
         }
@@ -1044,9 +1045,9 @@ export function AvatarStudioPage() {
                 top_p: 0.9,
             });
             setFitCheckResult(res.data);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to run fit check', e);
-            alert(e?.response?.data?.detail || 'Failed to run personality fit check');
+            alert(getErrorDetail(e) || 'Failed to run personality fit check');
         } finally {
             setRunningFitCheck(false);
         }
@@ -1102,9 +1103,9 @@ export function AvatarStudioPage() {
             setDataset(res.data);
             await loadWorkbench();
             await loadDatasetExamples(exampleOffset, exampleStateFilter);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to update avatar dataset example state', e);
-            alert(e?.response?.data?.detail || 'Failed to update dataset example state');
+            alert(getErrorDetail(e) || 'Failed to update dataset example state');
         } finally {
             setUpdatingExampleId(null);
         }
@@ -1555,48 +1556,6 @@ export function AvatarStudioPage() {
                                             </div>
                                         )}
 
-                                        {false && dataset!.preview_examples.length > 0 && (
-                                            <div className="hidden">
-                                                {dataset!.preview_examples.slice(0, 3).map((example, index) => (
-                                                    <div key={`preview-card-${example.video_id}-${example.start_time}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                                                        <div className="flex flex-wrap items-center justify-between gap-3">
-                                                            <div>
-                                                                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Preview Example</div>
-                                                                <div className="mt-1 text-sm font-semibold text-slate-900">{example.video_title}</div>
-                                                            </div>
-                                                            <div className="flex flex-wrap gap-2 text-xs text-slate-600">
-                                                                <span className="rounded-full border border-slate-200 bg-white px-3 py-1">
-                                                                    {formatClock(example.start_time)}-{formatClock(example.end_time)}
-                                                                </span>
-                                                                <span className="rounded-full border border-slate-200 bg-white px-3 py-1">
-                                                                    {example.context_turns} context turn{example.context_turns === 1 ? '' : 's'}
-                                                                </span>
-                                                            </div>
-                                                        </div>
-                                                        <div className="mt-4">
-                                                            <ExampleConversationCard example={example} responseSpeakerName={workbench!.speaker.name} />
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            <div className="hidden">
-                                                {dataset!.preview_examples.slice(0, 3).map((example, index) => (
-                                                    <div key={`${example.video_id}-${example.start_time}-${index}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                                        <div className="text-[11px] uppercase tracking-wide text-slate-500">
-                                                            {example.video_title} â€¢ {example.context_turns} context turn{example.context_turns === 1 ? '' : 's'}
-                                                        </div>
-                                                        <div className="mt-2">
-                                                            <div className="text-xs font-semibold text-slate-500">Prompt</div>
-                                                            <div className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{example.context_text}</div>
-                                                        </div>
-                                                        <div className="mt-3">
-                                                            <div className="text-xs font-semibold text-slate-500">Response</div>
-                                                            <div className="mt-1 whitespace-pre-wrap text-sm text-slate-900">{example.response_text}</div>
-                                                        </div>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                            </div>
-                                        )}
                                     </>
                                 )}
                             </div>

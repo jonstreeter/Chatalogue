@@ -102,7 +102,7 @@ export function SpeakerList({ channelId, videoId, onSpeakerUpdated, onSpeakerMer
         const append = !!opts?.append;
         const forceAll = !!opts?.forceAll;
         try {
-            const params: any = {};
+            const params: Record<string, string | number> = {};
             if (channelId) params.channel_id = channelId;
             if (videoId) params.video_id = videoId;
             const usePaging = canUsePagination && !forceAll;

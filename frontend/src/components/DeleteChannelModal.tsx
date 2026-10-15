@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { useState, useEffect } from 'react';
 import { AlertTriangle, Loader2, X } from 'lucide-react';
 import api from '../lib/api';
@@ -29,7 +30,7 @@ export function DeleteChannelModal({ channelId, channelName, onClose, onDeleted 
     useEffect(() => {
         api.get<DeletePreview>(`/channels/${channelId}/delete-preview`)
             .then(res => setPreview(res.data))
-            .catch(e => setError(e.response?.data?.detail || 'Failed to load preview'))
+            .catch(e => setError(getErrorDetail(e) || 'Failed to load preview'))
             .finally(() => setLoading(false));
     }, [channelId]);
 
@@ -41,8 +42,8 @@ export function DeleteChannelModal({ channelId, channelName, onClose, onDeleted 
         try {
             await api.delete(`/channels/${channelId}`);
             onDeleted();
-        } catch (e: any) {
-            setError(e.response?.data?.detail || 'Failed to delete channel');
+        } catch (e) {
+            setError(getErrorDetail(e) || 'Failed to delete channel');
             setDeleting(false);
         }
     };

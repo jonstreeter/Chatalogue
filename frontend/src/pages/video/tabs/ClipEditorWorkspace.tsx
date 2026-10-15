@@ -24,7 +24,7 @@ function parseSegmentWords(seg: TranscriptSegment): Array<{ start: number; end: 
         const parsed = JSON.parse(seg.words);
         if (!Array.isArray(parsed)) return [];
         words = parsed
-            .map((w: any) => ({
+            .map((w: { start?: unknown; end?: unknown; word?: unknown } | null) => ({
                 start: Number(w?.start),
                 end: Number.isFinite(Number(w?.end)) ? Number(w?.end) : Number(w?.start),
                 word: String(w?.word || '').trim(),
@@ -88,17 +88,22 @@ function parseSegmentWords(seg: TranscriptSegment): Array<{ start: number; end: 
     });
 }
 
-export function ClipEditorWorkspace({
+export function ClipEditorWorkspace(props: Props) {
+    const draft = useClipsStore((s) => s.clipEditorDraft);
+    return draft ? <ClipEditorContent {...props} clipEditorDraft={draft} /> : null;
+}
+
+function ClipEditorContent({
     activeEditingClip,
     currentTime,
     video,
     segments,
     playerNode,
     onSeek,
-}: Props) {
+    clipEditorDraft,
+}: Props & { clipEditorDraft: Partial<Clip> }) {
     const cropPreviewRef = useRef<HTMLDivElement>(null);
     const clipTimelineRef = useRef<HTMLDivElement>(null);
-    const clipEditorDraft = useClipsStore((s) => s.clipEditorDraft);
     const clipEditorTokens = useClipsStore((s) => s.clipEditorTokens);
     const clipEditorRemovedWordKeys = useClipsStore((s) => s.clipEditorRemovedWordKeys);
     const clipEditorCropTarget = useClipsStore((s) => s.clipEditorCropTarget);
@@ -112,13 +117,11 @@ export function ClipEditorWorkspace({
     const setClipEditorDragRect = useClipsStore((s) => s.setClipEditorDragRect);
     const setClipTimelineDrag = useClipsStore((s) => s.setClipTimelineDrag);
 
-    if (!clipEditorDraft) return null;
-
     const isPortraitSplit = String(clipEditorDraft.aspect_ratio || 'source') === '9:16' && !!clipEditorDraft.portrait_split_enabled;
 
     const onCancelClipEdit = () => useClipsStore.getState().cancelClipEdit();
     const onSaveClipEdit = (clipId: number) => void useClipsStore.getState().saveClipEdit(clipId);
-    const onUpdateClipDraftField = (field: keyof Clip, value: any) => setClipEditorDraft(prev => ({ ...(prev || {}), [field]: value }));
+    const onUpdateClipDraftField = <K extends keyof Clip>(field: K, value: Clip[K] | null) => setClipEditorDraft(prev => ({ ...(prev || {}), [field]: value }));
 
     const parseClipEditorKeptRanges = (raw?: string | null): Array<[number, number]> => {
         if (!raw) return [];
@@ -326,12 +329,12 @@ export function ClipEditorWorkspace({
         if (bounds.width <= 0) return 0;
         return clampNorm((evt.clientX - bounds.left) / bounds.width) * duration;
     };
-    const onBeginClipTimelineDrag = (handle: 'start' | 'end', e: any) => {
+    const onBeginClipTimelineDrag = (handle: 'start' | 'end', e: React.PointerEvent<HTMLElement>) => {
         e.preventDefault();
         e.stopPropagation();
         setClipTimelineDrag({ handle });
     };
-    const onTimelineScrub = (e: any) => onSeek(timelineEventToTime(e, getEditorMediaDuration()));
+    const onTimelineScrub = (e: React.MouseEvent<HTMLElement>) => onSeek(timelineEventToTime(e, getEditorMediaDuration()));
     const onCropPreviewPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
         if (!cropPreviewRef.current) return;
         if (clipEditorCropTarget !== 'main' && !isPortraitSplit) return;

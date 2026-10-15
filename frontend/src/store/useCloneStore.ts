@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import api from '../lib/api';
@@ -208,11 +209,11 @@ export const useCloneStore = create<CloneState>()(
                         false,
                         'fetchCloneEngines/fulfilled'
                     );
-                } catch (e: any) {
+                } catch (e) {
                     if (signal?.aborted) return;
                     console.error('Failed to fetch clone engines:', e);
                     set(
-                        { cloneEngines: [], cloneEnginesError: e?.response?.data?.detail || 'Failed to load clone engines' },
+                        { cloneEngines: [], cloneEnginesError: getErrorDetail(e) || 'Failed to load clone engines' },
                         false,
                         'fetchCloneEngines/rejected'
                     );
@@ -255,11 +256,11 @@ export const useCloneStore = create<CloneState>()(
                         }
                     }
                     set({ cloneOllamaModels: models, cloneOllamaModel: nextModel }, false, 'fetchCloneOllamaModels/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     if (signal?.aborted) return;
                     console.error('Failed to fetch Ollama models for clone workbench:', e);
                     set(
-                        { cloneOllamaModels: [], cloneOllamaModelsError: e?.response?.data?.detail || 'Failed to load local Ollama models.' },
+                        { cloneOllamaModels: [], cloneOllamaModelsError: getErrorDetail(e) || 'Failed to load local Ollama models.' },
                         false,
                         'fetchCloneOllamaModels/rejected'
                     );
@@ -302,12 +303,12 @@ export const useCloneStore = create<CloneState>()(
                         'fetchCloneJobs/fulfilled'
                     );
                     return jobs;
-                } catch (e: any) {
+                } catch (e) {
                     if (signal?.aborted) return null;
                     console.error('Failed to fetch episode clone jobs:', e);
                     set(
                         {
-                            cloneJobsError: e?.response?.data?.detail || 'Failed to load clone workbench history',
+                            cloneJobsError: getErrorDetail(e) || 'Failed to load clone workbench history',
                             generatingClone: false,
                         },
                         false,
@@ -371,9 +372,9 @@ export const useCloneStore = create<CloneState>()(
                         false,
                         'handleDetectCloneConcepts/fulfilled'
                     );
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to detect clone concepts:', e);
-                    alert(e?.response?.data?.detail || 'Failed to detect clone concepts');
+                    alert(getErrorDetail(e) || 'Failed to detect clone concepts');
                 } finally {
                     set({ detectingCloneConcepts: false }, false, 'handleDetectCloneConcepts/settled');
                 }
@@ -432,8 +433,8 @@ export const useCloneStore = create<CloneState>()(
                         'handleGenerateEpisodeClone/fulfilled'
                     );
                     await get().fetchCloneJobs(videoId, undefined, { preferredJobId, silent: true });
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to generate episode clone');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to generate episode clone');
                     set({ generatingClone: false }, false, 'handleGenerateEpisodeClone/rejected');
                 }
             },

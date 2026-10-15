@@ -1,3 +1,4 @@
+import { getErrorDetail, getErrorMessage } from '../lib/errors';
 import { useState, useEffect, type FormEvent } from 'react';
 import { Save, Key, CheckCircle2, AlertCircle, Zap, ExternalLink, Loader2, RefreshCw, Terminal, Bot, AudioLines, Power, Mic, Smile, Link2, Database, Wand2, Download } from 'lucide-react';
 import api from '../lib/api';
@@ -683,10 +684,10 @@ export function Settings() {
             const res = await api.get<DbHealthResponse>('/settings/db-health');
             setDbHealth(res.data);
             setDbHealthError(null);
-        } catch (e: any) {
+        } catch (e) {
             const message =
-                e?.response?.data?.detail ||
-                e?.message ||
+                getErrorDetail(e) ||
+                getErrorMessage(e) ||
                 'Failed to load database health';
             setDbHealthError(String(message));
         } finally {
@@ -781,8 +782,8 @@ export function Settings() {
             } else {
                 alert(res.data.message || 'VoiceFixer install completed.');
             }
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to install VoiceFixer automatically.');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to install VoiceFixer automatically.');
         } finally {
             setInstallingVoiceFixer(false);
             await loadVoiceFixerInstallInfo();
@@ -807,8 +808,8 @@ export function Settings() {
             } else {
                 alert(res.data.message || 'ClearVoice install completed.');
             }
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to install ClearVoice automatically.');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to install ClearVoice automatically.');
         } finally {
             setInstallingClearVoice(false);
             await loadClearVoiceInstallInfo();
@@ -821,7 +822,7 @@ export function Settings() {
         try {
             const res = await api.post<ClearVoiceTestResult>('/system/clearvoice/test');
             setClearVoiceTestResult(res.data);
-        } catch (e: any) {
+        } catch (e) {
             setClearVoiceTestResult({
                 status: 'error',
                 imported: false,
@@ -829,7 +830,7 @@ export function Settings() {
                 torch_imported: false,
                 torchaudio_imported: false,
                 runtime_ready: false,
-                error: e?.response?.data?.detail || 'ClearVoice self-test failed.',
+                error: getErrorDetail(e) || 'ClearVoice self-test failed.',
                 detail: 'The backend could not import or validate the local ClearVoice runtime.',
             });
         } finally {
@@ -845,8 +846,8 @@ export function Settings() {
             await api.post('/system/clearvoice/repair');
             alert('ClearVoice runtime repair completed. Running self-test again...');
             await handleTestClearVoice();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to repair the ClearVoice runtime.');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to repair the ClearVoice runtime.');
         } finally {
             setRepairingClearVoice(false);
             await loadClearVoiceInstallInfo();
@@ -859,11 +860,11 @@ export function Settings() {
         try {
             const res = await api.post<VoiceFixerTestResult>('/system/voicefixer/test');
             setVoiceFixerTestResult(res.data);
-        } catch (e: any) {
+        } catch (e) {
             setVoiceFixerTestResult({
                 status: 'error',
                 instantiated: false,
-                error: e?.response?.data?.detail || 'VoiceFixer self-test failed.',
+                error: getErrorDetail(e) || 'VoiceFixer self-test failed.',
                 detail: 'The backend could not complete the VoiceFixer self-test.',
             });
         } finally {
@@ -879,8 +880,8 @@ export function Settings() {
             await api.post('/system/voicefixer/repair');
             alert('VoiceFixer checkpoint repair completed. Running self-test again...');
             await handleTestVoiceFixer();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to repair the VoiceFixer checkpoint.');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to repair the VoiceFixer checkpoint.');
         } finally {
             setRepairingVoiceFixer(false);
         }
@@ -904,8 +905,8 @@ export function Settings() {
             } else {
                 alert(res.data.message || 'Reconstruction runtime install completed.');
             }
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to install the reconstruction runtime automatically.');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to install the reconstruction runtime automatically.');
         } finally {
             setInstallingReconstruction(false);
             await loadReconstructionInstallInfo();
@@ -918,12 +919,12 @@ export function Settings() {
         try {
             const res = await api.post<ReconstructionTestResult>('/system/reconstruction/test');
             setReconstructionTestResult(res.data);
-        } catch (e: any) {
+        } catch (e) {
             setReconstructionTestResult({
                 status: 'error',
                 imported: false,
                 model_class_available: false,
-                error: e?.response?.data?.detail || 'Conversation reconstruction self-test failed.',
+                error: getErrorDetail(e) || 'Conversation reconstruction self-test failed.',
                 detail: 'The backend could not import or validate the local reconstruction runtime.',
             });
         } finally {
@@ -974,7 +975,7 @@ export function Settings() {
             const res = await api.post('/settings/test-ollama');
             setOllamaTest(res.data);
             await loadOllamaLocalModels();
-        } catch (e) {
+        } catch {
             setOllamaTest({ status: 'error', error: 'Failed to reach backend' });
         } finally {
             setTestingOllama(false);
@@ -1165,15 +1166,15 @@ export function Settings() {
                     const statusRes = await api.get('/youtube/oauth/status');
                     setYoutubeOauthStatus(statusRes.data);
                     if (statusRes.data?.connected) {
-                        try { popup.close(); } catch { }
+                        try { popup.close(); } catch { /* The popup may already be closed. */ }
                         break;
                     }
                 } catch {
                     // ignore polling errors
                 }
             }
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || e?.message || 'Failed to start YouTube OAuth flow');
+        } catch (e) {
+            alert(getErrorDetail(e) || getErrorMessage(e) || 'Failed to start YouTube OAuth flow');
         } finally {
             setConnectingYouTube(false);
         }
@@ -1186,8 +1187,8 @@ export function Settings() {
             await api.post('/youtube/oauth/disconnect');
             setYoutubeOauthTestResult(null);
             await loadYouTubeOAuthStatus();
-        } catch (e: any) {
-            alert(e?.response?.data?.detail || 'Failed to disconnect YouTube OAuth');
+        } catch (e) {
+            alert(getErrorDetail(e) || 'Failed to disconnect YouTube OAuth');
         } finally {
             setDisconnectingYouTube(false);
         }
@@ -1395,8 +1396,8 @@ export function Settings() {
             if (pullSucceeded) {
                 await testOllama();
             }
-        } catch (e: any) {
-            const detail = e?.response?.data?.detail || 'Failed to download model in Ollama.';
+        } catch (e) {
+            const detail = getErrorDetail(e) || 'Failed to download model in Ollama.';
             setOllamaPullStatus({ status: 'error', message: detail });
         } finally {
             setPullingOllamaModel(false);
@@ -1443,8 +1444,8 @@ export function Settings() {
                 whisper_backend: whisperBackend,
             });
             setTranscriptionEngineTestResult(res.data);
-        } catch (e: any) {
-            const detail = String(e?.response?.data?.detail || e?.message || 'Unknown error');
+        } catch (e) {
+            const detail = String(getErrorDetail(e) || getErrorMessage(e) || 'Unknown error');
             setTranscriptionEngineTestResult({
                 status: 'error',
                 requested_engine: transcriptionEngine,

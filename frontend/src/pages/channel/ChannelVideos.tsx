@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../../lib/errors';
 import { useEffect, useState, useMemo, useRef, type MouseEvent } from 'react';
 import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import api from '../../lib/api';
@@ -257,8 +258,8 @@ export function ChannelVideos() {
 
         // 3. Sort
         return [...result].sort((a, b) => {
-            let valA: any = null;
-            let valB: any = null;
+            let valA: string | number = 0;
+            let valB: string | number = 0;
 
             if (sortField === 'published_at') {
                 valA = new Date(a.published_at || 0).getTime();
@@ -319,9 +320,9 @@ export function ChannelVideos() {
         try {
             await api.post(`/channels/${id}/add-video`, null, { params: { url: url.trim() } });
             await fetchVideos();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to add video:', e);
-            alert(e?.response?.data?.detail || 'Failed to add video');
+            alert(getErrorDetail(e) || 'Failed to add video');
         } finally {
             setAddingVideo(false);
         }
@@ -342,9 +343,9 @@ export function ChannelVideos() {
                 headers: { 'Content-Type': 'multipart/form-data' },
             });
             await fetchVideos();
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to upload media:', e);
-            alert(e?.response?.data?.detail || 'Failed to upload media');
+            alert(getErrorDetail(e) || 'Failed to upload media');
         } finally {
             setUploadingMedia(false);
             if (uploadInputRef.current) uploadInputRef.current.value = '';
@@ -359,9 +360,9 @@ export function ChannelVideos() {
             setVideos(prev => prev.map(v =>
                 v.id === videoId ? { ...v, status: 'queued', processed: false } : v
             ));
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to start processing:', e);
-            alert(e?.response?.data?.detail || 'Failed to start processing');
+            alert(getErrorDetail(e) || 'Failed to start processing');
         } finally {
             setProcessingIds(prev => {
                 const next = new Set(prev);

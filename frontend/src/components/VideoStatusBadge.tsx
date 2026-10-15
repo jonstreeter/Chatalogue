@@ -31,7 +31,7 @@ export function VideoStatusBadge({ status, processed, accessRestricted = false, 
         return 'pending';
     };
 
-    const renderIcon = (Icon: any, step: 'download' | 'transcribe' | 'diarize', label: string) => {
+    const renderIcon = (Icon: React.ElementType, step: 'download' | 'transcribe' | 'diarize', label: string) => {
         const state = getStepState(step);
         let colorClass = 'text-slate-300'; // pending
         let animate = false;

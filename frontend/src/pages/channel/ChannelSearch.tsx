@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../../lib/errors';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import YouTube from 'react-youtube';
@@ -239,10 +240,10 @@ export function ChannelSearch() {
                 persist_snapshots: false,
             });
             setOptimizationBacklog(Array.isArray(res.data?.items) ? res.data.items : []);
-        } catch (e: any) {
+        } catch (e) {
             console.error('Failed to load transcript optimization backlog:', e);
             setOptimizationBacklog([]);
-            setOptimizationBacklogError(e?.response?.data?.detail || 'Failed to load transcript optimization backlog');
+            setOptimizationBacklogError(getErrorDetail(e) || 'Failed to load transcript optimization backlog');
         } finally {
             setLoadingOptimizationBacklog(false);
         }
@@ -299,8 +300,8 @@ export function ChannelSearch() {
                 window.alert(`Full retranscription queued as job ${res.data.job_id}.`);
             }
             await fetchOptimizationBacklog();
-        } catch (e: any) {
-            window.alert(e?.response?.data?.detail || 'Failed to queue transcript optimization');
+        } catch (e) {
+            window.alert(getErrorDetail(e) || 'Failed to queue transcript optimization');
         } finally {
             setQueueingOptimizationVideoId(null);
         }

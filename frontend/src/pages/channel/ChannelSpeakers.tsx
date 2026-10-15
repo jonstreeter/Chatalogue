@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../../lib/errors';
 import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Loader2, RefreshCw } from 'lucide-react';
@@ -41,9 +42,9 @@ export function ChannelSpeakers() {
                 `Deleted funny moments: ${rc.deleted_funny_moments || 0}\n` +
                 `Errors: ${rc.errors || 0}`
             );
-        } catch (e: any) {
+        } catch (e) {
             console.error('Bulk re-diarization failed', e);
-            alert(e?.response?.data?.detail || 'Failed to run bulk re-diarization');
+            alert(getErrorDetail(e) || 'Failed to run bulk re-diarization');
         } finally {
             setRunningBulkRedo(false);
         }

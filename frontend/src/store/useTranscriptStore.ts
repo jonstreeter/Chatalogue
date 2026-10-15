@@ -1,3 +1,4 @@
+import { getErrorDetail } from '../lib/errors';
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import api from '../lib/api';
@@ -287,13 +288,13 @@ export const useTranscriptStore = create<TranscriptState>()(
                     const res = await api.get<TranscriptQuality>(`/videos/${videoId}/transcript-quality`, { signal });
                     if (signal?.aborted) return;
                     set({ transcriptQuality: res.data }, false, 'fetchTranscriptQuality/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     if (signal?.aborted) return;
                     console.error('Failed to fetch transcript quality:', e);
                     set(
                         {
                             transcriptQuality: null,
-                            transcriptQualityError: e?.response?.data?.detail || 'Failed to evaluate transcript quality',
+                            transcriptQualityError: getErrorDetail(e) || 'Failed to evaluate transcript quality',
                         },
                         false,
                         'fetchTranscriptQuality/rejected'
@@ -310,7 +311,7 @@ export const useTranscriptStore = create<TranscriptState>()(
                     const res = await api.get<TranscriptRollbackOption[]>(`/videos/${videoId}/transcript-rollback-options`, { signal });
                     if (signal?.aborted) return;
                     set({ transcriptRollbackOptions: res.data || [] }, false, 'fetchTranscriptRollbackOptions/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     if (signal?.aborted) return;
                     console.error('Failed to fetch transcript rollback options:', e);
                     set({ transcriptRollbackOptions: [] }, false, 'fetchTranscriptRollbackOptions/rejected');
@@ -326,13 +327,13 @@ export const useTranscriptStore = create<TranscriptState>()(
                     const res = await api.get<TranscriptGoldWindow[]>(`/videos/${videoId}/transcript-gold-windows`, { signal });
                     if (signal?.aborted) return;
                     set({ transcriptGoldWindows: res.data || [] }, false, 'fetchTranscriptGoldWindows/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     if (signal?.aborted) return;
                     console.error('Failed to fetch transcript gold windows:', e);
                     set(
                         {
                             transcriptGoldWindows: [],
-                            transcriptGoldWindowsError: e?.response?.data?.detail || 'Failed to load transcript benchmark windows',
+                            transcriptGoldWindowsError: getErrorDetail(e) || 'Failed to load transcript benchmark windows',
                         },
                         false,
                         'fetchTranscriptGoldWindows/rejected'
@@ -349,13 +350,13 @@ export const useTranscriptStore = create<TranscriptState>()(
                     const res = await api.get<TranscriptEvaluationResult[]>(`/videos/${videoId}/transcript-evaluation-results`, { signal });
                     if (signal?.aborted) return;
                     set({ transcriptEvaluationResults: res.data || [] }, false, 'fetchTranscriptEvaluationResults/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     if (signal?.aborted) return;
                     console.error('Failed to fetch transcript evaluation results:', e);
                     set(
                         {
                             transcriptEvaluationResults: [],
-                            transcriptEvaluationError: e?.response?.data?.detail || 'Failed to load transcript evaluation results',
+                            transcriptEvaluationError: getErrorDetail(e) || 'Failed to load transcript evaluation results',
                         },
                         false,
                         'fetchTranscriptEvaluationResults/rejected'
@@ -374,7 +375,7 @@ export const useTranscriptStore = create<TranscriptState>()(
                         false,
                         'fetchEvaluationReviews/fulfilled'
                     );
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to fetch transcript evaluation reviews:', e);
                 }
             },
@@ -399,8 +400,8 @@ export const useTranscriptStore = create<TranscriptState>()(
                         'saveSegmentEdit/fulfilled'
                     );
                     onPausePreview();
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to save transcript correction');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to save transcript correction');
                 } finally {
                     set({ savingSegmentEdit: false }, false, 'saveSegmentEdit/settled');
                 }
@@ -426,9 +427,9 @@ export const useTranscriptStore = create<TranscriptState>()(
                 try {
                     const res = await api.post<FunnyMoment[]>(`/videos/${videoId}/funny-moments/detect`, null, { params: { force } });
                     set({ funnyMoments: res.data }, false, 'detectFunnyMoments/fulfilled');
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to detect funny moments', e);
-                    alert(e?.response?.data?.detail || 'Failed to detect funny moments');
+                    alert(getErrorDetail(e) || 'Failed to detect funny moments');
                 } finally {
                     await get().fetchFunnyTaskProgress(videoId);
                     set({ detectingFunnyMoments: false }, false, 'detectFunnyMoments/settled');
@@ -456,9 +457,9 @@ export const useTranscriptStore = create<TranscriptState>()(
                     const res = await api.post<FunnyMoment[]>(`/videos/${videoId}/funny-moments/explain`, null, { params: { force } });
                     set({ funnyMoments: res.data }, false, 'explainFunnyMoments/fulfilled');
                     await onVideoMetaChanged?.();
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to explain funny moments', e);
-                    alert(e?.response?.data?.detail || 'Failed to generate AI explanations');
+                    alert(getErrorDetail(e) || 'Failed to generate AI explanations');
                 } finally {
                     await get().fetchFunnyTaskProgress(videoId);
                     set({ explainingFunnyMoments: false }, false, 'explainFunnyMoments/settled');
@@ -503,8 +504,8 @@ export const useTranscriptStore = create<TranscriptState>()(
                         false,
                         'createTranscriptGoldWindow/fulfilled'
                     );
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to save transcript gold window');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to save transcript gold window');
                 } finally {
                     set({ savingTranscriptGoldWindow: false }, false, 'createTranscriptGoldWindow/settled');
                 }
@@ -521,14 +522,14 @@ export const useTranscriptStore = create<TranscriptState>()(
                     for (const item of res.data.items || []) {
                         void get().fetchEvaluationReviews(item.id);
                     }
-                } catch (e: any) {
+                } catch (e) {
                     console.error('Failed to evaluate transcript against gold windows:', e);
                     set(
-                        { transcriptEvaluationSummary: null, transcriptEvaluationError: e?.response?.data?.detail || 'Failed to evaluate transcript' },
+                        { transcriptEvaluationSummary: null, transcriptEvaluationError: getErrorDetail(e) || 'Failed to evaluate transcript' },
                         false,
                         'runTranscriptEvaluation/rejected'
                     );
-                    alert(e?.response?.data?.detail || 'Failed to evaluate transcript');
+                    alert(getErrorDetail(e) || 'Failed to evaluate transcript');
                 } finally {
                     set({ evaluatingTranscript: false }, false, 'runTranscriptEvaluation/settled');
                 }
@@ -545,8 +546,8 @@ export const useTranscriptStore = create<TranscriptState>()(
                         notes: (state.evaluationReviewNotesDrafts[resultId] || '').trim() || null,
                     });
                     await get().fetchEvaluationReviews(resultId);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to save transcript evaluation review');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to save transcript evaluation review');
                 } finally {
                     set({ reviewingEvaluationResultId: null }, false, 'submitTranscriptEvaluationReview/settled');
                 }
@@ -558,8 +559,8 @@ export const useTranscriptStore = create<TranscriptState>()(
                     const res = await api.post<TranscriptRepairQueueResponse>(`/videos/${videoId}/transcript-repair`, {});
                     alert(`Low-risk repair queued as job ${res.data.job_id}.`);
                     onQueued?.();
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to queue transcript repair');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to queue transcript repair');
                 } finally {
                     set({ queueingTranscriptRepair: false }, false, 'queueTranscriptRepairJob/settled');
                 }
@@ -571,8 +572,8 @@ export const useTranscriptStore = create<TranscriptState>()(
                     const res = await api.post<TranscriptDiarizationRebuildQueueResponse>(`/videos/${videoId}/transcript-diarization-rebuild`, {});
                     alert(`Diarization rebuild queued as job ${res.data.job_id}.`);
                     onQueued?.();
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to queue diarization rebuild');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to queue diarization rebuild');
                 } finally {
                     set({ queueingDiarizationRebuild: false }, false, 'queueTranscriptDiarizationRebuildJob/settled');
                 }
@@ -594,8 +595,8 @@ export const useTranscriptStore = create<TranscriptState>()(
                     });
                     alert(`Diarization benchmark queued as job ${res.data.job_id}.`);
                     onQueued?.();
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to queue diarization benchmark');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to queue diarization benchmark');
                 } finally {
                     set({ queueingDiarizationBenchmark: false }, false, 'queueTranscriptDiarizationBenchmarkJob/settled');
                 }
@@ -607,8 +608,8 @@ export const useTranscriptStore = create<TranscriptState>()(
                     const res = await api.post<TranscriptRetranscriptionQueueResponse>(`/videos/${videoId}/transcript-retranscribe`, {});
                     alert(`Full retranscription queued as job ${res.data.job_id}.`);
                     onQueued?.();
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to queue full retranscription');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to queue full retranscription');
                 } finally {
                     set({ queueingFullRetranscription: false }, false, 'queueTranscriptRetranscriptionJob/settled');
                 }
@@ -622,8 +623,8 @@ export const useTranscriptStore = create<TranscriptState>()(
                     await get().fetchTranscriptQuality(videoId);
                     await get().fetchTranscriptRollbackOptions(videoId);
                     alert(`Transcript restored from run ${res.data.restored_from_run_id}. New restore run ${res.data.restore_run_id} recorded.`);
-                } catch (e: any) {
-                    alert(e?.response?.data?.detail || 'Failed to restore transcript run');
+                } catch (e) {
+                    alert(getErrorDetail(e) || 'Failed to restore transcript run');
                 } finally {
                     set({ restoringTranscriptRunId: null }, false, 'restoreTranscriptFromRun/settled');
                 }
