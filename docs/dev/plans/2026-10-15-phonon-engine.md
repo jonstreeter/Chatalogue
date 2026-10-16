@@ -6,13 +6,12 @@
 
 ## Summary
 
-Add an opt-in Phonon-2 transcription engine through an authenticated persistent
-local server. Keep upstream optimized inference warm across a channel backlog,
-bound uploads, preserve word timings and resumable progress, and make actual
-engine/runtime availability visible. Preserve existing auto, Whisper, Parakeet,
-diarization and database behavior. The owner explicitly approved this reviewed
-plan on 2026-10-15 ("d approve") and requested implementation in a new session.
-The approval gate is satisfied; implementation and verification are complete.
+Revision approved 2026-10-16: replace the completed operator-managed HTTP
+integration with app-owned installation and an isolated persistent native worker.
+The original approval and completed tasks 1–6 remain historical. The owner
+explicitly authorized revising the spec and plan; revised implementation approval
+passed on 2026-10-16 (`d`). Tasks 7 onward implement this approved revision.
+Native Windows CUDA is not yet verified: task 7 must pass before product work.
 
 ## Affected modules
 
@@ -49,7 +48,64 @@ The approval gate is satisfied; implementation and verification are complete.
 | 5 | Document and exercise persistent CUDA setup and CPU/MLX equivalent; benchmark integrated app on short/long audio and multiple requests without reloading | `docs/phonon-engine.md`, `scripts/benchmark_asr.py`, `docs/research/2026-10-15-transcription-performance.md` | M | ✅ done |
 | 6 | Run relevant tests/static checks, review final diff with code-reviewer lens, update tracker/handoff and report deployment steps without activating engine or pushing | touched modules and docs | M | ✅ done |
 
-## Test plan
+## Revision modules and tracker continuation
+
+The affected-module list above records original tasks 1–6. For this revision:
+
+| # | Task | Files | Size | Status |
+| --- | --- | --- | --- | --- |
+| 7 | Prove native Windows CUDA in a disposable private environment using exact 1.0.8 inference source and cached weights; record pins/hashes, real short repeated inference, BF16/graphs and exit VRAM evidence. Stop if this gate fails; do not build a Docker/CPU substitute | `scripts/benchmark_asr.py`, `docs/research/2026-10-15-transcription-performance.md` (research artifacts under ignored `backend/data/asr-benchmark/`) | M | ☐ todo |
+| 8 | Implement isolated optional installer/cache with pinned manifest, progress, lock, staged atomic publication and interrupted/offline recovery; verify scratch installs and concurrent requests | `backend/src/services/ingestion/phonon_runtime.py` (new), `backend/src/services/ingestion/phonon_worker_requirements.txt` (new), `backend/src/services/ingestion/runtime.py`, `backend/src/test_phonon_runtime.py` (new) | M | ☐ todo |
+| 9 | Package attributed upstream inference worker and serialized versioned IPC; implement owned process load/reuse/shutdown/parent-exit behavior; verify real requests, crash recovery, stderr separation and VRAM release | `backend/src/services/ingestion/phonon_worker.py` (new), `backend/src/services/ingestion/phonon_runtime.py`, `backend/src/services/ingestion/phonon.py`, `backend/src/test_phonon_runtime.py`, `backend/src/services/ingestion/phonon_upstream/` (pinned source and notices, only if redistribution needed) | M | ☐ todo |
+| 10 | Wire worker into existing app phase and GPU lifecycle, replacing HTTP calls; retain checkpoint/routing semantics; verify repeated isolated app jobs, busy purge, engine switch and diarization handoff | `backend/src/services/ingestion/service.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/routers/system.py`, `backend/src/main.py`, `backend/src/test_phonon.py`, `backend/src/test_phonon_runtime.py`, `backend/src/test_transcription_routing.py` | L | ☐ todo |
+| 11 | Replace connection settings with app-owned setup/load/readiness state; preserve old-client no-op compatibility and sanitized responses; browser-verify progress/failure/save/reload/unload and existing engines | `backend/src/schemas.py`, `backend/src/routers/settings.py`, `frontend/src/pages/Settings.tsx`, `frontend/e2e/phonon-settings.spec.ts`, `backend/src/test_phonon.py` | M | ☐ todo |
+| 12 | Document integrated operation and run short/long actual app benchmarks including cold load, warm staged reuse and sequential GPU handoff; update runtime identity/provenance evidence | `docs/phonon-engine.md`, `scripts/benchmark_asr.py`, `docs/research/2026-10-15-transcription-performance.md`, `frontend/src/pages/JobQueue.tsx` (only if metadata requires display adjustment) | M | ☐ todo |
+| 13 | Full applicable verification and inline code review; resolve necessary findings, update tracker/handoff and local installation using existing update workflow without changing engine settings; shipping remains separately authorized | spec/plan/handoff, changed modules and tests, `docs/dev/contracts.json` (extend authority mapping only to durable runtime paths after revised approval) | M | ☐ todo |
+
+Each task uses implement → verify → review → resolve necessary findings → tracker
+and Handhold; commit only coherent verified slices through existing gates.
+Task 7 is authorized by the revised implementation approval, not a completed proof.
+Before tasks 8–13 run preflight and read updated authorities. Keep the backend
+ML environment unchanged. Resolve exact private-environment and model paths via
+runtime.py; record source/dependency hashes from the tested image before installer
+code. No arbitrary native-worker output cap or setup timeout is invented.
+
+### Revision test plan
+
+- Installer unit/integration: scratch cache/env, hash mismatch, offline ready cache,
+  interrupted write/download, failed replacement retains old version, concurrent
+  readiness causes one setup. Inspect existing endpoint timeout/progress patterns
+  before wiring long setup. Never count a partial manifest as installed.
+- Worker: real load and silent/speech inference, unchanged PID across warm jobs,
+  malformed/mismatched protocol replies and process crash, owned shutdown and parent
+  death, actual GPU memory release. Verify no TCP listener or external service.
+- Pipeline: rerun strict silence/overlap/absolute offsets/resume/interrupted writes,
+  old Phonon partial reuse, existing language routing and actual engine provenance.
+  Set SQLite environment before imports and use temporary .env/files only.
+- Lifecycle: simultaneous load/decode/purge, visible busy result, sequential
+  diarization releases worker before loading competing model; staged jobs reuse.
+- Browser: Phonon selection offers setup/load/test and status, zero URL/key fields;
+  setup progress/retry/offline/error, save/reload, actual queue badge and existing
+  engine choices. All writes isolated; no installed backlog or production settings.
+- Real measurement: 120s/2880s cached inputs through actual app phase, cold setup/load
+  separated from warm jobs, staged and sequential GPU handoff; inspect optimization
+  state and timings. Compare original HTTP evidence without promising a speedup.
+- Required gates: focused then applicable full backend checks, Ruff, frontend lint
+  and TypeScript, isolated browser flows, full SDD validate and contract-impact.
+  Do not claim existing live-data destructive E2E suite passed or bypass any gate.
+
+### Revision risks and review
+
+2026-10-16 paired review, inline architect/planner/simplification/code-reviewer,
+no subagents. Necessary findings resolved in the revised spec and sequenced above:
+native feasibility first, GPU phase ownership, backward-compatible partials and
+settings, supervised exit, atomic installer and truthful UI. Artifact review gate
+passes. No native-runtime verification is claimed; failed task 7 requires an owner
+decision. Original tests below prove the HTTP implementation only. Adding CPU/MLX,
+Docker management, a new queue or kernel tuning fails the MSW necessity test for
+this revision and is excluded. Revised owner approval passed on 2026-10-16.
+
+## Test plan (historical HTTP implementation)
 
 - **Unit:** loopback URL validation, redirect/proxy refusal, auth header not logged;
   finite/ordered/duration-checked word/segment data; silence vs missing word timing;
@@ -77,7 +133,7 @@ The approval gate is satisfied; implementation and verification are complete.
   and contract-impact check. Do not commit with an unresolved failing required gate.
   Runtime integration is not a speech accuracy certification.
 
-## Risks
+## Risks (historical HTTP implementation)
 
 - Word timing corruption/resume duplication — code-reviewer; explicit conversion,
   seam and failure/retry tests before long live runs.
@@ -94,10 +150,14 @@ The approval gate is satisfied; implementation and verification are complete.
 
 ## Open questions
 
+Revision: owner approval passed on 2026-10-16; native feasibility must pass task 7. The following
+paragraph records the original design only.
+
+
 No blocking technical questions. Owner plan approval is recorded. No promise that
 the currently measured decoder ratio equals the final integrated speedup.
 
-## Adversarial review
+## Adversarial review (historical approval)
 
 2026-10-15: architect, planner, simplification-expert and code-reviewer lenses
 applied inline; no subagents. Spec-only and final paired review complete. All
@@ -183,3 +243,10 @@ review gate passed; the separate owner approval gate passed on 2026-10-15.
   its spec/ADR acknowledgement; full SDD validation PASS. Tracker is 6/6 complete;
   active artifact status is retained until authorized push/deploy/archive. Only
   nine unrelated initial dirty paths remain. Temporary verification servers stopped.
+
+- 2026-10-16: owner chose revise spec/plan for full integration after seeing the
+  operator-managed connection UI. Revised artifacts reviewed together inline;
+  no implementation changes or native feasibility runs performed in this revision.
+- 2026-10-16 revised planning verification: full `python scripts/check_sdd_docs.py validate` PASS; `git diff --check` PASS. Tracker reports 6/13 complete. Four scoped planning/handoff files changed; nine unrelated existing paths preserved. Product tests and native benchmarks were not rerun because this revision changes documentation only.
+
+- 2026-10-16: owner replied `d` to approve the revised integration plan. Proceed to planning checkpoint and task 7; no repeat approval required.

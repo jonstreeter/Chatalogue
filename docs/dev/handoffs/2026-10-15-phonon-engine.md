@@ -5,6 +5,28 @@
 **Plan:** `docs/dev/plans/2026-10-15-phonon-engine.md`
 **Commit:** 76976c0 Phonon feature; 88e2517 separate frontend lint cleanup; 942ab4b process/authority checkpoint
 
+## Current revision — 2026-10-16
+
+Owner rejected operator-managed connection UX and explicitly chose "Revise spec
+and plan for full integration". Revised existing spec/plan and ADR amendment now
+propose an app-owned private native worker with managed setup/load/reuse/unload,
+no URL/key UI and no Docker prerequisite. Inline paired artifact review passed;
+revised owner implementation approval passed on 2026-10-16 (`d`). Original approval is historical
+and must not be requested again as though the old plan were unapproved.
+
+Tracker tasks 1–6 remain completed; tasks 7–13 are the proposed revision. Task 7
+must prove native Windows CUDA using exact verified upstream 1.0.8 source and
+cached weights before downstream product work. No native CUDA feasibility run
+has occurred. Native support is not promised; failure requires owner decision,
+not a silent CPU or Docker substitute. Current installed code is still HTTP mode.
+
+Next action: commit the approved planning checkpoint through gates and execute
+task 7. No product implementation changes,
+production settings writes or media reprocessing occurred during this revision.
+Historical status/next-step sections below describe the prior completed delivery
+and are superseded by this current revision. Cached artifacts and verification
+below remain useful, but prove the previous runtime only.
+
 ## Status
 
 Owner approved spec/plan and then explicitly authorized the validator patch and

@@ -4,224 +4,201 @@
 **Status:** Approved for implementation
 **Owner:** Jon / Codex
 **Plan:** `docs/dev/plans/2026-10-15-phonon-engine.md`
-**Scope:** Add Phonon-2 as an explicitly selected English transcription option through a persistent local runtime. Preserve completed transcript, diarization, identity, queue, and database formats; extend engine-valued settings/provenance and add backward-compatible Phonon partial-checkpoint metadata.
-
----
+**Scope:** Optional Phonon-2 with app-owned installation and model lifecycle; preserve existing transcription, routing, diarization and checkpoint behavior.
 
 ## Motivation
 
-The owner requested an optional Phonon engine for channels with hundreds of hours
-of recordings, including verified performance improvements. The local comparison
-in `docs/research/2026-10-15-transcription-performance.md` found approximately
-1.6x better long-audio decoder timing than the configured Parakeet v2 path, with
-different instrumentation boundaries. Recognition accuracy remains unmeasured;
-the owner explicitly chose an optional engine rather than waiting for a quality
-comparison. Keep existing engine selection and defaults.
+The original operator-managed HTTP integration was approved on 2026-10-15 and
+implemented in 76976c0. On 2026-10-16 the owner rejected the connection-oriented
+experience and explicitly requested revision of this spec and plan for full
+integration. Original approval remains historical; the owner approved this revision on 2026-10-16 by replying `d` to its approval Handhold.
+The installed UI remains the original implementation until the revised plan is built.
 
-Launching the CLI/container per episode costs roughly 33–35 seconds in measured
-startup. A persistent authenticated local server was verified with two 120-second
-requests: 1.512 s and 1.267 s including HTTP upload/response, with 384 word timestamps
-each. No repeated model loading occurred. This is the primary integration optimization.
+Selecting Phonon should work like selecting another local model: Chatalogue owns
+setup, download, loading, reuse and unloading. Users must not operate a server,
+enter a URL/API key, install Docker, or diagnose a separate service.
 
 ## Design tenets
 
-1. Explicit `phonon` selection only. `auto`, `parakeet`, and `whisper` retain
-   existing semantics. Phonon remains English-only; normal language routing still
-   sends known non-English/multilingual audio to Whisper when enabled.
-2. Reuse a separately running local server across chunks and jobs. Never spawn
-   a model process/container per episode, embed another ML stack in the backend
-   venv, or fork upstream CUDA kernels.
-3. Preserve upstream optimizations already observed in CUDA 1.0.8: dense BF16,
-   warmed CUDA graphs, 16-step graph decoding, duration buckets, GPU mel processing,
-   and energy-gated internal windows. Do not apply Phonon-1-only packed-kernel
-   switches to Phonon-2 or claim unsupported batch API throughput.
-4. Normalize source audio once to 16 kHz mono PCM16 using existing FFmpeg helpers.
-   Bound upload memory and checkpoint progress; do not load whole multi-hour files
-   into RAM. Reuse the HTTP client within a transcription job and serialize
-   requests to one server (the tested runtime has one GPU decode lock).
-5. Preserve valid words and timestamps. Never invent equal-spaced word timings
-   for a response that lacks them. Validate finite, ordered, in-range intervals
-   and convert to the existing Whisper-style segment/word objects.
-6. Scope rollback to selecting the previous engine and stopping the optional
-   runtime. No DB migration, destructive reprocessing, automatic engine switch,
-   installer-wide Docker dependency, or production `.env` changes during build.
+1. Keep explicit `phonon` selection, existing defaults and language routing.
+   English-only Phonon still routes multilingual audio to Whisper when enabled.
+2. Use an app-owned child worker in a private Python environment, avoiding changes
+   to the backend's pinned NeMo/Transformers stack. No listening network service.
+3. Reuse weights and warmed graphs across chunks and consecutive transcription
+   jobs. Release at competing GPU phases, explicit unload and app shutdown.
+   Sequential transcribe/diarize may require reload between episodes; disclose and
+   measure this cost. Staged transcription can retain the worker across episodes.
+4. Preserve upstream BF16, CUDA graphs K16, duration buckets, GPU mel and internal
+   window behavior. Do not fork kernels or advertise batch-128 throughput.
+5. Reuse implemented chunking, strict checkpoints and provenance; replace transport
+   and lifecycle rather than rewriting the proven transcription pipeline.
+
+## Feasibility boundary
+
+Upstream documents NVIDIA CUDA through Docker; a supported native Windows CUDA
+package has not been established. The backend's Transformers 4.57.1 lacks the
+ParakeetForTDT class used by the upstream CUDA implementation. Isolated native
+worker feasibility is therefore the first implementation gate, not a proven fact.
+
+Task 7 must pin the source/dependencies from verified image
+`ghcr.io/fermionresearch/phonon-cuda:1.0.8` (digest
+`sha256:c37e7b0ae99f6a74a2618ecae3fe9cbbc342c1069e02464eadba9c42d19802d5`),
+exercise native Windows CUDA with cached weights and actual audio, and demonstrate
+BF16/graph reuse and process-exit VRAM release. Record exact package versions,
+source hashes, upstream license/model notices and reproducible commands. Reuse
+unmodified upstream inference code where possible; package it with attribution.
+If this cannot run without a kernel fork or incompatible driver/backend changes,
+stop and report evidence. Do not silently substitute CPU or reintroduce Docker.
+That outcome requires an owner decision before downstream implementation.
+
+The initial acceptance platform is this Windows NVIDIA installation. Existing
+engines remain available on other platforms. Phonon reports unsupported hardware
+clearly there; native CPU/MLX expansion is outside this revision. Do not remove
+existing engines or claim untested cross-platform support.
 
 ## Data flow
 
 ```text
-Settings.tsx: explicit phonon + local URL/key
-  -> schemas.Settings / POST /settings -> backend .env and in-process settings
-  -> _select_transcription_engine / existing _resolve_transcription_route
-  -> _process_transcribe_phase -> phonon.py adapter
-  -> one persistent local /v1/audio/transcriptions server
-  -> validated word/segment timestamps + absolute chunk offsets
-  -> existing partial/raw checkpoint helpers -> unchanged diarization phase
-  -> job provenance / JobQueue.tsx displays actual phonon or routed whisper
+Settings: Phonon-2 -> setup/load/test through existing engine-test operation
+  -> app-owned runtime manager -> private worker environment and model cache
+  -> dedicated stdin/stdout messages + bounded temporary WAV paths
+  -> upstream optimized inference -> validated words/segments
+  -> existing absolute offsets, overlap ownership and committed checkpoints
+  -> existing diarization and queue provenance
 ```
 
 ## Interface contracts
 
-### Client → API
+### Settings and API
 
-- Existing `Settings.transcription_engine` accepts and round-trips `phonon`.
-  Existing values/defaults are unchanged; audit normalization whitelists in API,
-  service, checkpoint loading, test endpoint, and frontend.
-- New settings: `phonon_url` / `PHONON_URL`, default
-  `http://127.0.0.1:8010`; `phonon_api_key` / `PHONON_API_KEY`, default empty;
-  `phonon_request_timeout_seconds` / `PHONON_REQUEST_TIMEOUT_SECONDS`, optional
-  positive number, default unset. The local runtime has no imposed decode deadline;
-  unset means wait for inference. Health/connect checks use httpx's documented
-  default connect timeout; inference deadline is owner-configurable, not invented.
-- URL accepts loopback HTTP(S) only (`localhost`, loopback IP literals), with
-  no userinfo/query/fragment. Do not follow redirects or use environment proxies.
-  This release does not upload audio to remote inference providers.
-- Existing engine-test request gains optional Phonon URL/key overrides, so testing
-  unsaved settings never writes `.env`. For Phonon it checks health/model identity,
-  authentication and readiness, without importing/loading host NeMo or starting
-  a runtime. Return actual runtime model/version/device/path when supplied;
-  distinguish unreachable, unauthorized, loading, and wrong-model errors.
-- UI: optional engine entry, essential local URL and masked key controls,
-  advanced optional inference deadline, Test connection, and setup instructions.
-  Settings save/reload round-trips these fields. No CUDA batch-size/beam controls
-  falsely advertised as Phonon tuning knobs.
+- Keep `transcription_engine=phonon` additive; no auto/default changes or DB migration.
+- Replace connection controls with model availability, setup/download progress,
+  Load/Test and existing unload behavior. Setup/test must not save engine selection
+  or enqueue existing recordings. Selecting an installed engine loads lazily on use.
+- Existing `/settings/test-engine` request remains compatible; for Phonon it ensures
+  setup and load, then runs the one-second silence readiness test and reports actual
+  runtime/model/device. Add optional state/progress fields to its existing response;
+  use existing progress facilities where available rather than inventing a job queue.
+  Inspect route timeout behavior before implementation and return observable setup
+  state if setup outlives the request. A reconnect must not start duplicate installs.
+- Old `phonon_url` and `phonon_api_key` inputs remain accepted as deprecated no-ops
+  during compatibility transition. Do not connect to them or erase stored values.
+  Responses never reveal saved keys; new UI does not read or display these fields.
+  Retain optional positive inference deadline only if used by the worker, under
+  advanced model controls. Unset preserves current chunk-boundary cancellation.
+- Errors distinguish unsupported hardware, missing/offline download, installation
+  failure, loading, inference failure and worker exit, with actionable app guidance.
+  Never report ready before a real inference succeeds. No secrets or raw worker
+  output in UI errors.
 
-### Service → runtime / worker
+### Installation and ownership
 
-- Pin the verified setup recipe to CUDA image `1.0.8` (digest in research report),
-  currently shipping runtime 0.2.11 optimizations. Docs also cover an operator-run
-  CPU/MLX `fermion serve phonon-2` using the same API. App never silently substitutes
-  native Windows CPU inference for the advertised NVIDIA path.
-- Use authenticated multipart POST `/v1/audio/transcriptions` with
-  `model=phonon-2`, `response_format=verbose_json`,
-  `timestamp_granularities[]=word`. Support runtime word text as `word` or `text`.
-  Consume `segments` and `words`; ignore nonessential vendor extensions.
-- Authority for upload/file limits is installed
-  `/opt/phonon/entrypoint.py`: `MAX_BODY=32*1024*1024`,
-  `MAX_LONG_SECONDS=2*3600`, `MAX_SECONDS=30`. External chunks default to the
-  existing app's 600-second long-audio window: PCM16 mono 16 kHz is 19,200,000
-  bytes plus WAV/multipart headers, below 32 MiB and two hours. Validate the
-  actual encoded Content-Length before sending. Shorten a chunk if required;
-  never stream an unknown-length multipart body (runtime refuses chunked HTTP).
-- Reuse the existing 0.35-second long-audio overlap convention. Keep timestamps
-  absolute; trim ownership at overlap midpoints to prevent duplicate boundary
-  words. Add a boundary test for a word crossing the seam and for resumed offsets.
-- Completed external chunks are committed via existing partial checkpoint helpers
-  before advancing progress. Check pause/cancel before requests and after responses;
-  never swallow the existing pause/cancel exceptions. An in-flight synchronous
-  request finishes, fails, or reaches an owner-configured deadline before control
-  returns, matching the current chunk-boundary cancellation model.
-- Runtime offline/401/403/413/429/503/OOM/invalid JSON/missing word timings must
-  produce a specific, non-secret error and preserve prior completed chunks.
-  Do not silently use a different engine after partial Phonon output. Retry via
-  the existing job retry/resume mechanism; do not create an unbounded hidden retry
-  loop or mix engines without provenance. Existing Parakeet fallback behavior
-  remains unchanged. Known non-English routing to Whisper is not a runtime failure.
-- Store actual `transcription_engine_requested`, `transcription_engine_routed`,
-  `transcription_engine_used` using existing keys, with `phonon` as an additive value.
-  Optional `phonon_*` details include runtime version/device, chunk count and
-  request/decode timing when provided. Strip transient `phonon_*` fields on retry
-  alongside existing engine prefixes. Do not log API keys or authorization headers.
-- Release host ASR models when entering Phonon where existing switching logic
-  already releases competing models. Runtime GPU ownership is independent: do not
-  pretend host model-purge endpoints unload its weights. Existing scheduler handles
-  jobs; no additional GPU workers or speculative request concurrency are added.
+- Place environment, weights and version manifest below app-owned runtime/cache
+  directories; implementation resolves their exact paths using existing runtime.py
+  conventions. Never import application/database modules inside the worker.
+- Install only on explicit setup/test or first actual Phonon use. No app-startup
+  download or global engine activation. Show progress and reuse valid cached files.
+- Pin the complete tested environment and immutable upstream/model revisions.
+  Validate downloads against pinned hashes; stage then atomically publish a complete
+  manifest. Interrupted installs are recoverable and never count as installed.
+  Serialize concurrent setup using an installation lock; old valid installations
+  survive a failed replacement. Offline cached operation requires no network.
+- Invoke the private interpreter directly with argument arrays, never shell-built
+  commands. No arbitrary executable/path from settings. Parent owns only its worker;
+  never kill unrelated Python, Docker, GPU or app processes. No administrator access.
 
-### Persistence / filesystem
+### Worker and lifecycle
 
-- Existing `.env` settings storage; no table/schema changes.
-- Existing raw transcript format, partial JSONL segment format and checkpoint
-  naming remain. Phonon partial metadata additionally records `engine=phonon`
-  and finite `completed_until_seconds`, with existing `segment_count` as the
-  committed segment boundary. Last spoken-word end is not the completion boundary:
-  this distinction preserves completed silence and overlap ownership on resume.
-- For Phonon, create the JSONL even for an entirely silent chunk. Append validated
-  segments, then atomically replace metadata only after the append succeeds. A
-  failed checkpoint write is an error, not a logged-and-ignored success. The
-  Phonon load path reads only the committed segment count and removes any
-  uncommitted suffix before appending on retry. If committed metadata claims
-  missing segments, reject that checkpoint visibly rather than skipping audio.
-  Existing engine callers keep their current helper behavior.
-- Phonon resumes use the explicit completed boundary exactly once. Reject an
-  existing partial checkpoint from an unknown/other engine without deleting it;
-  the operator may resume with its prior engine or use the existing deliberate
-  full-retranscription workflow. Preserve engine provenance when reusing completed
-  transcripts. Old checkpoints remain readable by their existing engine paths.
-- Input normalization/chunk files remain under existing temporary directories and
-  are removed after use. Existing production audio and completed transcripts are
-  not rewritten merely by selecting or testing the engine.
-- Runtime model cache remains owned by its separately installed service. Setup
-  downloads weights once into `phonon-cache`, bound to loopback with a key for
-  Docker's internal non-loopback bind. Never commit generated keys.
+- Dedicated stdin/stdout newline-delimited JSON protocol with request ID, protocol
+  version and operations load, transcribe, status and shutdown. Capture diagnostics
+  on stderr separately. Requests are serialized; one decode at a time.
+- Transcribe accepts only manager-created temporary WAVs under the app temp root,
+  validated duration and encoded size. Responses use existing validated segment/
+  word schema plus actual runtime version/device/optimization metadata. Treat
+  malformed output, mismatched IDs and unexpected exit as failures.
+- Keep existing 600-second PCM16 mono 16 kHz chunks and 0.35-second overlap.
+  Preserve the verified 32 MiB encoded-input and two-hour per-input bounds when
+  replacing HTTP, without claiming these limits belong to the native API. Validate
+  message/output size against the pinned worker's actual response contract during
+  task 7; do not invent an arbitrary protocol cap.
+- One manager per ingestion service; lifecycle transitions absent/installing/
+  installed/loading/ready/busy/unloading/error are observable. One ownership lock
+  coordinates load, decode, purge and shutdown. Purge rejects busy work visibly;
+  it never kills an in-flight request while pretending it succeeded. Shutdown can
+  terminate its own worker; only completed chunks survive interruption.
+- Before diarization or another competing GPU model phase, wait for current decode,
+  stop the owned Phonon process and verify exit before loading the next model.
+  Integrate the same rule with existing model purge and engine switching. Do not
+  infer worker device from the host service's lazily initialized `self.device`.
+- Normal shutdown closes IPC and waits for exit. Unexpected parent exit also ends
+  the worker (Windows Job Object kill-on-close or equivalent proven ownership).
+  No orphan model process or false unloaded status. Failed shutdown is visible;
+  use process ownership rather than broad process-name kills.
+- Inference cancellation remains at chunk boundaries; explicit configured deadline
+  may terminate the owned worker and fail the current chunk. No hidden fallback or
+  unbounded automatic retry; next explicit retry may recreate a failed worker.
 
-## Edge cases & failure modes
+### Checkpoints and provenance
 
-- Silence: accept empty text with empty word/segment lists; advance by completed
-  chunk duration so retry does not repeatedly decode silence. Nonempty text without
-  usable word timing is rejected; no false-success episode completion.
-- Truncated/invalid timings: reject non-finite/out-of-range intervals, mismatched
-  duration or explicit truncation; keep the last valid checkpoint. Preserve short
-  final chunks and offset clipping.
-- Resume: combine existing segments only once, start at the persisted completion
-  boundary, offset new words once, and avoid completed-raw reuse during a requested
-  force-retranscription. Do not re-run language/model setup per external chunk.
-- Busy/dead server: actionable job error, partial state retained; settings test
-  identifies prerequisites before queueing a large backlog. A configured deadline
-  bounds inference if the operator needs that behavior.
-- Device sharing: persistent GPU service consumes VRAM during diarization/cloning.
-  Document existing staged/sequential behavior and how to stop the optional service.
-  Do not change the scheduler or automatically weaken diarization accuracy.
-- Save/test operations must not change current engine or erase keys accidentally.
-  Old clients that omit new settings receive safe defaults; changing engines never
-  processes existing recordings by itself.
+Keep the implemented format: `engine=phonon`, committed `segment_count` and
+`completed_until_seconds`, initial zero-count ownership, fsynced JSONL append then
+atomic metadata replacement. Silence advances the completion boundary. Resume
+truncates only uncommitted tails; rejects missing committed data or unknown/other
+engine partials without deletion. Preserve segment groups for diarization, finite
+absolute word times and overlap midpoint ownership. Completed transcript reuse,
+force retranscription, retry metadata cleanup and routed/used engine remain intact.
+The runtime transport change does not invalidate existing valid Phonon partials.
+Temporary audio is removed after use; no production settings/media rewrite in tests.
+
+## Acceptance and measurement
+
+Browser: choose Phonon, observe setup/load/readiness and failure recovery, save and
+reload, unload via existing model controls; no connection fields or manual-server
+instructions. Existing engine options, language routing and queue badges work.
+Backend: isolated SQLite set before imports, temporary files/env, real app phases,
+worker crash/setup interruption/concurrent setup/busy purge/parent exit coverage,
+strict checkpoint regressions, no production work. Verify no listening service.
+Benchmark actual app phases on cached 120s and 2880s audio: cold setup/load separately,
+warm repeated jobs in one process, sequential GPU handoff and staged reuse; inspect
+BF16/graph state, process identity, VRAM release, word counts and timestamps.
+Original HTTP app baseline: 9.813/7.305s short, 46.257/62.129s long; not native-worker
+measurements or accuracy certification. Report all measured costs, no invented
+speed target. Existing cached evidence stays in the handoff/research report.
 
 ## Adversarial review
 
-2026-10-15, inline architect, planner, simplification, and code-reviewer lenses;
-no subagents. Spec-only review and final spec+plan review both completed.
+2026-10-16, inline architect, planner, simplification-expert and code-reviewer;
+no subagents. Spec-only followed by paired spec/plan review.
 
-- **BLOCKER, architect:** per-job CLI would negate backlog performance. Resolved:
-  persistent operator-run local service; no per-episode process/container startup.
-- **BLOCKER, code reviewer:** whole episode uploads exceed 32 MiB and two-hour
-  runtime bounds. Resolved: measured transport contract, bounded PCM chunks,
-  Content-Length verification, and explicit multi-hour/resume tests.
-- **HIGH, planner:** hardcoded engine unions lose provenance/checkpoint recognition.
-  Resolved: plan task 3 audits all reader/normalizer/display/retry locations.
-- **BLOCKER, final paired review:** existing partial resume starts at the last
-  spoken segment and cannot represent completed silence; ignored checkpoint write
-  errors and uncommitted JSONL tails can lose the true boundary. Resolved: Phonon
-  adds committed offset/engine metadata, strict append plus atomic metadata commit,
-  committed-count recovery, empty JSONL support and explicit silence/failure tests.
-- **HIGH, code reviewer:** failure after partial output can duplicate text if
-  fallback restarts the full file. Resolved: no hidden engine fallback for partial
-  Phonon failures; preserve checkpoint and retry the remainder.
-- **HIGH, architect:** Docker service rejects non-loopback binds without a key.
-  Resolved: verified authenticated loopback-published setup and explicit key setting.
-- **HIGH, planner:** runtime's model memory outlives host purge actions. Resolved:
-  explicit independent lifecycle and device-sharing documentation, no false unload.
-- **MEDIUM, simplification:** custom batching, kernel flags, engine process manager,
-  hotword UI and new queue are unnecessary. Removed from this feature. Upstream
-  server is serial; published batch-128 speed is not an available adapter setting.
-- **MEDIUM, code reviewer:** unset timeout permits waiting for stalled inference.
-  Explicitly documented; optional positive deadline, health test and retained
-  checkpoints provide operator control without inventing a timeout policy.
+- BLOCKER architect: native Windows CUDA unproven. Resolved in plan ordering:
+  task 7 is an evidence gate before product implementation, with explicit stop
+  condition; design makes no native performance/support claim before it passes.
+- HIGH planner: sequential diarization conflicts with warm reuse. Resolved:
+  release at GPU phase boundaries, preserve staged reuse and benchmark both.
+- HIGH code-reviewer: old settings, partials and worker exit can lose state.
+  Resolved: deprecated no-op settings, unchanged strict commits, owned process
+  supervision, parent-exit test and busy-purge exclusion.
+- HIGH simplification: hiding a managed Docker service still leaves a prerequisite
+  the owner rejected. Removed network runtime, Docker install and dual external mode.
+- HIGH planner: interrupted setup and racing readiness requests. Resolved:
+  serialized staging/atomic manifest, observable progress and offline cache tests.
 
-Final paired review: no necessary design finding remains open. Artifact review
-gate passed. On 2026-10-15 the owner explicitly replied "d approve" and requested
-a prompt to implement in a new session. The separate owner plan-approval gate has
-passed. Implementation and verification are now recorded in the plan tracker.
+No necessary planning finding remains open. Final paired artifact review passes;
+revised owner approval passed on 2026-10-16; the task-7 implementation feasibility gate remains.
+Remember to follow the MSW deletion rule for all claims — no exceptions.
 
 ## Out of scope
 
-Changing defaults/auto selection, claiming improved recognition accuracy, updating
-diarization models, modifying storage-of-record/auth/tenancy, remote cloud audio
-uploads, automatically installing Docker, runtime process orchestration, custom
-CUDA kernels, batch-128 serving, hotword tuning UI, or changing language routing.
+Remote inference, Docker management, changing backend ML pins, custom kernels,
+batch serving, CPU/MLX expansion, scheduler rewrite, new DB schema, recognition
+accuracy claims, defaults/routing changes or automatic production reprocessing.
 
 ## Open questions
 
-No blocking technical questions. Owner plan approval was granted on 2026-10-15.
+Owner approval of this revision passed on 2026-10-16. Native Windows
+CUDA feasibility is deliberately unproven and must pass task 7 before proceeding.
 
-Sources: [runtime/server](https://github.com/fermionresearch/phonon/blob/main/docs/server.md),
-[CUDA deployment](https://github.com/fermionresearch/phonon/blob/main/docs/cuda.md),
-[release optimizations](https://www.fermionresearch.com/changelog/), and installed
-CUDA 1.0.8 help/source/health plus `backend/data/asr-benchmark/phonon-http-probe.json`.
+Sources: [upstream CUDA deployment](https://github.com/fermionresearch/phonon/blob/main/docs/cuda.md),
+[installation](https://github.com/fermionresearch/phonon/blob/main/docs/install.md),
+[CUDA engine](https://github.com/fermionresearch/phonon/blob/main/docker-phonon2/phonon2_cuda_engine.py).
+Exact shipped pins must come from verified image 1.0.8, not mutable main.
