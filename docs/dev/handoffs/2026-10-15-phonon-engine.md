@@ -16,12 +16,13 @@ and must not be requested again as though the old plan were unapproved.
 
 Tracker tasks 1–6 remain completed; tasks 7–13 are the proposed revision. Task 7
 must prove native Windows CUDA using exact verified upstream 1.0.8 source and
-cached weights before downstream product work. No native CUDA feasibility run
-has occurred. Native support is not promised; failure requires owner decision,
-not a silent CPU or Docker substitute. Current installed code is still HTTP mode.
+cached weights before downstream product work. Task 7 native CUDA feasibility passed on 2026-10-16 with unmodified upstream
+source, BF16/K16/six buckets, valid repeated inference and actual child exit.
+Evidence and reproducible command are in the research report. Future gate failure requires owner decision,
+not a silent CPU or Docker substitute. Current installed code is still HTTP mode. Tracker is now 7/13 complete.
 
-Next action: commit the approved planning checkpoint through gates and execute
-task 7. No product implementation changes,
+Planning checkpoint committed as 02a8360. Next action: implement task 8, the
+private optional installer/cache, then task 9 owned IPC worker. No product implementation changes,
 production settings writes or media reprocessing occurred during this revision.
 Historical status/next-step sections below describe the prior completed delivery
 and are superseded by this current revision. Cached artifacts and verification

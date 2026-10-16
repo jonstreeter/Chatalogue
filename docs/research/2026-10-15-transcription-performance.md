@@ -174,3 +174,60 @@ and `--phonon-env <ignored key file>` using `scripts/benchmark_asr.py app`; the
 runner records health, actual provenance and timestamp checks and refuses
 overwrites. CPU/MLX throughput and WER were not measured. No batch-128 throughput
 is claimed. Setup and operation: [optional Phonon engine](../phonon-engine.md).
+
+
+## Native Windows CUDA feasibility — 2026-10-16
+
+Approved integration revision task 7: PASS. The unmodified inference sources
+copied from verified CUDA 1.0.8 image digest
+`c37e7b0ae99f6a74a2618ecae3fe9cbbc342c1069e02464eadba9c42d19802d5`
+ran natively on Windows / RTX 5090 without a container/server or custom kernels.
+The probe used a disposable Python 3.11.6 venv with private Transformers 5.17.0,
+NumPy 2.4.6, huggingface-hub 1.33.0, soundfile 0.14.0 and existing PyTorch
+2.11.0+cu128 made visible through a probe-only .pth file. This differs from the
+Linux image's PyTorch 2.9.1+cu128/NumPy 2.3.4. Product installation must install
+its own pinned environment; the probe's shared-package mechanism is not shipped.
+The backend Transformers remained 4.57.1, unchanged.
+
+First probe: cold constructor 129.466s (upstream model expansion 39.0s, warmup
+12.0s; constructor also includes first dependency import). Two decodes of the
+same 120-second source: 2.504s / 4.100s, identical text hashes, 383 words and 41
+segments each. Follow-up through the committed benchmark command: constructor
+42.660s, decodes 3.722s / 1.770s, zero structural timestamp issues; reported
+phase wall 50.493s excludes imports before its timer. Neither run establishes
+cold startup as cheap or a consistent app speedup. Host activity was uncontrolled.
+
+Runtime reports dense BF16, K16 graphs, five-second buckets, six warmed buckets,
+GPU mel and energy-gated long audio. PyTorch reports 1,332,585,984 allocated bytes
+and 1,570,766,848 reserved bytes after inference. The first actual CUDA child
+PID 56052 and its venv launcher 55228 exited and were absent from process and
+NVIDIA compute-process queries. The initial parent exit report checked the
+launcher PID, so the actual child was additionally checked explicitly. On this
+Windows WDDM host NVIDIA reports per-process memory as N/A: do not infer a
+measured byte delta from global VRAM under unrelated host activity. Successful
+process exit ends its owned CUDA context; integrated lifecycle tests remain due.
+
+Reproduce from repo root with the probe private interpreter:
+
+```powershell
+backend/data/asr-benchmark/phonon-native-probe/venv/Scripts/python.exe scripts/benchmark_asr.py phonon-native backend/data/asr-benchmark/trespasses-600-720.wav --native-source backend/data/asr-benchmark/phonon-native-probe/upstream --native-model backend/data/asr-benchmark/phonon-native-probe/model --output backend/data/asr-benchmark/phonon-native-probe/native-benchmark-new.json
+```
+
+Source manifest: ignored `phonon-native-probe/source-manifest.json`; full reports
+`native-probe.json`, `native-benchmark.json`; environment snapshot
+`environment-freeze.txt`; notices `LICENSE-upstream` (Apache-2.0) and
+`MODEL-CARD.md` (CC-BY-4.0). These are research artifacts, not an installed model
+runtime. Only inference files needed for the worker will be redistributed with
+notices. Do not package the upstream HTTP/WebSocket server.
+
+Pinned source SHA-256: `phonon2_cuda_engine.py`
+`931d8aaf0b0ed640bd5f818749c3c9f957b213323fe1a2421493a1497ec0f8e0`.
+Model revision resolved from the public hub:
+`7e153e4054c0a10db6d47d6fff5c062d4c77c154`.
+Verified model SHA-256: `model.fermion`
+`4b6bfa3a12cc3c4e0a54f2ab3ec4ca7a842b09e5c7ecfc8e7ca0ac6cc8c11468`;
+`config.json` `d0daad3b2a182893844f4abdc11e4f5b7083f7d42c8ad7e8203f71559785a31b`;
+`packed_manifest.json` `3c1874501a1efb6ef569eab082aa68d91b93ec6e4d2fb00dbef7851edf2ae510`.
+
+This proves native optimized inference feasibility, not completed app integration,
+long-audio app behavior, recognition accuracy, or supported CPU/MLX operation.

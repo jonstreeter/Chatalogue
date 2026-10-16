@@ -137,6 +137,36 @@ def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint
         return result, words
 
 
+def benchmark_native_phonon(audio, source_dir, model_dir):
+    """Run with a private interpreter; never import the application or its DB."""
+    import importlib.metadata as metadata
+    import soundfile as sf
+    import torch
+
+    sys.path.insert(0, str(source_dir.resolve()))
+    from phonon2_cuda_engine import Transcriber
+
+    samples, rate = sf.read(str(audio), dtype="float32")
+    if rate != 16000 or samples.ndim != 1:
+        raise ValueError("Native probe requires normalized 16 kHz mono audio")
+    started = time.perf_counter()
+    model = Transcriber("phonon-2", model_dir.resolve())
+    report = {"pid": os.getpid(), "load_seconds": time.perf_counter() - started,
+              "runtime": model.describe(), "runs": [],
+              "packages": {name: metadata.version(name) for name in
+                           ("torch", "transformers", "numpy", "huggingface-hub", "soundfile")}}
+    for label in ("first", "repeat"):
+        started = time.perf_counter()
+        text, segments, words = model.transcribe_long_timed(samples)
+        torch.cuda.synchronize()
+        report["runs"].append({"label": label, "seconds": time.perf_counter() - started,
+                               "text": text, "segments": segments, "words": words,
+                               "timestamp_review": timestamp_review(words, len(samples) / rate)})
+    report["allocated_bytes"] = torch.cuda.memory_allocated()
+    report["reserved_bytes"] = torch.cuda.memory_reserved()
+    return report, words
+
+
 def timestamp_review(words, duration):
     """Structural checks only: accurate alignment requires listening to audio."""
     issues = []
@@ -158,10 +188,12 @@ def timestamp_review(words, duration):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("engine", choices=["app", "phonon"])
+    parser.add_argument("engine", choices=["app", "phonon", "phonon-native"])
     parser.add_argument("audio", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--engine-audio", help="Audio path inside a container")
+    parser.add_argument("--native-source", type=Path, help="Pinned extracted upstream CUDA source directory")
+    parser.add_argument("--native-model", type=Path, help="Verified Phonon-2 model directory")
     parser.add_argument("--phonon-cli", choices=["fermion", "cuda"], default="fermion")
     parser.add_argument("--setup-only", action="store_true", help="Validate app isolation without loading models")
     parser.add_argument("--parakeet-checkpoint", type=Path, help="Local checkpoint for app's configured Parakeet model")
@@ -177,6 +209,8 @@ def main():
         parser.error("output exists; choose a new path to preserve prior results")
     if args.engine == "phonon" and not args.command:
         parser.error("phonon requires --command pointing to its isolated runtime")
+    if args.engine == "phonon-native" and not (args.native_source and args.native_model):
+        parser.error("phonon-native requires --native-source and --native-model in a private environment")
     if args.phonon_repetitions < 1 or (args.phonon_repetitions != 1 and args.phonon_cli != "cuda"):
         parser.error("repetitions must be positive; multiple inputs require CUDA CLI")
     import soundfile as sf
@@ -190,6 +224,9 @@ def main():
     if args.engine == "app":
         report["application"], words = benchmark_application(
             args.audio, duration, args.setup_only, args.parakeet_checkpoint, args.app_engine, args.phonon_env)
+        report["process_wall_seconds"] = time.perf_counter() - begin
+    elif args.engine == "phonon-native":
+        report["native"], words = benchmark_native_phonon(args.audio, args.native_source, args.native_model)
         report["process_wall_seconds"] = time.perf_counter() - begin
     elif args.engine == "phonon":
         model_args = ["--model", "phonon-2"] if args.phonon_cli == "cuda" else ["phonon-2"]
