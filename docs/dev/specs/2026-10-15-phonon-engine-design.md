@@ -84,6 +84,12 @@ Settings: Phonon-2 -> setup/load/test through existing engine-test operation
   use existing progress facilities where available rather than inventing a job queue.
   Inspect route timeout behavior before implementation and return observable setup
   state if setup outlives the request. A reconnect must not start duplicate installs.
+- `phonon_action` on the existing engine-test request is `status`, `load` or
+  `unload` (default `load`). Status is read-only. Load/test returns observable
+  asynchronous state; explicit unload refuses busy work. Internal GPU handoff
+  waits for the current operation. CPU-only installation does not block other
+  engines; before GPU loading, recheck active pipeline work and release idle host
+  models. A refused test preserves an already healthy owned worker.
 - Old `phonon_url` and `phonon_api_key` inputs remain accepted as deprecated no-ops
   during compatibility transition. Do not connect to them or erase stored values.
   Responses never reveal saved keys; new UI does not read or display these fields.

@@ -393,6 +393,30 @@ def test_explicit_test_runs_inference_on_existing_model(owned_runtime):
     assert tested["request_count"] == before["request_count"] + 1
 
 
+def test_busy_preload_check_preserves_healthy_worker(owned_runtime):
+    manager, _ = owned_runtime
+    before = manager.load()["runtime"]["pid"]
+
+    def busy():
+        raise runtime.PhononBusyError("pipeline active")
+
+    with pytest.raises(runtime.PhononBusyError):
+        manager.load(test_existing=True, before_load=busy)
+    assert manager.status()["model_loaded"] and manager.status()["process_running"]
+    assert manager.status()["runtime"]["pid"] == before
+    assert manager.load(test_existing=True)["state"] == "ready"
+
+
+def test_internal_handoff_waits_for_operation_instead_of_busy_error(owned_runtime):
+    manager, _ = owned_runtime
+    manager.load()
+    manager._operation.acquire()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(manager.unload, wait=True)
+        manager._operation.release()
+        assert future.result()["process_running"] is False
+
+
 @pytest.mark.parametrize("mode", ["wrong-optimization", "invalid-timings"])
 def test_readiness_never_reports_ready_for_failed_validation(owned_runtime, mode):
     manager, behavior = owned_runtime

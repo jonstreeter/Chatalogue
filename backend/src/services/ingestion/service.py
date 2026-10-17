@@ -155,12 +155,15 @@ class IngestionService(
                 self._phonon_runtime = PhononRuntime(runtime.PHONON_RUNTIME_DIR, runtime.TEMP_DIR / "phonon-ipc")
             return self._phonon_runtime
 
-    def _release_phonon_model(self, reason: str = "", job_id: int = None):
+    def _release_phonon_model(self, reason: str = "", job_id: int = None, *, wait=True):
         manager = getattr(self, "_phonon_runtime", None)
         if manager is None:
             return False
-        loaded = manager.status()["model_loaded"]
-        manager.unload()  # Busy is a visible error; do not purge a live decode.
+        state = manager.status()
+        if wait and state.get("state") == "installing" and not state.get("process_running"):
+            return False  # CPU-only setup must not block existing GPU engines.
+        loaded = state["model_loaded"]
+        manager.unload(wait=wait)
         if loaded:
             log(f"Released Phonon worker from GPU memory ({reason}).")
         return loaded
@@ -169,6 +172,37 @@ class IngestionService(
         manager = getattr(self, "_phonon_runtime", None)
         if manager is not None:
             manager.shutdown()
+
+    def _prepare_phonon_test(self):
+        from .phonon_runtime import PhononBusyError
+        # Recheck after a potentially long first install, before releasing host models.
+        if self._has_active_pipeline_gpu_work():
+            raise PhononBusyError("Pipeline work is active; test Phonon when it finishes")
+        self._release_whisper_model("before_phonon_test")
+        self._release_parakeet_model("before_phonon_test")
+        self._release_diarization_models("before_phonon_test")
+
+    def test_phonon_engine(self, action="load"):
+        from .phonon_runtime import PhononRuntimeError
+        manager = self._get_phonon_runtime()
+        error = None
+        try:
+            if action == "load":
+                if self._has_active_pipeline_gpu_work():
+                    raise PhononRuntimeError("Pipeline work is active; test Phonon when it finishes")
+                manager.request_load(before_load=self._prepare_phonon_test)
+            elif action == "unload":
+                manager.unload()
+        except PhononRuntimeError as problem:
+            error = str(problem)
+        state = manager.status()
+        runtime_info = state.get("runtime") or {}
+        status = "ok" if state["state"] == "ready" else "loading" if state["state"] in {"installing", "loading", "busy"} else "idle"
+        if error or state["state"] == "error":
+            status = "error"
+            error = error or state.get("detail")
+        return {**state, "status": status, "requested_engine": "phonon", "resolved_engine": "phonon",
+                "device": runtime_info.get("device"), "error": error}
 
     def get_pipeline_focus_mode(self) -> Literal["transcribe", "diarize"]:
         with self._pipeline_focus_guard:

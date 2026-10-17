@@ -884,7 +884,7 @@ class CudaMemoryMixin:
         and allow Parakeet retries without needing a full machine reboot.
         """
         # Check the owned worker first: a busy purge must not alter competing models.
-        had_phonon = self._release_phonon_model(reason)
+        had_phonon = self._release_phonon_model(reason, wait=False)
         had_whisper = self.whisper_model is not None
         had_parakeet = self.parakeet_model is not None
         had_diar = any([

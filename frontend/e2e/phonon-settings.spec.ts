@@ -4,19 +4,26 @@ test.use({ launchOptions: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
   ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : {} });
 
 // All API requests are intercepted. These tests never contact the installed app.
-test('optional Phonon settings test unsaved credentials and survive save/reload', async ({ page }) => {
+test('managed Phonon setup, progress, unload and save/reload', async ({ page }) => {
   let saved: Record<string, unknown> = { hf_token: '', transcription_engine: 'auto', setup_wizard_completed: true };
-  let probe: Record<string, unknown> = {};
+  let action: Record<string, unknown> = {};
+  let state = 'absent';
   let failure = '';
-  await page.route('http://127.0.0.1:8011/**', async route => {
+  await page.route('**/*', async route => {
     const req = route.request();
-    const path = new URL(req.url()).pathname;
+    const url = new URL(req.url());
+    if (url.origin === 'http://127.0.0.1:5175') return route.continue();
+    const path = url.pathname;
     if (path === '/system/setup-status') return route.fulfill({ json: { setup_completed: true } });
     if (path === '/settings/test-transcription-engine') {
-      probe = req.postDataJSON();
-      return route.fulfill({ json: failure
-        ? { status: 'error', requested_engine: 'phonon', error: failure }
-        : { status: 'ok', requested_engine: 'phonon', resolved_engine: 'phonon', device: 'test CUDA runtime' } });
+      const body = req.postDataJSON();
+      if (body.phonon_action === 'load') { action = body; state = failure ? 'error' : 'installing'; }
+      else if (body.phonon_action === 'unload') state = 'installed';
+      else if (state === 'installing') state = 'ready';
+      return route.fulfill({ json: { status: state === 'ready' ? 'ok' : state === 'error' ? 'error' : 'idle',
+        state, requested_engine: 'phonon', resolved_engine: 'phonon', model_loaded: state === 'ready',
+        process_running: state === 'ready', detail: state === 'installing' ? 'Downloading Phonon' : state === 'ready' ? 'Phonon is loaded and ready' : 'Phonon is unloaded',
+        runtime: state === 'ready' ? { gpu: 'Test NVIDIA GPU', dtype: 'bfloat16' } : {}, error: failure || null } });
     }
     if (path === '/settings') {
       if (req.method() === 'POST') saved = req.postDataJSON();
@@ -27,32 +34,36 @@ test('optional Phonon settings test unsaved credentials and survive save/reload'
   await page.goto('http://127.0.0.1:5175/settings');
   const engine = page.getByRole('combobox', { name: 'Transcription Engine', exact: true });
   await engine.selectOption('phonon');
+  const panel = page.getByRole('region', { name: 'Phonon model' });
+  await expect(page.getByLabel('Local Phonon URL')).toHaveCount(0);
+  await expect(page.getByLabel('Phonon API key')).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Whisper routing options' })).toBeVisible();
-  await page.getByLabel('Local Phonon URL').fill('http://localhost:8010');
-  const key = page.getByLabel('Phonon API key');
-  await expect(key).toHaveAttribute('type', 'password');
-  await key.fill('browser-test-key');
-  await page.getByText('Advanced connection settings', { exact: true }).click();
-  await page.getByLabel('Inference deadline (seconds)').fill('90');
-  await page.getByRole('button', { name: 'Test Selected Engine' }).click();
-  await expect(page.getByText('test CUDA runtime', { exact: false })).toBeVisible();
-  expect(probe.phonon_api_key).toBe('browser-test-key');
-  expect(probe.phonon_url).toBe('http://localhost:8010');
+  const ready = page.waitForResponse(async response => response.url().endsWith('/settings/test-transcription-engine')
+    && response.request().postDataJSON().phonon_action === 'status' && (await response.json()).state === 'ready');
+  await panel.getByRole('button', { name: /^(Set up|Load) and test Phonon$/ }).click();
+  await expect(panel.getByRole('status')).toHaveText('Downloading Phonon');
+  await ready;
+  await expect(panel.getByText('Ready', { exact: true })).toBeVisible();
+  await expect(panel.getByText('Test NVIDIA GPU', { exact: false })).toBeVisible();
+  expect(action.phonon_action).toBe('load');
+  expect(action).not.toHaveProperty('phonon_url');
+  expect(action).not.toHaveProperty('phonon_api_key');
   expect(saved.transcription_engine).toBe('auto');
+  await panel.getByText('Advanced model options', { exact: true }).click();
+  await page.getByLabel('Inference deadline (seconds)').fill('90');
   await page.getByRole('button', { name: 'Save Changes' }).click();
   await expect(page.getByText('Settings saved', { exact: false })).toBeVisible();
   expect(saved.phonon_request_timeout_seconds).toBe(90);
+  expect(saved).not.toHaveProperty('phonon_api_key');
   await page.reload();
   await expect(engine).toHaveValue('phonon');
-  await expect(page.getByLabel('Local Phonon URL')).toHaveValue('http://localhost:8010');
-  await expect(key).toHaveValue('browser-test-key');
-  failure = 'Phonon authentication failed (HTTP 401)';
-  await page.getByRole('button', { name: 'Test Selected Engine' }).click();
-  await expect(page.getByText('Phonon authentication failed (HTTP 401)')).toBeVisible();
-  failure = 'Phonon runtime is unreachable';
-  await page.getByRole('button', { name: 'Test Selected Engine' }).click();
-  await expect(page.getByText('Phonon runtime is unreachable', { exact: true })).toBeVisible();
+  await expect(panel.getByText('Ready', { exact: true })).toBeVisible();
   await page.screenshot({ path: 'test-results/phonon-settings.png', fullPage: true });
+  await panel.getByRole('button', { name: 'Unload Phonon model' }).click();
+  await expect(panel.getByText('Unloaded', { exact: true })).toBeVisible();
+  failure = 'Phonon model download interrupted or offline; reconnect and retry setup';
+  await panel.getByRole('button', { name: /^(Set up|Load) and test Phonon$/ }).click();
+  await expect(panel.getByRole('alert')).toHaveText(failure);
   for (const value of ['auto', 'parakeet', 'whisper']) {
     await engine.selectOption(value);
     await expect(engine).toHaveValue(value);
@@ -60,8 +71,10 @@ test('optional Phonon settings test unsaved credentials and survive save/reload'
 });
 
 test('queue displays actual Phonon and routed Whisper provenance', async ({ page }) => {
-  await page.route('http://127.0.0.1:8011/**', async route => {
-    const path = new URL(route.request().url()).pathname;
+  await page.route('**/*', async route => {
+    const url = new URL(route.request().url());
+    if (url.origin === 'http://127.0.0.1:5175') return route.continue();
+    const path = url.pathname;
     if (path === '/system/setup-status') return route.fulfill({ json: { setup_completed: true } });
     if (path.includes('worker')) return route.fulfill({ json: { status: 'online' } });
     if (path === '/jobs') return route.fulfill({ json: [

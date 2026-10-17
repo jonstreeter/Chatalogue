@@ -1,4 +1,4 @@
-"""Optional local-runtime transport and checkpoint regression tests."""
+"""Managed Phonon adapter, settings and checkpoint regression tests."""
 import httpx
 import pytest
 import os
@@ -6,43 +6,7 @@ import os
 os.environ.setdefault("DB_PROVIDER", "sqlite")
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 
-from src.services.ingestion.phonon import PhononClient, PhononError, validate_url, validate_result, wav_bytes
-
-
-@pytest.mark.parametrize("url", ["https://example.com", "http://127.0.0.1@evil.test", "http://127.0.0.1/?key=secret", "file:///x", "http://0.0.0.0", "http://localhost/#secret"])
-def test_remote_urls_refused(url):
-    with pytest.raises(ValueError):
-        validate_url(url)
-
-
-@pytest.mark.parametrize("url", ["http://127.0.0.1:8010", "http://localhost:8010", "http://[::1]:8010"])
-def test_loopback_urls(url):
-    assert validate_url(url) == url
-
-
-def test_auth_bounded_multipart_and_reuse():
-    seen = []
-
-    def server(req):
-        seen.append(req)
-        assert req.headers["authorization"] == "Bearer secret"
-        assert int(req.headers["content-length"]) == len(req.read()) < 32 * 1024 * 1024
-        assert b'phonon-2' in req.content and b'timestamp_granularities[]' in req.content
-        return httpx.Response(200, json={"duration": 1, "text": "hi", "words": [{"text": "hi", "start": 0, "end": .5}]})
-
-    with PhononClient(api_key="secret", transport=httpx.MockTransport(server)) as client:
-        for _ in range(2):
-            words, _ = client.transcribe(wav_bytes(bytes(32000)), 1)
-            assert words == [{"word": "hi", "start": 0., "end": .5}]
-    assert len(seen) == 2
-
-
-@pytest.mark.parametrize("status", [302, 401, 403, 413, 429, 500, 503])
-def test_http_errors_never_leak_body_or_key(status):
-    with PhononClient(api_key="secret", transport=httpx.MockTransport(lambda r: httpx.Response(status, text="secret"))) as client:
-        with pytest.raises(PhononError) as error:
-            client.transcribe(b"wav", 1)
-    assert "secret" not in str(error.value)
+from src.services.ingestion.phonon import PhononError, validate_result, wav_bytes
 
 
 @pytest.mark.parametrize("data", [
@@ -58,55 +22,6 @@ def test_invalid_responses(data):
 
 def test_silence_is_valid():
     assert validate_result({"text": "", "words": [], "segments": [], "duration": 1}, 1) == []
-
-
-def test_upload_checks_encoded_length_before_sending(monkeypatch):
-    from src.services.ingestion import phonon
-    sent = []
-    monkeypatch.setattr(phonon, "MAX_BODY", 100)
-    with PhononClient(transport=httpx.MockTransport(lambda request: sent.append(request))) as client:
-        with pytest.raises(PhononError, match="multipart"):
-            client.transcribe(b"small", 1.)
-    assert not sent
-
-
-def test_timeout_unreachable_and_invalid_json_are_safe():
-    for response in (httpx.ConnectError("secret"), httpx.ReadTimeout("secret"), httpx.Response(200, text="not-json secret")):
-        def handler(request):
-            if isinstance(response, Exception):
-                raise response
-            return response
-        with PhononClient(transport=httpx.MockTransport(handler)) as client:
-            with pytest.raises(PhononError) as error:
-                client.transcribe(b"wav", 1.)
-        assert "secret" not in str(error.value)
-
-
-def test_readiness_proves_auth_even_when_health_public():
-    calls = []
-
-    def server(req):
-        calls.append(req.method)
-        return httpx.Response(200, json={"model": "phonon-2", "status": "ok"}) if req.method == "GET" else httpx.Response(401)
-
-    with PhononClient(transport=httpx.MockTransport(server)) as client:
-        with pytest.raises(PhononError, match="authentication"):
-            client.readiness()
-    assert calls == ["GET", "POST"]
-
-
-@pytest.mark.parametrize("model,status,expected", [("phonon-1", "ok", "wrong model"), ("phonon-2", "loading", "not ready")])
-def test_readiness_rejects_wrong_model_and_loading(model, status, expected):
-    with PhononClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"status": status, "model": model}))) as client:
-        with pytest.raises(PhononError, match=expected):
-            client.readiness()
-
-
-def test_cpu_runtime_model_identity_and_vendor_metadata():
-    def server(request):
-        return httpx.Response(200, json={"status": "ok", "model": "FermionResearch/Phonon-2", "version": "0.2.11", "device": "cpu"}) if request.method == "GET" else httpx.Response(200, json={"duration": 1, "text": "", "words": [], "x_fermion": {"backend": "cpu"}})
-    with PhononClient(transport=httpx.MockTransport(server)) as client:
-        assert client.readiness()["device"] == "cpu"
 
 
 @pytest.fixture
@@ -168,7 +83,7 @@ def test_purge_releases_worker_without_host_device(isolated_service):
     service = isolated_service
     calls = []
     service._phonon_runtime = SimpleNamespace(status=lambda: {"model_loaded": True},
-        unload=lambda: calls.append("unload"), shutdown=lambda: None)
+        unload=lambda **_: calls.append("unload"), shutdown=lambda: None)
     assert service.device is None
     result = service.purge_loaded_models()
     assert result["purged_phonon"] is True and calls == ["unload"]
@@ -181,13 +96,28 @@ def test_busy_worker_purge_preserves_other_models(isolated_service):
     whisper = service.whisper_model = object()
     parakeet = service.parakeet_model = object()
 
-    def busy():
+    def busy(**_):
         raise PhononRuntimeError("Phonon is busy")
 
     service._phonon_runtime = SimpleNamespace(status=lambda: {"model_loaded": True}, unload=busy, shutdown=lambda: None)
     with pytest.raises(PhononRuntimeError, match="busy"):
         service.purge_loaded_models()
     assert service.whisper_model is whisper and service.parakeet_model is parakeet
+
+
+def test_cpu_only_setup_does_not_block_competing_engine(isolated_service):
+    from types import SimpleNamespace
+    from src.services.ingestion.phonon_runtime import PhononBusyError
+    service = isolated_service
+
+    def busy(**_):
+        raise PhononBusyError("setup busy")
+
+    service._phonon_runtime = SimpleNamespace(status=lambda: {"state": "installing", "model_loaded": False,
+        "process_running": False}, unload=busy, shutdown=lambda: None)
+    assert service._release_phonon_model("before_whisper") is False
+    with pytest.raises(PhononBusyError):
+        service.purge_loaded_models()
 
 
 @pytest.mark.parametrize("retained,host_reserved,expected_purge", [(True, 0, False), (False, 0, True), (True, 16, True)])
@@ -232,7 +162,7 @@ def test_actual_diarization_phase_hands_off_owned_worker(isolated_service, tmp_p
     service = isolated_service
     calls = []
 
-    def unload():
+    def unload(**_):
         calls.append("worker unload reached before diarization model load")
         raise RuntimeError("handoff boundary reached")
 
@@ -438,33 +368,49 @@ def test_multihour_silence_uses_bounded_requests_and_completed_offsets(isolated_
     assert json.loads((tmp_path / "silent_transcript_raw.json").read_text())["transcription_engine_used"] == "phonon"
 
 
-def test_settings_unsaved_probe_and_validation(tmp_path, monkeypatch):
+def test_settings_deprecated_connection_fields_are_noops(isolated_service, tmp_path, monkeypatch):
     from src.routers import settings
     from src.schemas import Settings, TranscriptionEngineTestRequest
+    from types import SimpleNamespace
     path = tmp_path / "scratch.env"
-    path.write_text("")
+    path.write_text("PHONON_API_KEY='saved-key'\nPHONON_URL='http://localhost:8010'\n")
     monkeypatch.setattr(settings, "ENV_PATH", path)
     monkeypatch.setattr(settings, "get_ingestion_service", lambda: None)
-    from types import SimpleNamespace
     monkeypatch.setattr(settings, "_main", lambda: SimpleNamespace(configure_logging=lambda: None))
-    # Isolate every process-local setting update from the rest of the suite.
     monkeypatch.setattr(os, "environ", os.environ.copy())
-    for key in ("PHONON_URL", "PHONON_API_KEY", "PHONON_REQUEST_TIMEOUT_SECONDS"):
-        monkeypatch.setenv(key, "")
-    settings.update_settings(Settings(hf_token="", transcription_engine="phonon", phonon_url="http://localhost:8010",
-        phonon_api_key="test-only-key", phonon_request_timeout_seconds=90))
+    monkeypatch.setenv("PHONON_API_KEY", "saved-key")
+    monkeypatch.setenv("PHONON_URL", "http://localhost:8010")
+    settings.update_settings(Settings(hf_token="", transcription_engine="phonon", phonon_url="https://ignored.invalid",
+        phonon_api_key="ignored-key", phonon_request_timeout_seconds=90))
     saved = settings.get_settings()
-    assert saved.transcription_engine == "phonon" and saved.phonon_api_key == "test-only-key"
+    assert saved.transcription_engine == "phonon" and saved.model_dump()["phonon_api_key"] == ""
     assert saved.phonon_request_timeout_seconds == 90
+    assert os.environ["PHONON_API_KEY"] == "saved-key"
+    assert "saved-key" in path.read_text() and "ignored-key" not in path.read_text()
     settings.update_settings(Settings(hf_token=""))
-    assert settings.get_settings().phonon_api_key == "test-only-key"
     before = path.read_bytes()
-    result = settings.test_transcription_engine(TranscriptionEngineTestRequest(engine="phonon", phonon_url="https://example.com", phonon_api_key="unsaved-secret"))
-    assert result["status"] == "error" and "unsaved-secret" not in str(result)
+    state = {"state": "installed", "detail": "unloaded", "model_loaded": False, "process_running": False, "runtime": {}}
+
+    def request_load(before_load=None):
+        state.update(state="loading", detail="loading")
+
+    manager = SimpleNamespace(status=lambda: dict(state), request_load=request_load,
+        unload=lambda: state.update(state="installed", model_loaded=False, process_running=False), shutdown=lambda: None)
+    monkeypatch.setattr(isolated_service, "_get_phonon_runtime", lambda: manager)
+    monkeypatch.setattr(settings, "get_ingestion_service", lambda: isolated_service)
+    result = settings.test_transcription_engine(TranscriptionEngineTestRequest(engine="phonon", phonon_url="https://ignored.invalid", phonon_api_key="unsaved-secret"))
+    assert result["state"] == "loading" and "unsaved-secret" not in str(result)
+    assert os.environ["TRANSCRIPTION_ENGINE"] == "auto"  # Testing unsaved selection does not activate it.
     assert path.read_bytes() == before
-    with pytest.raises(Exception, match="loopback"):
-        settings.update_settings(Settings(hf_token="", phonon_url="https://example.com"))
-    assert path.read_bytes() == before
+    result = settings.test_transcription_engine(TranscriptionEngineTestRequest(engine="phonon", phonon_action="unload"))
+    assert result["state"] == "installed" and not result["model_loaded"]
+
+
+def test_settings_model_test_refuses_active_pipeline(isolated_service, monkeypatch):
+    monkeypatch.setattr(isolated_service, "_has_active_pipeline_gpu_work", lambda: True)
+    result = isolated_service.test_phonon_engine("load")
+    assert result["status"] == "error" and "active" in result["error"]
+    assert isolated_service._phonon_runtime.status()["process_running"] is False
 
 
 @pytest.mark.parametrize("deadline", [0, -1, float("inf"), float("nan")])

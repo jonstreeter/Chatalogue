@@ -40,6 +40,10 @@ class PhononRuntimeError(RuntimeError):
     """Actionable app error; raw subprocess/download errors stay out of the UI."""
 
 
+class PhononBusyError(PhononRuntimeError):
+    """A model-control request must wait without stopping a healthy worker."""
+
+
 @dataclass(frozen=True)
 class InstalledPhonon:
     directory: Path
@@ -350,7 +354,7 @@ class PhononRuntime:
             raise PhononRuntimeError("Phonon worker returned an invalid process identity")
         self._owned.track_worker(pid)  # Membership checked before the first GPU load.
 
-    def _load_locked(self):
+    def _load_locked(self, before_load=None):
         if self._closing.is_set():
             raise PhononRuntimeError("Phonon runtime is stopping")
         if self._loaded and self._owned and self._owned.process.poll() is None:
@@ -359,6 +363,8 @@ class PhononRuntime:
         self._publish("installing", "Preparing Phonon")
         installed = self.installation.ensure()
         self._publish("loading", "Loading Phonon and warming its CUDA graphs")
+        if before_load:
+            before_load()
         self._spawn(installed)
         runtime = self._exchange("load")["runtime"]
         if (runtime.get("model") != "phonon-2" or runtime.get("device") != "cuda"
@@ -391,18 +397,23 @@ class PhononRuntime:
         self._publish("error", safe)
         return PhononRuntimeError(safe)
 
-    def load(self, *, test_existing=False):
+    def load(self, *, test_existing=False, before_load=None):
         with self._operation:
             try:
-                created = self._load_locked()
+                created = self._load_locked(before_load=before_load)
                 if test_existing and not created:
+                    if before_load:
+                        before_load()
                     self._publish("busy", "Testing Phonon readiness")
                     self._readiness_locked()
                 return self.status()
+            except PhononBusyError as error:
+                self._publish("error", str(error))
+                raise
             except Exception as error:
                 raise self._failure(error) from None
 
-    def request_load(self):
+    def request_load(self, before_load=None):
         with self._state_guard:
             if self._closing.is_set():
                 raise PhononRuntimeError("Phonon runtime is stopping")
@@ -411,11 +422,12 @@ class PhononRuntime:
 
             def run():
                 try:
-                    self.load(test_existing=True)
+                    self.load(test_existing=True, before_load=before_load)
                 except PhononRuntimeError:
                     pass  # Observable error state; the next explicit action may retry.
 
             self._background = threading.Thread(target=run, name="phonon-load", daemon=True)
+            self._state = {"state": "loading", "detail": "Preparing Phonon"}
             self._background.start()
 
     def _transcribe_locked(self, audio, duration, timeout=None):
@@ -453,10 +465,10 @@ class PhononRuntime:
             except Exception as error:
                 raise self._failure(error) from None
 
-    def unload(self):
-        if self._background and self._background.is_alive():
+    def unload(self, *, wait=False):
+        if not wait and self._background and self._background.is_alive():
             raise PhononRuntimeError("Phonon is busy loading; unload after the current operation completes")
-        if not self._operation.acquire(blocking=False):
+        if not self._operation.acquire(blocking=wait):
             raise PhononRuntimeError("Phonon is busy loading or decoding; unload after the current operation completes")
         try:
             self._publish("unloading", "Unloading Phonon")

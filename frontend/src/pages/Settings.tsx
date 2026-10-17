@@ -112,6 +112,18 @@ interface ReconstructionTestResult {
     detail?: string | null;
 }
 
+interface PhononModelStatus {
+    status: string;
+    state: string;
+    detail?: string;
+    error?: string | null;
+    model_loaded: boolean;
+    process_running: boolean;
+    downloaded_bytes?: number;
+    total_bytes?: number;
+    runtime?: { gpu?: string; device?: string; dtype?: string; version?: string };
+}
+
 interface TranscriptionEngineTestResult {
     status: 'ok' | 'error' | string;
     requested_engine: 'auto' | 'whisper' | 'parakeet' | string;
@@ -419,9 +431,9 @@ export function Settings() {
     const [activeTab, setActiveTab] = useState<SettingsTab>('transcription');
     const [token, setToken] = useState('');
     const [transcriptionEngine, setTranscriptionEngine] = useState<TranscriptionEngine>('auto');
-    const [phononUrl, setPhononUrl] = useState('http://127.0.0.1:8010');
-    const [phononApiKey, setPhononApiKey] = useState('');
     const [phononDeadline, setPhononDeadline] = useState('');
+    const [phononModel, setPhononModel] = useState<PhononModelStatus | null>(null);
+    const [phononActionError, setPhononActionError] = useState<string | null>(null);
     const [pipelineExecutionMode, setPipelineExecutionMode] = useState<PipelineExecutionMode>('sequential');
     const [whisperBackend, setWhisperBackend] = useState<WhisperBackend>('faster_whisper');
     const [transcriptionModel, setTranscriptionModel] = useState('medium');
@@ -600,8 +612,6 @@ export function Settings() {
                 const rawEngine = String(res.data.transcription_engine || 'auto').toLowerCase();
                 const engine: TranscriptionEngine = rawEngine === 'whisper' || rawEngine === 'parakeet' || rawEngine === 'phonon' ? rawEngine : 'auto';
                 setTranscriptionEngine(engine);
-                setPhononUrl(res.data.phonon_url ?? 'http://127.0.0.1:8010');
-                setPhononApiKey(res.data.phonon_api_key ?? '');
                 setPhononDeadline(res.data.phonon_request_timeout_seconds == null ? '' : String(res.data.phonon_request_timeout_seconds));
             }
             {
@@ -1444,6 +1454,43 @@ export function Settings() {
         poll();
     };
 
+    // Use the existing settings health polling cadence; status never installs/loads.
+    useEffect(() => {
+        if (transcriptionEngine !== 'phonon' || activeTab !== 'transcription') return;
+        let stopped = false;
+        const refresh = async () => {
+            try {
+                const res = await api.post<PhononModelStatus>('/settings/test-transcription-engine', {
+                    engine: 'phonon', phonon_action: 'status',
+                });
+                if (!stopped) setPhononModel(res.data);
+            } catch (error) {
+                if (!stopped) setPhononModel({ status: 'error', state: 'error', model_loaded: false,
+                    process_running: false, error: getErrorMessage(error) || 'Unable to check Phonon status' });
+            }
+        };
+        void refresh();
+        const timer = window.setInterval(() => { void refresh(); }, 5000);
+        return () => { stopped = true; window.clearInterval(timer); };
+    }, [transcriptionEngine, activeTab]);
+
+    const controlPhonon = async (action: 'load' | 'unload') => {
+        setTestingTranscriptionEngine(true);
+        setPhononActionError(null);
+        try {
+            const res = await api.post<PhononModelStatus>('/settings/test-transcription-engine', {
+                engine: 'phonon', phonon_action: action,
+            });
+            setPhononModel(res.data);
+            if (res.data.status === 'error') setPhononActionError(res.data.error || res.data.detail || 'Phonon action failed');
+        } catch (error) {
+            setPhononActionError(String(getErrorDetail(error) || getErrorMessage(error) || 'Phonon action failed'));
+        } finally {
+            setTestingTranscriptionEngine(false);
+        }
+    };
+    const phononBusy = testingTranscriptionEngine || ['installing', 'loading', 'busy', 'unloading'].includes(phononModel?.state || '');
+
     const testTranscriptionEngine = async () => {
         setTestingTranscriptionEngine(true);
         setTranscriptionEngineTestResult(null);
@@ -1451,8 +1498,6 @@ export function Settings() {
             const res = await api.post<TranscriptionEngineTestResult>('/settings/test-transcription-engine', {
                 engine: transcriptionEngine,
                 whisper_backend: whisperBackend,
-                phonon_url: phononUrl,
-                phonon_api_key: phononApiKey,
             });
             setTranscriptionEngineTestResult(res.data);
         } catch (e) {
@@ -1475,8 +1520,6 @@ export function Settings() {
             await api.post('/settings', {
                 hf_token: token,
                 transcription_engine: transcriptionEngine,
-                phonon_url: phononUrl,
-                phonon_api_key: phononApiKey,
                 phonon_request_timeout_seconds: phononDeadline === '' ? null : Number(phononDeadline),
                 pipeline_execution_mode: pipelineExecutionMode,
                 whisper_backend: whisperBackend,
@@ -1669,7 +1712,7 @@ export function Settings() {
                                                             <option value="auto">Auto (prefer Parakeet when available, fallback to Whisper)</option>
                                                             <option value="parakeet">NVIDIA Parakeet first (fallback to Whisper)</option>
                                                             <option value="whisper">Whisper only</option>
-                                                            <option value="phonon">Phonon-2 (optional local service, English)</option>
+                                                            <option value="phonon">Phonon-2 (English)</option>
                                                         </select>
                                                         <p className="mt-2 text-xs text-slate-500">
                                                             Auto keeps cross-platform behavior: Parakeet is used when supported on host/runtime, otherwise Whisper runs automatically.
@@ -1765,21 +1808,35 @@ export function Settings() {
                                                     </div>
 
                                                     {transcriptionEngine === 'phonon' && (
-                                                        <div className="rounded-lg border border-slate-200 p-4 space-y-3">
-                                                            <p className="text-sm text-slate-600">Run a persistent local Phonon-2 service before selecting this engine. English only; enabled language routing still uses Whisper for other languages. Setup: docs/phonon-engine.md in your installation.</p>
-                                                            <label className="block text-sm">Local Phonon URL
-                                                                <input className="block w-full border rounded p-2" value={phononUrl} onChange={e => { setPhononUrl(e.target.value); setTranscriptionEngineTestResult(null); }} />
-                                                            </label>
-                                                            <label className="block text-sm">Phonon API key
-                                                                <input type="password" autoComplete="off" className="block w-full border rounded p-2" value={phononApiKey} onChange={e => { setPhononApiKey(e.target.value); setTranscriptionEngineTestResult(null); }} />
-                                                            </label>
-                                                            <details><summary className="cursor-pointer text-sm">Advanced connection settings</summary>
+                                                        <section aria-label="Phonon model" className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
+                                                            <div className="flex items-center justify-between gap-3">
+                                                                <h4 className="font-semibold text-slate-800">Phonon-2</h4>
+                                                                <span className="text-sm font-medium text-slate-700">{phononModel?.state === 'ready' ? 'Ready' : phononModel?.state === 'installed' ? 'Unloaded' : phononModel?.state === 'absent' ? 'Not installed' : phononModel?.state || 'Checking model'}</span>
+                                                            </div>
+                                                            <p className="text-sm text-slate-600">Chatalogue downloads and manages Phonon-2 locally. English only; enabled language routing still uses Whisper for other languages.</p>
+                                                            <p role="status" className="text-sm text-slate-700">{phononModel?.detail || 'Checking model availability…'}</p>
+                                                            {phononModel?.runtime?.gpu && <p className="text-xs text-slate-500">{phononModel.runtime.gpu}{phononModel.runtime.dtype ? ` · ${phononModel.runtime.dtype.toUpperCase()}` : ''}</p>}
+                                                            {phononModel?.total_bytes && (
+                                                                <div>
+                                                                    <progress aria-label="Phonon download progress" className="w-full" max={phononModel.total_bytes} value={phononModel.downloaded_bytes || 0} />
+                                                                    <p className="text-xs text-slate-500">{((phononModel.downloaded_bytes || 0) / (1024 * 1024)).toFixed(1)} / {(phononModel.total_bytes / (1024 * 1024)).toFixed(1)} MiB</p>
+                                                                </div>
+                                                            )}
+                                                            {(phononActionError || phononModel?.error) && <p role="alert" className="text-sm text-red-700">{phononActionError || phononModel?.error}</p>}
+                                                            <div className="flex flex-wrap gap-2">
+                                                                <button type="button" onClick={() => { void controlPhonon('load'); }} disabled={phononBusy} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm text-white disabled:opacity-60">
+                                                                    {phononBusy && <Loader2 size={14} className="animate-spin" />}
+                                                                    {phononModel?.model_loaded ? 'Test Phonon model' : phononModel?.state === 'installed' ? 'Load and test Phonon' : 'Set up and test Phonon'}
+                                                                </button>
+                                                                <button type="button" onClick={() => { void controlPhonon('unload'); }} disabled={phononBusy || !phononModel?.process_running} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-60">Unload Phonon model</button>
+                                                            </div>
+                                                            <p className="text-xs text-slate-500">Loading keeps the model warm for transcription. Unloading releases GPU memory and keeps the downloaded files.</p>
+                                                            <details><summary className="cursor-pointer text-sm">Advanced model options</summary>
                                                                 <label className="block text-sm mt-2">Inference deadline (seconds)
                                                                     <input type="number" step="any" className="block w-full border rounded p-2" value={phononDeadline} onChange={e => setPhononDeadline(e.target.value)} placeholder="Unset: wait for inference" />
                                                                 </label>
                                                             </details>
-                                                            <p className="text-xs text-slate-500">Test connection uses the unsaved URL/key and a one-second silence request. The service keeps its own GPU memory until stopped; app model purge does not unload it.</p>
-                                                        </div>
+                                                        </section>
                                                     )}
                                                     {transcriptionEngine === 'parakeet' && (
                                                         <div className="rounded-lg border border-indigo-100 bg-indigo-50/40 p-3 space-y-3">
@@ -1959,7 +2016,7 @@ export function Settings() {
                                                         </div>
                                                     )}
 
-                                                    <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                                                    <div hidden={transcriptionEngine === 'phonon'} className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
                                                         <div className="flex items-center justify-between">
                                                             <h4 className="text-sm font-medium text-slate-800">Transcription Engine Test</h4>
                                                             <button
@@ -2011,7 +2068,7 @@ export function Settings() {
                                                                             ? ` (requested ${transcriptionEngineTestResult.parakeet_batch_size_requested})`
                                                                             : ''}
                                                                         {typeof transcriptionEngineTestResult.parakeet_batch_auto === 'boolean'
-                                                                            ? ` • auto ${transcriptionEngineTestResult.parakeet_batch_auto ? 'on' : 'off'}`
+                                                                            ? ` â€¢ auto ${transcriptionEngineTestResult.parakeet_batch_auto ? 'on' : 'off'}`
                                                                             : ''}
                                                                     </div>
                                                                 )}
@@ -2019,7 +2076,7 @@ export function Settings() {
                                                                     <div className="mt-1 text-xs">
                                                                         CUDA mem: {transcriptionEngineTestResult.cuda_memory.free_gb ?? '?'}GB free / {transcriptionEngineTestResult.cuda_memory.total_gb ?? '?'}GB total
                                                                         {typeof transcriptionEngineTestResult.cuda_memory.reserved_gb === 'number'
-                                                                            ? ` • reserved ${transcriptionEngineTestResult.cuda_memory.reserved_gb}GB`
+                                                                            ? ` â€¢ reserved ${transcriptionEngineTestResult.cuda_memory.reserved_gb}GB`
                                                                             : ''}
                                                                     </div>
                                                                 )}
@@ -2048,7 +2105,7 @@ export function Settings() {
                                                     <Zap className="w-5 h-5 text-amber-500" />
                                                     <h3 className="font-semibold text-slate-800">{transcriptionEngine === 'phonon' ? 'Whisper routing options' : 'Speed Optimization'}</h3>
                                                 </div>
-                                                {transcriptionEngine === 'phonon' && <p className="text-sm text-slate-600 mb-4">These controls apply only when language routing selects Whisper. They do not tune Phonon; its persistent service uses upstream decoding defaults and serial GPU requests.</p>}
+                                                {transcriptionEngine === 'phonon' && <p className="text-sm text-slate-600 mb-4">These controls apply only when language routing selects Whisper. They do not tune Phonon; its managed model uses upstream decoding defaults and serial GPU requests.</p>}
 
                                                 <div className="space-y-4">
                                                     <div className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
@@ -2384,8 +2441,8 @@ export function Settings() {
                                                                         {ollamaSelectableModels.map(model => (
                                                                             <option key={model.name} value={model.name}>
                                                                                 {model.name}
-                                                                                {typeof model.size_bytes === 'number' && model.size_bytes > 0 ? ` • ${formatBytesAsGb(model.size_bytes)}` : ''}
-                                                                                {model.quantization_level ? ` • ${model.quantization_level}` : ''}
+                                                                                {typeof model.size_bytes === 'number' && model.size_bytes > 0 ? ` â€¢ ${formatBytesAsGb(model.size_bytes)}` : ''}
+                                                                                {model.quantization_level ? ` â€¢ ${model.quantization_level}` : ''}
                                                                             </option>
                                                                         ))}
                                                                         {ollamaSelectableModels.length === 0 && (
@@ -2439,7 +2496,7 @@ export function Settings() {
                                                                         >
                                                                             {UNSLOTH_FAMILIES.map(family => (
                                                                                 <option key={family.key} value={family.key}>
-                                                                                    {family.label} • {family.note}
+                                                                                    {family.label} â€¢ {family.note}
                                                                                 </option>
                                                                             ))}
                                                                         </select>
@@ -2452,7 +2509,7 @@ export function Settings() {
                                                                         >
                                                                             {UNSLOTH_QUANTS.map(opt => (
                                                                                 <option key={opt.value} value={opt.value}>
-                                                                                    {opt.label} • ~{estimateUnslothSizeGb(unslothFamily, opt.value).toFixed(1)} GB • {opt.note}
+                                                                                    {opt.label} â€¢ ~{estimateUnslothSizeGb(unslothFamily, opt.value).toFixed(1)} GB â€¢ {opt.note}
                                                                                 </option>
                                                                             ))}
                                                                         </select>
@@ -2564,13 +2621,13 @@ export function Settings() {
                                                                             <div className="text-xs text-slate-600">
                                                                                 <span className="font-medium">Detected GPU:</span>{' '}
                                                                                 {ollamaHardwareRecommendation?.hardware?.gpu_name
-                                                                                    ? `${ollamaHardwareRecommendation.hardware.gpu_name}${ollamaHardwareRecommendation.hardware.gpu_vram_gb ? ` • ${ollamaHardwareRecommendation.hardware.gpu_vram_gb} GB VRAM` : ''}`
+                                                                                    ? `${ollamaHardwareRecommendation.hardware.gpu_name}${ollamaHardwareRecommendation.hardware.gpu_vram_gb ? ` â€¢ ${ollamaHardwareRecommendation.hardware.gpu_vram_gb} GB VRAM` : ''}`
                                                                                     : 'Not detected (CPU-only or unavailable)'}
                                                                             </div>
                                                                             <div className="text-xs text-slate-600">
                                                                                 <span className="font-medium">Recommended model:</span>{' '}
                                                                                 <code className="bg-white border border-slate-200 px-1.5 py-0.5 rounded">
-                                                                                    {ollamaHardwareRecommendation?.recommendation?.model_tag || '—'}
+                                                                                    {ollamaHardwareRecommendation?.recommendation?.model_tag || 'â€”'}
                                                                                 </code>
                                                                             </div>
                                                                             {typeof ollamaHardwareRecommendation?.recommendation?.estimated_size_gb === 'number' && (
@@ -2592,9 +2649,9 @@ export function Settings() {
                                                                             <div className="text-xs text-slate-600">
                                                                                 <span className="font-medium">Tradeoff:</span>{' '}
                                                                                 {(ollamaHardwareRecommendation?.recommendation?.objective || ollamaPreference)}
-                                                                                {' • '}
+                                                                                {' â€¢ '}
                                                                                 <span className="font-medium">GGUF tier:</span>{' '}
-                                                                                {(ollamaHardwareRecommendation?.recommendation?.tier || '—').toUpperCase()}
+                                                                                {(ollamaHardwareRecommendation?.recommendation?.tier || 'â€”').toUpperCase()}
                                                                             </div>
                                                                             {ollamaHardwareRecommendation?.recommendation?.reason && (
                                                                                 <p className="text-[11px] text-slate-500 leading-relaxed">
@@ -2609,7 +2666,7 @@ export function Settings() {
                                                                         <div className="flex items-center justify-between gap-2 text-xs text-blue-800">
                                                                             <span className="font-medium truncate">
                                                                                 {ollamaPullProgress.running ? 'Downloading model' : 'Download complete'}
-                                                                                {ollamaPullProgress.statusText ? ` • ${ollamaPullProgress.statusText}` : ''}
+                                                                                {ollamaPullProgress.statusText ? ` â€¢ ${ollamaPullProgress.statusText}` : ''}
                                                                             </span>
                                                                             <span className="shrink-0">
                                                                                 {typeof ollamaPullProgress.percent === 'number'
@@ -2992,7 +3049,7 @@ export function Settings() {
                                                                     : 'bg-red-50 border-red-200 text-red-800'
                                                                 }`}>
                                                                 {youtubeDataApiTestResult.status === 'ok'
-                                                                    ? `API key works. Sample video: "${youtubeDataApiTestResult.title || youtubeDataApiTestResult.video_id}"${youtubeDataApiTestResult.view_count != null ? ` • ${youtubeDataApiTestResult.view_count.toLocaleString()} views` : ''}`
+                                                                    ? `API key works. Sample video: "${youtubeDataApiTestResult.title || youtubeDataApiTestResult.video_id}"${youtubeDataApiTestResult.view_count != null ? ` â€¢ ${youtubeDataApiTestResult.view_count.toLocaleString()} views` : ''}`
                                                                     : `Error: ${youtubeDataApiTestResult.error || 'Unknown error'}`}
                                                             </div>
                                                         )}
@@ -3002,7 +3059,7 @@ export function Settings() {
                                                         <div className="font-semibold text-slate-700">Setup (Google Cloud)</div>
                                                         <div>1. Create or select a Google Cloud project.</div>
                                                         <div>2. Enable <span className="font-medium">YouTube Data API v3</span>.</div>
-                                                        <div>3. Create an API key in <span className="font-medium">APIs &amp; Services → Credentials</span>.</div>
+                                                        <div>3. Create an API key in <span className="font-medium">APIs &amp; Services â†’ Credentials</span>.</div>
                                                         <div>4. Restrict the key to YouTube Data API v3.</div>
                                                         <div>5. Paste the key above and save settings.</div>
                                                         <div className="pt-1">Quota note: Google documents a default quota of <span className="font-medium">10,000 units/day</span>, and <code className="bg-white px-1 rounded">videos.list</code> costs <span className="font-medium">1 unit</span>.</div>
@@ -3396,7 +3453,7 @@ export function Settings() {
                                                             </div>
 
                                                             <div className="text-[11px] text-slate-500">
-                                                                {dbHealth.database.provider} · {dbHealth.database.database_url}
+                                                                {dbHealth.database.provider} Â· {dbHealth.database.database_url}
                                                             </div>
                                                         </>
                                                     )}
@@ -3950,7 +4007,7 @@ export function Settings() {
                                                                     <div className="text-slate-600 break-all">Diagnostic LAN App URL: {externalShareStatus.frontend_lan_url}</div>
                                                                 )}
                                                                 <div className="text-slate-600">
-                                                                    Password required: {externalShareStatus.password_required ? 'yes' : 'no'} · Allowlist: {externalShareStatus.ip_allowlist.length ? externalShareStatus.ip_allowlist.join(', ') : 'none'}
+                                                                    Password required: {externalShareStatus.password_required ? 'yes' : 'no'} Â· Allowlist: {externalShareStatus.ip_allowlist.length ? externalShareStatus.ip_allowlist.join(', ') : 'none'}
                                                                 </div>
                                                                 <div className="text-[11px] text-slate-500">
                                                                     Audit log: {externalShareStatus.audit_log_path || 'runtime only'}
@@ -3960,7 +4017,7 @@ export function Settings() {
                                                                         {externalShareStatus.audit_entries.slice(0, 10).map((entry, index) => (
                                                                             <div key={`${entry.at}-${index}`} className="border-b border-slate-200 last:border-b-0 px-3 py-2 text-[11px] text-slate-600">
                                                                                 <span className="font-medium text-slate-700">{entry.allowed ? 'ALLOW' : 'DENY'}</span>{' '}
-                                                                                {entry.action} {entry.client_ip ? `· ${entry.client_ip}` : ''} {entry.reason ? `· ${entry.reason}` : ''}<br />
+                                                                                {entry.action} {entry.client_ip ? `Â· ${entry.client_ip}` : ''} {entry.reason ? `Â· ${entry.reason}` : ''}<br />
                                                                                 <span className="text-slate-500">{new Date(entry.at).toLocaleString()}</span>
                                                                             </div>
                                                                         ))}

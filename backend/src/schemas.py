@@ -1147,8 +1147,8 @@ class PipelineFocusUpdate(BaseModel):
 class Settings(BaseModel):
     hf_token: str
     transcription_engine: str = "auto"  # auto | whisper | parakeet | phonon
-    phonon_url: str = "http://127.0.0.1:8010"
-    phonon_api_key: str = ""
+    phonon_url: str = Field(default="http://127.0.0.1:8010", deprecated=True, description="Compatibility only; ignored by the app-owned engine")
+    phonon_api_key: str = Field(default="", deprecated=True, description="Compatibility only; ignored and never returned")
     phonon_request_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     pipeline_execution_mode: Literal["sequential", "staged"] = "sequential"
     whisper_backend: str = "faster_whisper"
@@ -1221,8 +1221,9 @@ class OllamaPullRequest(BaseModel):
 class TranscriptionEngineTestRequest(BaseModel):
     engine: Optional[str] = None
     whisper_backend: Optional[str] = None
-    phonon_url: Optional[str] = None
-    phonon_api_key: Optional[str] = None
+    phonon_url: Optional[str] = Field(default=None, deprecated=True, description="Ignored; Phonon is managed locally")
+    phonon_api_key: Optional[str] = Field(default=None, deprecated=True, description="Ignored; Phonon is managed locally")
+    phonon_action: Literal["status", "load", "unload"] = "load"
 
 
 class YouTubeDataApiTestRequest(BaseModel):

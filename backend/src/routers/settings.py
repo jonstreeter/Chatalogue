@@ -143,7 +143,7 @@ def get_settings():
         hf_token=os.getenv("HF_TOKEN") or "",
         transcription_engine=(os.getenv("TRANSCRIPTION_ENGINE") or "auto"),
         phonon_url=os.getenv("PHONON_URL", "http://127.0.0.1:8010"),
-        phonon_api_key=os.getenv("PHONON_API_KEY", ""),
+        phonon_api_key="",  # Deprecated connection secrets are never returned or used.
         phonon_request_timeout_seconds=float(os.environ["PHONON_REQUEST_TIMEOUT_SECONDS"]) if os.getenv("PHONON_REQUEST_TIMEOUT_SECONDS") else None,
         pipeline_execution_mode=pipeline_execution_mode,
         whisper_backend=(os.getenv("WHISPER_BACKEND") or "faster_whisper"),
@@ -241,17 +241,10 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
     youtube_redirect_uri = (getattr(settings, "youtube_oauth_redirect_uri", "") or "http://localhost:8000/auth/youtube/callback").strip()
     normalized_ollama_model = ollama_svc._normalize_ollama_model_ref(getattr(settings, "ollama_model", "") or "")
 
-    # Validate the new trust boundary before any persisted settings change.
-    from ..services.ingestion.phonon import validate_url
-    try:
-        validate_url(settings.phonon_url)
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from None
     # 1. Update .env file
     set_key(ENV_PATH, "HF_TOKEN", settings.hf_token)
     # Omitted new fields from older clients must not erase saved credentials.
-    for field, env_key in (("phonon_url", "PHONON_URL"), ("phonon_api_key", "PHONON_API_KEY"),
-                           ("phonon_request_timeout_seconds", "PHONON_REQUEST_TIMEOUT_SECONDS")):
+    for field, env_key in (("phonon_request_timeout_seconds", "PHONON_REQUEST_TIMEOUT_SECONDS"),):
         if field in settings.model_fields_set:
             value = getattr(settings, field)
             encoded = "" if value is None else str(value)
@@ -397,8 +390,9 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
 def test_transcription_engine(request: TranscriptionEngineTestRequest):
     engine = (request.engine or os.getenv("TRANSCRIPTION_ENGINE") or "auto").strip().lower()
     if engine == "phonon":
-        from ..services.ingestion.phonon import test_connection
-        return test_connection(request.phonon_url, request.phonon_api_key)
+        if not get_ingestion_service():
+            raise HTTPException(status_code=503, detail="Ingestion service unavailable")
+        return get_ingestion_service().test_phonon_engine(request.phonon_action)
     if not get_ingestion_service():
         raise HTTPException(status_code=503, detail="Ingestion service unavailable")
     engine = (request.engine or os.getenv("TRANSCRIPTION_ENGINE") or "auto").strip().lower()

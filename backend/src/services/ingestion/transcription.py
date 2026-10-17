@@ -2407,8 +2407,7 @@ class TranscriptionEngineMixin:
 
     def test_transcription_engine(self, requested_engine: str = "auto", whisper_backend_override: str | None = None) -> dict:
         if (requested_engine or "").strip().lower() == "phonon":
-            from .phonon import test_connection
-            return test_connection()
+            return self.test_phonon_engine()
         self._ensure_device()
         req = (requested_engine or "auto").strip().lower()
         if req not in {"auto", "whisper", "parakeet"}:

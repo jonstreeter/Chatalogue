@@ -9,10 +9,10 @@
 
 Owner explicitly approved the revised app-owned integration plan with `d`.
 Planning checkpoint 02a8360; native feasibility 0c5ad07; private installer 5c35ea1.
-Owned-worker checkpoint 3245eae. Tracker: 10/13 complete after the app-phase checkpoint. Do not request another
+Owned-worker checkpoint 3245eae. App-phase checkpoint b8840f4. Tracker: 11/13 complete after the settings checkpoint. Do not request another
 plan approval. No product settings/global engine activation or production media
-processing was performed by these tests. Installed settings UI is still the old
-HTTP form until tasks 10–11 wire the new runtime and replace its controls.
+processing was performed by these tests. The settings source now has app-owned controls; the installed frontend build
+will be refreshed in task 13.
 
 Task 7 proved native Windows CUDA with unmodified verified upstream 1.0.8 source.
 Task 8 installed the standalone hash-pinned environment. The first clean install
@@ -42,14 +42,22 @@ app phases: 44.599s separate startup, 5.780/6.824s per 120s recording, same PID
 18868, correct Phonon provenance and valid clocks. Report:
 `backend/data/asr-benchmark/app-phonon-managed-120s-task10.json`.
 
-Next: task 11 — replace settings connection fields with asynchronous app-owned
-setup/load/test/unload. Remove the obsolete HTTP adapter/probe once its settings
-callers are migrated; keep deprecated URL/key inputs accepted as no-ops without
-erasing stored keys or exposing them in responses. Preserve all strict checkpoints,
-language routing, existing engines and defaults. Run preflight/read authorities;
-use isolated SQLite before app imports and scratch files only. Afterwards task 12
-runs short/long benchmarks and documentation, then task 13 final verification and
-local installation update without global engine activation or media reprocessing.
+Task 11 removed all URL/key controls and obsolete HTTP adapter/probe. The API
+accepts deprecated fields as no-ops, keeps stored keys and never returns them.
+Async model status/setup/load/test/unload is implemented, with post-install GPU
+work recheck and busy-safe model controls. TypeScript and Ruff pass; frontend lint
+has zero errors and 43 existing warnings. Two isolated Chromium regressions pass.
+Live Playwright CLI against a dedicated in-memory SQLite backend/scratch .env
+verified real RTX5090/BFLOAT16 readiness, unload, save and reload. Evidence:
+`backend/data/asr-benchmark/phonon-ui-evidence.json`; screenshot:
+`output/playwright/phonon-ready.png`. The isolated API/browser were stopped.
+The dedicated Vite verification server (5175, node PID 50232) remains running
+until remaining browser verification is finished; do not kill unrelated servers.
+
+Next: task 12 — replace obsolete setup documentation and run short/long actual
+app benchmarks using the verified private cache. Then task 13 final checks and
+local build/cache update. Do not activate the engine globally, reprocess production
+media, invoke broad process-killing launchers, push or deploy without authorization.
 
 Historical status/next-step sections below are superseded by this revision.
 
