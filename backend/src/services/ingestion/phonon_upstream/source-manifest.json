@@ -1,0 +1,22 @@
+{
+  "phonon2_cuda_engine.py": {
+    "bytes": 29414,
+    "sha256": "931d8aaf0b0ed640bd5f818749c3c9f957b213323fe1a2421493a1497ec0f8e0"
+  },
+  "fermion_container.py": {
+    "bytes": 3915,
+    "sha256": "5cf172e8cf6b313e951c4ef588ca913c7285b0aa3b92de413c3d7ec2b939c0e4"
+  },
+  "hotwords.py": {
+    "bytes": 12646,
+    "sha256": "bf60cbc2db643a2a0f4cb10b20c8b8dd0cd659c39fa6756bf85371200c6d974d"
+  },
+  "cues.py": {
+    "bytes": 8709,
+    "sha256": "031ca08e32ca653e68c71112d614a13d1f106c8da76433662ec8371b5dd31132"
+  },
+  "_live.py": {
+    "bytes": 6881,
+    "sha256": "0f66e1812e04464182bd0fc326bac92872bd7c62c228f190d272dbb381f62e00"
+  }
+}

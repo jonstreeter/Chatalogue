@@ -7,37 +7,40 @@
 
 ## Current revision — 2026-10-16
 
-Owner rejected operator-managed connection UX and explicitly chose "Revise spec
-and plan for full integration". Revised existing spec/plan and ADR amendment now
-propose an app-owned private native worker with managed setup/load/reuse/unload,
-no URL/key UI and no Docker prerequisite. Inline paired artifact review passed;
-revised owner implementation approval passed on 2026-10-16 (`d`). Original approval is historical
-and must not be requested again as though the old plan were unapproved.
+Owner explicitly approved the revised app-owned integration plan with `d`.
+Planning checkpoint 02a8360; native feasibility 0c5ad07; private installer 5c35ea1.
+Tracker: 9/13 complete after the owned-worker checkpoint. Do not request another
+plan approval. No product settings/global engine activation or production media
+processing was performed by these tests. Installed settings UI is still the old
+HTTP form until tasks 10–11 wire the new runtime and replace its controls.
 
-Tracker tasks 1–6 remain completed; tasks 7–13 are the proposed revision. Task 7
-must prove native Windows CUDA using exact verified upstream 1.0.8 source and
-cached weights before downstream product work. Task 7 native CUDA feasibility passed on 2026-10-16 with unmodified upstream
-source, BF16/K16/six buckets, valid repeated inference and actual child exit.
-Evidence and reproducible command are in the research report. Future gate failure requires owner decision,
-not a silent CPU or Docker substitute. Current installed code is still HTTP mode. Tracker is now 8/13 complete.
-
-Task 7 checkpoint: 0c5ad07. Task 8 implementation is verified:
-`phonon_runtime.py`, private wheel lock, `test_phonon_runtime.py`, runtime path
-constant and registry mapping. Fifteen installer tests and Ruff pass. Real scratch
-root: `backend/data/asr-benchmark/phonon-owned-install`. First standalone install
-exposed a missing DLL in the generic SoundFile wheel despite passing pip check;
-lock now pins the Windows wheel and publication requires a native-import check.
-The corrected clean install passed pip check, native imports and post-publication
-Python isolation checks; task 8 is complete. Private interpreter path is stored in
+Task 7 proved native Windows CUDA with unmodified verified upstream 1.0.8 source.
+Task 8 installed the standalone hash-pinned environment. The first clean install
+exposed a missing DLL in the generic SoundFile wheel; the lock now pins its
+Windows wheel and publication requires an actual model/DLL import, not just pip
+metadata checks. Current private interpreter path:
 `backend/data/asr-benchmark/phonon-owned-install/installed-path.txt`.
-Never use the backend-sharing probe .pth file in the product environment.
+This is a proper private venv; never use the earlier probe's backend-sharing .pth
+file in the product. Backend Transformers remains 4.57.1.
 
-Planning checkpoint committed as 02a8360. Next action: implement task 8, the
-owned IPC worker (task 9); installer/cache task 8 is complete. No product implementation changes,
-production settings writes or media reprocessing occurred during this revision.
-Historical status/next-step sections below describe the prior completed delivery
-and are superseded by this current revision. Cached artifacts and verification
-below remain useful, but prove the previous runtime only.
+Task 9 owns a private IPC worker in a Windows Job Object, assigning its suspended
+venv launcher before execution and verifying the actual interpreter's membership.
+It serializes GPU requests, reuses warmed weights/graphs, checks protocol and word
+clocks, refuses busy purge and confirms actual interpreter exit on unload. Abrupt
+parent exit, crashes, malformed replies, readiness failure and configured deadline
+cleanup have regression coverage. Twenty-nine focused tests pass. Real private
+GPU requests reused PID 42932, BF16/K16/six buckets, 383 words per 120s request;
+55.729s startup, 4.745/4.691s requests. No end-to-end app performance claim yet.
+Report: `backend/data/asr-benchmark/owned-worker-probe.json`.
+
+Next: task 10 — one manager per ingestion service, managed adapter in the existing
+Phonon phase, GPU handoff/engine switch, model purge and main shutdown. Then task
+11 replaces settings connection fields with asynchronous setup/load/test/unload
+and backward-compatible deprecated no-op URL/key fields. Preserve all strict
+checkpoints, language routing, existing engines and defaults. Run preflight and
+read authorities; use isolated SQLite before app imports and scratch files only.
+
+Historical status/next-step sections below are superseded by this revision.
 
 ## Status
 

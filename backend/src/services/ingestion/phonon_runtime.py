@@ -5,16 +5,21 @@ from dataclasses import dataclass
 import hashlib
 import io
 import json
+import logging
+import math
 import os
 from pathlib import Path
 import platform
+import queue
 import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import urllib.error
 import urllib.request
 import uuid
+import wave
 
 from filelock import FileLock
 
@@ -26,6 +31,9 @@ MODEL_FILES = {
     "packed_manifest.json": (821, "3c1874501a1efb6ef569eab082aa68d91b93ec6e4d2fb00dbef7851edf2ae510"),
 }
 REQUIREMENTS = Path(__file__).with_name("phonon_worker_requirements.txt")
+WORKER = Path(__file__).with_name("phonon_worker.py")
+UPSTREAM = Path(__file__).with_name("phonon_upstream")
+MAX_INPUT_BYTES = 32 * 1024 * 1024  # Retained verified encoded-input bound; no HTTP transport.
 
 
 class PhononRuntimeError(RuntimeError):
@@ -207,3 +215,263 @@ class PhononInstallation:
             safe = str(error) if isinstance(error, PhononRuntimeError) else "Phonon installation failed; check local disk space and retry setup"
             self._set_state("error", safe)
             raise PhononRuntimeError(safe) from None
+
+
+class PhononRuntime:
+    """One app-owned model, serialized inference and observable lazy setup."""
+
+    def __init__(self, root: Path, temp_root: Path):
+        self.installation = PhononInstallation(root)
+        self.temp_root = temp_root.resolve()
+        self._operation = threading.Lock()
+        self._dispose_guard = threading.Lock()
+        self._closing = threading.Event()
+        self._state_guard = threading.Lock()
+        self._state = {"state": "absent", "detail": "Phonon is unloaded"}
+        self._runtime = {}
+        self._owned = None
+        self._reader = None
+        self._replies = None
+        self._log = None
+        self._loaded = False
+        self._background = None
+
+    def _publish(self, state, detail):
+        with self._state_guard:
+            self._state = {"state": state, "detail": detail}
+
+    def status(self):
+        with self._state_guard:
+            state = dict(self._state)
+            runtime = dict(self._runtime)
+        process = self._owned.process if self._owned else None
+        alive = process is not None and process.poll() is None
+        if state["state"] == "absent":
+            state = self.installation.status()
+        elif state["state"] == "installing":
+            setup = self.installation.status()
+            if setup["state"] in {"installing", "error"}:
+                state = setup
+        elif state["state"] in {"ready", "busy"} and not alive:
+            state = {"state": "error", "detail": "Phonon worker exited; retry Load/Test"}
+        return {**state, "model_loaded": self._loaded and alive,
+                "runtime": runtime, "process_running": alive}
+
+    def _dispose(self):
+        with self._dispose_guard:
+            self._dispose_locked()
+
+    def _dispose_locked(self):
+        owned = self._owned
+        if owned:
+            owned.close()  # Verifies actual interpreter exit, including venv descendants.
+            self._owned = None
+        if self._reader:
+            self._reader.join()
+            self._reader = None
+        if self._log:
+            self._log.close()
+            self._log = None
+        self._loaded = False
+        self._runtime = {}
+
+    def _exchange(self, operation, *, timeout=None, **values):
+        request_id = uuid.uuid4().hex
+        message = {"protocol": 1, "id": request_id, "operation": operation, **values}
+        try:
+            self._owned.process.stdin.write(json.dumps(message, allow_nan=False) + "\n")
+            self._owned.process.stdin.flush()
+            reply = self._replies.get(timeout=timeout)
+        except queue.Empty:
+            raise PhononRuntimeError("Phonon inference reached its configured deadline; completed chunks are preserved") from None
+        except (OSError, ValueError):
+            raise PhononRuntimeError("Phonon worker connection failed; retry Load/Test") from None
+        if isinstance(reply, Exception):
+            raise reply
+        if not isinstance(reply, dict) or reply.get("protocol") != 1 or reply.get("id") != request_id:
+            raise PhononRuntimeError("Phonon returned an invalid worker response; completed chunks are preserved")
+        if reply.get("error"):
+            if reply["error"] == "invalid_input":
+                raise PhononRuntimeError("Phonon input must be a valid bounded 16 kHz mono PCM16 WAV")
+            reason = "could not load its model" if reply["error"] == "load_failed" else "could not decode the input"
+            raise PhononRuntimeError(f"Phonon {reason}; check GPU memory and the local worker log, then retry")
+        if not isinstance(reply.get("runtime"), dict):
+            raise PhononRuntimeError("Phonon returned invalid runtime metadata")
+        with self._state_guard:
+            self._runtime = dict(reply["runtime"])
+        return reply
+
+    def _spawn(self, installed):
+        from .phonon_process import OwnedPhononProcess
+        source = UPSTREAM
+        manifest = json.loads((source / "source-manifest.json").read_text(encoding="utf-8"))
+        if set(manifest) != {"phonon2_cuda_engine.py", "fermion_container.py", "hotwords.py", "cues.py", "_live.py"}:
+            raise PhononRuntimeError("Phonon packaged source manifest is incomplete; update the app")
+        for name, entry in manifest.items():
+            if Path(name).name != name or _sha256(source / name) != entry["sha256"]:
+                raise PhononRuntimeError("Phonon packaged inference source is damaged; update the app before retrying")
+        self.temp_root.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"):
+            env.pop(key, None)
+        env.update(PYTHONNOUSERSITE="1", PYTHONUTF8="1", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
+                   PHONON2_CUDA_DTYPE="bfloat16", PHONON2_CUDA_K="16",
+                   PHONON2_CUDA_PAD_S="5", PHONON2_CUDA_WARMUP="all")
+        with self._dispose_guard:
+            if self._closing.is_set():
+                raise PhononRuntimeError("Phonon runtime is stopping")
+            self._log = (self.installation.root / "worker.log").open("ab")
+            self._owned = OwnedPhononProcess(
+                [str(installed.python), "-u", str(WORKER), "--model-dir", str(installed.model),
+                 "--temp-root", str(self.temp_root), "--max-bytes", str(MAX_INPUT_BYTES)],
+                env=env, stderr=self._log,
+            )
+            replies = self._replies = queue.Queue()
+            stream = self._owned.process.stdout
+
+            def receive():
+                try:
+                    for line in stream:
+                        try:
+                            replies.put(json.loads(line))
+                        except (ValueError, TypeError):
+                            replies.put(PhononRuntimeError("Phonon emitted invalid worker data"))
+                            break
+                except (OSError, ValueError, UnicodeError):
+                    pass
+                finally:
+                    replies.put(PhononRuntimeError("Phonon worker exited; completed chunks are preserved"))
+
+            self._reader = threading.Thread(target=receive, name="phonon-output", daemon=True)
+            self._reader.start()
+        identity = self._exchange("status")["runtime"]
+        pid = identity.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            raise PhononRuntimeError("Phonon worker returned an invalid process identity")
+        self._owned.track_worker(pid)  # Membership checked before the first GPU load.
+
+    def _load_locked(self):
+        if self._closing.is_set():
+            raise PhononRuntimeError("Phonon runtime is stopping")
+        if self._loaded and self._owned and self._owned.process.poll() is None:
+            return False
+        self._dispose()
+        self._publish("installing", "Preparing Phonon")
+        installed = self.installation.ensure()
+        self._publish("loading", "Loading Phonon and warming its CUDA graphs")
+        self._spawn(installed)
+        runtime = self._exchange("load")["runtime"]
+        if (runtime.get("model") != "phonon-2" or runtime.get("device") != "cuda"
+                or runtime.get("dtype") != "bfloat16" or runtime.get("cuda_graph_steps") != 16
+                or runtime.get("warm_buckets") != 6 or not runtime.get("model_loaded")):
+            raise PhononRuntimeError("Phonon could not verify its optimized CUDA model; check the local worker log")
+        self._loaded = True
+        self._readiness_locked()
+        return True
+
+    def _readiness_locked(self):
+        silence = io.BytesIO()
+        with wave.open(silence, "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(16000)
+            audio.writeframes(bytes(32000))
+        self._transcribe_locked(silence.getvalue(), 1.0)
+        self._publish("ready", "Phonon is loaded and ready")
+
+    def _failure(self, error):
+        logging.getLogger(__name__).error("Phonon runtime operation failed", exc_info=(type(error), error, error.__traceback__))
+        try:
+            self._dispose()
+        except Exception:
+            safe = "Phonon could not confirm its worker stopped; check the local worker log"
+            self._publish("error", safe)
+            return PhononRuntimeError(safe)
+        safe = str(error) if isinstance(error, PhononRuntimeError) else "Phonon worker failed; check the local worker log and retry Load/Test"
+        self._publish("error", safe)
+        return PhononRuntimeError(safe)
+
+    def load(self, *, test_existing=False):
+        with self._operation:
+            try:
+                created = self._load_locked()
+                if test_existing and not created:
+                    self._publish("busy", "Testing Phonon readiness")
+                    self._readiness_locked()
+                return self.status()
+            except Exception as error:
+                raise self._failure(error) from None
+
+    def request_load(self):
+        with self._state_guard:
+            if self._closing.is_set():
+                raise PhononRuntimeError("Phonon runtime is stopping")
+            if self._background and self._background.is_alive():
+                return
+
+            def run():
+                try:
+                    self.load(test_existing=True)
+                except PhononRuntimeError:
+                    pass  # Observable error state; the next explicit action may retry.
+
+            self._background = threading.Thread(target=run, name="phonon-load", daemon=True)
+            self._background.start()
+
+    def _transcribe_locked(self, audio, duration, timeout=None):
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix="phonon-ipc-", suffix=".wav", dir=self.temp_root, delete=False) as stream:
+                path = Path(stream.name)
+                stream.write(audio)
+            reply = self._exchange("transcribe", audio=str(path), duration=duration, timeout=timeout)
+            if not isinstance(reply.get("result"), dict):
+                raise PhononRuntimeError("Phonon returned invalid transcription data")
+            from .phonon import PhononError, validate_result
+            try:
+                validate_result(reply["result"], duration)
+            except PhononError as error:
+                raise PhononRuntimeError(str(error)) from None
+            return {**reply["result"], "runtime": reply["runtime"]}
+        finally:
+            if path:
+                path.unlink(missing_ok=True)
+
+    def transcribe(self, audio: bytes, duration: float, timeout=None):
+        if (not isinstance(audio, bytes) or not 0 < len(audio) < MAX_INPUT_BYTES
+                or not math.isfinite(duration) or not 0 < duration <= 7200):
+            raise PhononRuntimeError("Phonon requires a bounded, nonempty WAV input of at most two hours")
+        if timeout is not None and (not math.isfinite(float(timeout)) or float(timeout) <= 0):
+            raise PhononRuntimeError("Phonon inference deadline must be positive and finite")
+        with self._operation:
+            try:
+                self._load_locked()
+                self._publish("busy", "Phonon is transcribing")
+                result = self._transcribe_locked(audio, duration, timeout)
+                self._publish("ready", "Phonon is loaded and ready")
+                return result
+            except Exception as error:
+                raise self._failure(error) from None
+
+    def unload(self):
+        if self._background and self._background.is_alive():
+            raise PhononRuntimeError("Phonon is busy loading; unload after the current operation completes")
+        if not self._operation.acquire(blocking=False):
+            raise PhononRuntimeError("Phonon is busy loading or decoding; unload after the current operation completes")
+        try:
+            self._publish("unloading", "Unloading Phonon")
+            if self._owned and self._owned.process.poll() is None:
+                self._exchange("shutdown")
+            self._dispose()
+            self._publish("absent", "Phonon is unloaded; cached model and runtime are retained")
+            return self.status()
+        except Exception as error:
+            raise self._failure(error) from None
+        finally:
+            self._operation.release()
+
+    def shutdown(self):
+        # App shutdown may terminate its own in-flight worker. No other process is touched.
+        self._closing.set()
+        self._dispose()
+        self._publish("absent", "Phonon is stopped")

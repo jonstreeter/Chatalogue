@@ -231,3 +231,31 @@ Verified model SHA-256: `model.fermion`
 
 This proves native optimized inference feasibility, not completed app integration,
 long-audio app behavior, recognition accuracy, or supported CPU/MLX operation.
+
+
+### App-owned IPC worker — 2026-10-16
+
+Task 9 real runtime proof used the fully standalone private environment, not the
+probe's shared backend packages. Readiness plus two real 120-second requests
+used the same actual interpreter PID 42932. Model load/readiness: 55.729s;
+requests: 4.745s / 4.691s, 383 valid words each. Runtime counters advanced 1→2→3
+(includes one-second silent readiness). BF16, K16 graphs, six warmed buckets
+and GPU mel remained active. These are IPC adapter timings under uncontrolled
+host activity, not complete app-phase or accuracy measurements.
+
+An anonymous Windows Job Object owns the suspended venv launcher before it runs,
+so its real Python descendant inherits ownership. The manager verifies actual
+interpreter membership before loading GPU weights and retains a synchronization
+handle until unload confirms that interpreter exited. No unrelated process is
+stopped. Actual GPU unload passed and all IPC audio files were removed. Abrupt
+parent exit is additionally regression-tested with a real venv child/fake model;
+no claim of a measured global VRAM byte delta on WDDM is made.
+
+Report: ignored `backend/data/asr-benchmark/owned-worker-probe.json`.
+The source result schema is text/segments/words/duration; timed intervals are
+validated before return. The pinned decoder bounds tokens by `max_sym * T + 16`
+per internal window (rounded to K-step execution), using a finite vocabulary.
+Inputs retain the app's 32 MiB/two-hour bounds. The local pipe has no invented
+response byte quota; source ownership, fixed protocol/IDs and typed timing
+validation reject malformed replies without accepting partial chunk success.
+The worker starts no listening HTTP/WebSocket service.

@@ -7,7 +7,10 @@
       "paths": [
         "backend/src/services/ingestion/phonon.py",
         "backend/src/services/ingestion/phonon_runtime.py",
-        "backend/src/services/ingestion/phonon_worker_requirements.txt"
+        "backend/src/services/ingestion/phonon_worker_requirements.txt",
+        "backend/src/services/ingestion/phonon_process.py",
+        "backend/src/services/ingestion/phonon_worker.py",
+        "backend/src/services/ingestion/phonon_upstream/**"
       ],
       "authorities": [
         {

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -246,3 +247,239 @@ def test_private_commands_do_not_inherit_python_environment(tmp_path, monkeypatc
     assert not {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"} & kwargs["env"].keys()
     assert kwargs["env"]["PYTHONNOUSERSITE"] == "1"
     assert not kwargs.get("shell")
+
+
+FAKE_WORKER = '''import json,sys,os,threading
+from pathlib import Path
+loaded=False
+count=0
+for line in sys.stdin:
+    m=json.loads(line)
+    op=m["operation"]
+    mode=Path(__file__).with_name("behavior").read_text()
+    result=None
+    if op=="load": loaded=True
+    if op=="transcribe":
+        if mode=="crash": os._exit(3)
+        if mode=="block": threading.Event().wait()
+        if mode=="invalid":
+            print("invalid-json",flush=True)
+            continue
+        count+=1
+        result={"duration":m["duration"],"text":"hi","segments":[{"start":0,"end":0.5,"text":"hi"}],"words":[{"start":0,"end":0.5,"text":"hi"}]}
+    if result and mode=="invalid-timings": result["words"][0]["end"]=2
+    r={"pid":os.getpid(),"model_loaded":loaded,"model":"phonon-2","device":"cuda","dtype":"float32" if mode=="wrong-optimization" else "bfloat16","cuda_graph_steps":16,"warm_buckets":6,"request_count":count}
+    print("fake diagnostic",file=sys.stderr,flush=True)
+    print(json.dumps({"protocol":1,"id":"wrong" if mode=="wrong-id" else m["id"],"runtime":r,"result":result}),flush=True)
+    if op=="shutdown": break
+'''
+
+
+@pytest.fixture
+def owned_runtime(tmp_path, monkeypatch):
+    if os.name != "nt":
+        pytest.skip("Native Phonon process ownership is supported on Windows only")
+    worker = tmp_path / "fake_worker.py"
+    worker.write_text(FAKE_WORKER)
+    behavior = worker.with_name("behavior")
+    behavior.write_text("")
+    monkeypatch.setattr(runtime, "WORKER", worker)
+    manager = runtime.PhononRuntime(tmp_path / "cache", tmp_path / "audio")
+    manager.installation.root.mkdir()
+    installed = runtime.InstalledPhonon(tmp_path, Path(sys.executable), tmp_path)
+
+    def ensure():
+        manager.installation._set_state("installed", "test runtime installed")
+        return installed
+
+    monkeypatch.setattr(manager.installation, "ensure", ensure)
+    yield manager, behavior
+    manager.shutdown()
+
+
+def _silence():
+    from src.services.ingestion.phonon import wav_bytes
+    return wav_bytes(bytes(32000))
+
+
+def test_owned_worker_reuses_actual_child_and_unloads(owned_runtime):
+    manager, _ = owned_runtime
+    loaded = manager.load()
+    pid = loaded["runtime"]["pid"]
+    assert loaded["state"] == "ready"
+    for count in (2, 3):
+        result = manager.transcribe(_silence(), 1.0)
+        assert result["runtime"]["pid"] == pid
+        assert result["runtime"]["request_count"] == count
+    assert "fake diagnostic" in (manager.installation.root / "worker.log").read_text()
+    unloaded = manager.unload()
+    assert not unloaded["model_loaded"] and not unloaded["process_running"]
+    assert unloaded["runtime"] == {}
+    assert not list(manager.temp_root.iterdir())
+
+
+@pytest.mark.parametrize("mode,reason", [("invalid", "invalid worker data"), ("wrong-id", "invalid worker response"), ("crash", "worker exited"), ("invalid-timings", "invalid or missing word timestamps")])
+def test_failed_worker_can_be_explicitly_reloaded(owned_runtime, mode, reason):
+    manager, behavior = owned_runtime
+    manager.load()
+    behavior.write_text(mode)
+    with pytest.raises(runtime.PhononRuntimeError, match=reason):
+        manager.transcribe(_silence(), 1.0)
+    assert manager.status()["state"] == "error"
+    assert not manager.status()["process_running"]
+    assert not list(manager.temp_root.iterdir())
+    behavior.write_text("")
+    assert manager.load()["state"] == "ready"
+
+
+def test_configured_deadline_stops_only_owned_worker(owned_runtime):
+    manager, behavior = owned_runtime
+    manager.load()
+    behavior.write_text("block")
+    with pytest.raises(runtime.PhononRuntimeError, match="configured deadline"):
+        manager.transcribe(_silence(), 1.0, timeout=0.01)
+    assert not manager.status()["process_running"]
+    assert not list(manager.temp_root.iterdir())
+
+
+def test_busy_unload_rejected_and_shutdown_stops_inflight(owned_runtime, monkeypatch):
+    manager, behavior = owned_runtime
+    manager.load()
+    behavior.write_text("block")
+    busy = threading.Event()
+    publish = manager._publish
+
+    def observe(state, detail):
+        publish(state, detail)
+        if state == "busy":
+            busy.set()
+
+    monkeypatch.setattr(manager, "_publish", observe)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(manager.transcribe, _silence(), 1.0)
+        busy.wait()
+        with pytest.raises(runtime.PhononRuntimeError, match="busy"):
+            manager.unload()
+        manager.shutdown()
+        with pytest.raises(runtime.PhononRuntimeError):
+            future.result()
+    assert not manager.status()["process_running"]
+    with pytest.raises(runtime.PhononRuntimeError, match="stopping"):
+        manager.load()
+
+
+def test_background_load_does_not_spawn_duplicate_models(owned_runtime, monkeypatch):
+    manager, _ = owned_runtime
+    calls = []
+    spawn = manager._spawn
+
+    def observed(installed):
+        calls.append(installed)
+        spawn(installed)
+
+    monkeypatch.setattr(manager, "_spawn", observed)
+    manager.request_load()
+    manager.request_load()
+    manager._background.join()
+    assert manager.status()["state"] == "ready"
+    assert len(calls) == 1
+
+
+def test_explicit_test_runs_inference_on_existing_model(owned_runtime):
+    manager, _ = owned_runtime
+    before = manager.load()["runtime"]
+    tested = manager.load(test_existing=True)["runtime"]
+    assert tested["pid"] == before["pid"]
+    assert tested["request_count"] == before["request_count"] + 1
+
+
+@pytest.mark.parametrize("mode", ["wrong-optimization", "invalid-timings"])
+def test_readiness_never_reports_ready_for_failed_validation(owned_runtime, mode):
+    manager, behavior = owned_runtime
+    behavior.write_text(mode)
+    with pytest.raises(runtime.PhononRuntimeError):
+        manager.load()
+    assert manager.status()["state"] == "error"
+    assert not manager.status()["model_loaded"]
+    assert not manager.status()["process_running"]
+
+
+def test_incomplete_source_manifest_rejected_before_spawn(owned_runtime, tmp_path, monkeypatch):
+    manager, _ = owned_runtime
+    source = tmp_path / "bad-source"
+    source.mkdir()
+    (source / "source-manifest.json").write_text("{}")
+    monkeypatch.setattr(runtime, "UPSTREAM", source)
+    with pytest.raises(runtime.PhononRuntimeError, match="manifest is incomplete"):
+        manager.load()
+    assert not manager.status()["process_running"]
+
+
+def test_worker_validates_owned_wav_before_reading(tmp_path):
+    from src.services.ingestion.phonon_worker import read_pcm
+    temp = tmp_path / "owned"
+    temp.mkdir()
+    path = temp / "audio.wav"
+    path.write_bytes(_silence())
+    assert read_pcm(path, 1.0, temp, runtime.MAX_INPUT_BYTES) == bytes(32000)
+    with pytest.raises(ValueError, match="invalid input"):
+        read_pcm(path, 1.0, tmp_path / "another-root", runtime.MAX_INPUT_BYTES)
+    with pytest.raises(ValueError, match="invalid WAV"):
+        read_pcm(path, 2.0, temp, runtime.MAX_INPUT_BYTES)
+    path.write_bytes(_silence()[:-100])
+    with pytest.raises(ValueError, match="invalid WAV"):
+        read_pcm(path, 1.0, temp, runtime.MAX_INPUT_BYTES)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object ownership regression")
+def test_abrupt_parent_exit_kills_actual_venv_interpreter(tmp_path):
+    import ctypes
+    import subprocess
+    from ctypes import wintypes as w
+
+    worker = tmp_path / "fake_worker.py"
+    worker.write_text(FAKE_WORKER)
+    worker.with_name("behavior").write_text("")
+    parent = tmp_path / "parent.py"
+    parent.write_text('''import os,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+os.environ["DB_PROVIDER"]="sqlite"
+os.environ["DATABASE_URL"]="sqlite://"
+from src.services.ingestion import phonon_runtime as m
+root=Path(__file__).parent
+m.WORKER=root/"fake_worker.py"
+manager=m.PhononRuntime(root/"cache",root/"audio")
+manager.installation.root.mkdir()
+ready=m.InstalledPhonon(root,Path(sys.executable),root)
+manager.installation.ensure=lambda:ready
+print(manager.load()["runtime"]["pid"],flush=True)
+sys.stdin.read(1)
+os._exit(0)
+''')
+    process = subprocess.Popen([sys.executable, str(parent), str(Path(__file__).parent.parent)],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes, kernel.OpenProcess.restype = [w.DWORD, w.BOOL, w.DWORD], w.HANDLE
+    kernel.WaitForSingleObject.argtypes, kernel.WaitForSingleObject.restype = [w.HANDLE, w.DWORD], w.DWORD
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    handle = None
+    try:
+        line = process.stdout.readline()
+        assert line.strip().isdigit(), process.stderr.read() if process.poll() is not None else line
+        pid = int(line)
+        handle = kernel.OpenProcess(0x100000, False, pid)
+        assert handle
+        process.stdin.write("x")
+        process.stdin.flush()
+        process.wait()
+        assert kernel.WaitForSingleObject(handle, 0xFFFFFFFF) == 0
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait()
+        if handle:
+            kernel.CloseHandle(handle)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close()
