@@ -121,10 +121,13 @@ def isolated_service(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "engine", engine)
     monkeypatch.setattr(runtime, "create_db_and_tables", lambda: None)
     monkeypatch.setattr(pipeline, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(runtime, "TEMP_DIR", tmp_path)
+    monkeypatch.setattr(runtime, "PHONON_RUNTIME_DIR", tmp_path / "runtime")
     monkeypatch.setenv("TRANSCRIPTION_ENGINE", "phonon")
     monkeypatch.setenv("MULTILINGUAL_ROUTING_ENABLED", "false")
     service = IngestionService()
     yield service
+    service.shutdown_phonon()
     engine.dispose()
 
 
@@ -137,6 +140,106 @@ def test_checkpoint_silence_and_interrupted_tail(isolated_service):
     assert loaded["completed_until_seconds"] == 600
     assert loaded["segments"] == []
     assert service._get_temp_transcript_jsonl_path(1).read_bytes() == b""
+
+
+def test_managed_adapter_reuses_runtime_and_ignores_legacy_url(monkeypatch):
+    from src.services.ingestion.phonon import ManagedPhononClient
+    calls = []
+
+    class Manager:
+        def transcribe(self, audio, duration, timeout):
+            calls.append((audio, duration, timeout))
+            return {"duration": duration, "text": "hello", "words": [{"text": "hello", "start": 0, "end": .5}],
+                    "runtime": {"device": "cuda", "version": "native"}}
+
+    monkeypatch.setenv("PHONON_URL", "https://must-never-connect.invalid")
+    monkeypatch.setattr(httpx, "Client", lambda **_: pytest.fail("managed inference must not open HTTP"))
+    manager = Manager()
+    for _ in range(2):
+        with ManagedPhononClient(manager, timeout=10) as client:
+            words, details = client.transcribe(b"owned audio", 1.)
+            assert words[0]["word"] == "hello"
+            assert details["device"] == "cuda"
+    assert len(calls) == 2 and calls[0][2] == 10
+
+
+def test_purge_releases_worker_without_host_device(isolated_service):
+    from types import SimpleNamespace
+    service = isolated_service
+    calls = []
+    service._phonon_runtime = SimpleNamespace(status=lambda: {"model_loaded": True},
+        unload=lambda: calls.append("unload"), shutdown=lambda: None)
+    assert service.device is None
+    result = service.purge_loaded_models()
+    assert result["purged_phonon"] is True and calls == ["unload"]
+
+
+def test_busy_worker_purge_preserves_other_models(isolated_service):
+    from types import SimpleNamespace
+    from src.services.ingestion.phonon_runtime import PhononRuntimeError
+    service = isolated_service
+    whisper = service.whisper_model = object()
+    parakeet = service.parakeet_model = object()
+
+    def busy():
+        raise PhononRuntimeError("Phonon is busy")
+
+    service._phonon_runtime = SimpleNamespace(status=lambda: {"model_loaded": True}, unload=busy, shutdown=lambda: None)
+    with pytest.raises(PhononRuntimeError, match="busy"):
+        service.purge_loaded_models()
+    assert service.whisper_model is whisper and service.parakeet_model is parakeet
+
+
+@pytest.mark.parametrize("retained,host_reserved,expected_purge", [(True, 0, False), (False, 0, True), (True, 16, True)])
+def test_end_of_job_recovery_distinguishes_owned_worker_memory(isolated_service, monkeypatch, retained, host_reserved, expected_purge):
+    from types import SimpleNamespace
+    service = isolated_service
+    monkeypatch.setenv("CUDA_HEADROOM_RECOVERY_DROP_GB", "1.5")
+    monkeypatch.setenv("CUDA_HEADROOM_RECOVERY_RESERVED_RATIO", "0.45")
+    service.device = "cuda"
+    service._phonon_runtime = SimpleNamespace(status=lambda: {"model_loaded": retained}, shutdown=lambda: None)
+    gib = 1024 ** 3
+    monkeypatch.setattr(service, "_cuda_memory_snapshot", lambda: {"free": 22 * gib, "total": 32 * gib,
+        "reserved": host_reserved * gib, "allocated": host_reserved * gib})
+    monkeypatch.setattr(service, "_upsert_job_payload_fields", lambda *_: None)
+    monkeypatch.setattr(service, "_record_cuda_health_event", lambda *_, **__: None)
+    purged = []
+    monkeypatch.setattr(service, "purge_loaded_models", lambda **_: purged.append(True))
+    service._maybe_recover_cuda_headroom(24 * gib)
+    assert bool(purged) == expected_purge
+
+
+@pytest.mark.parametrize("method,reason", [("_load_whisper_model", "before_whisper"), ("_load_parakeet_model", "before_parakeet")])
+def test_competing_gpu_loader_releases_phonon_first(isolated_service, monkeypatch, method, reason):
+    service = isolated_service
+    monkeypatch.setattr(service, "_ensure_device", lambda: setattr(service, "device", "cuda"))
+    monkeypatch.setattr(service, "_ensure_ctranslate2_pkg_resources", lambda: None)
+    calls = []
+
+    def released(label, job_id=None):
+        calls.append(label)
+        raise RuntimeError("verified handoff; stop before host model load")
+
+    monkeypatch.setattr(service, "_release_phonon_model", released)
+    with pytest.raises(RuntimeError, match="verified handoff"):
+        getattr(service, method)()
+    assert calls == [reason]
+
+
+def test_actual_diarization_phase_hands_off_owned_worker(isolated_service, tmp_path):
+    from types import SimpleNamespace
+    from src.db.database import Video
+    service = isolated_service
+    calls = []
+
+    def unload():
+        calls.append("worker unload reached before diarization model load")
+        raise RuntimeError("handoff boundary reached")
+
+    service._phonon_runtime = SimpleNamespace(status=lambda: {"model_loaded": True}, unload=unload, shutdown=lambda: None)
+    with pytest.raises(RuntimeError, match="handoff boundary"):
+        service._process_diarize_phase(Video(id=77, youtube_id="isolated-diarize", title="handoff"), tmp_path / "audio.wav", [])
+    assert len(calls) == 1
 
 
 def test_checkpoint_atomic_failure_recovers_prior_commit(isolated_service, monkeypatch):
@@ -213,7 +316,7 @@ def test_actual_phase_failure_resume_and_absolute_seam(isolated_service, tmp_pat
         return [{"word": "hello", "start": 0.1, "end": .2},
                 {"word": "seam", "start": duration - .3, "end": duration - .1}], {}
 
-    monkeypatch.setattr(phonon.PhononClient, "transcribe", transcribe)
+    monkeypatch.setattr(phonon.ManagedPhononClient, "transcribe", transcribe)
     video = Video(id=1, youtube_id="isolated-phonon", title="test", duration=1201)
     with pytest.raises(PhononError, match="unavailable"):
         service._process_transcribe_phase(video, audio)
@@ -253,7 +356,7 @@ def test_pause_cancel_after_response_preserves_previous_boundary(isolated_servic
         if len(checks) == 3:
             raise exception(state)
     monkeypatch.setattr(isolated_service, "_check_job_not_paused", check)
-    monkeypatch.setattr(phonon.PhononClient, "transcribe", lambda *args: ([], {}))
+    monkeypatch.setattr(phonon.ManagedPhononClient, "transcribe", lambda *args: ([], {}))
     with pytest.raises(exception):
         isolated_service._process_transcribe_phase(Video(id=8, youtube_id="interrupt", title="interrupt"), audio)
     assert not isolated_service._get_temp_transcript_path(8).exists()
@@ -270,7 +373,7 @@ def test_runtime_segment_boundaries_and_force_retranscription(isolated_service, 
     def transcribe(*args):
         calls.append(1)
         return [{"word": "one", "start": .1, "end": .2}, {"word": "two", "start": 1.1, "end": 1.2}], {"segments": [{"start": 0, "end": 1}, {"start": 1, "end": 2}]}
-    monkeypatch.setattr(phonon.PhononClient, "transcribe", transcribe)
+    monkeypatch.setattr(phonon.ManagedPhononClient, "transcribe", transcribe)
     video = Video(id=3, youtube_id="segments", title="segments", duration=2)
     segments, _ = isolated_service._process_transcribe_phase(video, audio)
     assert [segment.text for segment in segments] == ["one", "two"]
@@ -326,7 +429,7 @@ def test_multihour_silence_uses_bounded_requests_and_completed_offsets(isolated_
     def silent(client, blob, duration):
         calls.append((len(blob), duration))
         return [], {}
-    monkeypatch.setattr(phonon.PhononClient, "transcribe", silent)
+    monkeypatch.setattr(phonon.ManagedPhononClient, "transcribe", silent)
     result, duration = service._process_transcribe_phase(Video(id=9, youtube_id="long", title="silent", duration=7201), audio)
     assert result == [] and duration == 7201
     assert len(calls) == 13

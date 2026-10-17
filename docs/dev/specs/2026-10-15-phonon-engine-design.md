@@ -133,6 +133,9 @@ Settings: Phonon-2 -> setup/load/test through existing engine-test operation
   stop the owned Phonon process and verify exit before loading the next model.
   Integrate the same rule with existing model purge and engine switching. Do not
   infer worker device from the host service's lazily initialized `self.device`.
+- An intentionally resident Phonon child is not a host allocator leak. End-of-job
+  global free-memory drop alone must not evict it; existing host reserved/allocated
+  recovery checks and thresholds remain unchanged.
 - Normal shutdown closes IPC and waits for exit. Unexpected parent exit also ends
   the worker (Windows Job Object kill-on-close or equivalent proven ownership).
   No orphan model process or false unloaded status. Failed shutdown is visible;

@@ -259,3 +259,24 @@ Inputs retain the app's 32 MiB/two-hour bounds. The local pipe has no invented
 response byte quota; source ownership, fixed protocol/IDs and typed timing
 validation reject malformed replies without accepting partial chunk success.
 The worker starts no listening HTTP/WebSocket service.
+
+
+### Managed worker through actual app phase — task 10
+
+An isolated in-memory SQLite app ran `_process_transcribe_phase` twice on the
+120s fixture, normalizing and checkpointing temporary copies. Runtime setup/load
+was measured separately: 44.599s. Phase timings: 5.780s / 6.824s, both actual
+`phonon`, 383 words, no structural timestamp issues, same worker PID 18868 before
+and after. The harness closes the worker on exit and redirects Python temp paths.
+Language routing was disabled in this process only to isolate English-engine
+behavior; language routing/defaults are preserved and tested separately. This
+is not full episode time including download, diarization, cloning or other jobs.
+Report: ignored `app-phonon-managed-120s-task10.json`.
+
+The existing end-of-job 1.5 GiB global free-memory-drop heuristic would evict an
+intentionally retained child and defeat cross-job reuse. It now recognizes a
+loaded Phonon worker; unchanged host reserved/allocated checks still trigger
+recovery. Regression cases cover retained worker, no worker and actual host
+allocator pressure. Language probing through GPU Whisper and actual competing
+GPU phases still release Phonon by design and can add reload time; staged mode
+alone does not eliminate every reload when audio-language probing is needed.

@@ -667,6 +667,8 @@ class TranscriptionEngineMixin:
         self._ensure_ctranslate2_pkg_resources()
 
         self._ensure_device()
+        if self.device == "cuda":
+            self._release_phonon_model("before_whisper", job_id=job_id)
         model_size = str(model_size_override or os.getenv("TRANSCRIPTION_MODEL", "tiny")).strip() or "tiny"
         backend_info = self._resolve_whisper_backend(backend_override)
         requested_backend = backend_info["requested"]
@@ -886,6 +888,8 @@ class TranscriptionEngineMixin:
 
     def _load_parakeet_model(self, job_id: int = None):
         self._ensure_device()
+        if self.device == "cuda":
+            self._release_phonon_model("before_parakeet", job_id=job_id)
         if self.device == "cuda":
             self._record_cuda_health_event("pre_parakeet_load", job_id=job_id)
             self._soft_reset_cuda_if_degraded(label="pre_parakeet_load", job_id=job_id)
@@ -2534,6 +2538,8 @@ class TranscriptionEngineMixin:
             from pyannote.audio import Pipeline, Inference, Model
 
         self._ensure_device()
+        if self.device == "cuda":
+            self._release_phonon_model("before_diarization_models", job_id=job_id)
 
         if load_transcription_model:
             self._load_whisper_model(job_id=job_id, force_float32=False)

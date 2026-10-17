@@ -1810,6 +1810,8 @@ class ReconstructionMixin:
 
         self._ensure_device()
         use_cuda = str(self.device or "") == "cuda" and torch.cuda.is_available() and not self._cuda_recovery_pending
+        if use_cuda:
+            self._release_phonon_model("before_reconstruction_tts")
         dtype = torch.bfloat16 if use_cuda else torch.float32
         device_label = "cuda:0" if use_cuda else "cpu"
         cache_key = (str(model_name or "").strip(), device_label, str(dtype))

@@ -24,7 +24,7 @@ load_dotenv()
 # Configure logging based on VERBOSE_LOGGING setting
 def configure_logging():
     verbose = os.getenv("VERBOSE_LOGGING", "false").lower() == "true"
-    
+
     if not verbose:
         # Silence noisy loggers in clean mode
         logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
@@ -152,6 +152,11 @@ async def lifespan(app: FastAPI):
 
         yield
     finally:
+        try:
+            if ingestion_service is not None:
+                ingestion_service.shutdown_phonon()
+        except Exception:
+            logging.getLogger(__name__).exception("Could not confirm Phonon shutdown")
         try:
             if monitor_stop_event is not None:
                 monitor_stop_event.set()

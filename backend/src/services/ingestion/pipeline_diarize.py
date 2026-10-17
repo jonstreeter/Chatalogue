@@ -193,11 +193,11 @@ class DiarizePhaseMixin:
         from pyannote.core import Annotation, Segment
         from bisect import bisect_right
         job_payload = {}
-        
+
         # 1. Update Status
         with Session(runtime.engine) as session:
             v = session.get(Video, video.id)
-            if v: 
+            if v:
                 v.status = "diarizing"
                 session.add(v)
             if job_id:
@@ -220,8 +220,9 @@ class DiarizePhaseMixin:
                 log_verbose(f"Could not load diarization job payload for overrides: {e}")
         optimization_target = str(job_payload.get("optimization_target") or "").strip().lower()
         should_apply_text_cleanup = optimization_target not in {"diarization_rebuild", "diarization_benchmark"}
-            
+
         log("Diarizing...")
+        self._release_phonon_model("before_diarize", job_id=job_id)
         if self.device == "cuda" and self.whisper_model is not None:
             self._release_whisper_model("before_diarize", job_id=job_id)
         if self._should_release_parakeet_before_diarize(job_id=job_id):
@@ -232,14 +233,14 @@ class DiarizePhaseMixin:
         # Ensure the speaker-match cache starts fresh for this channel; new embeddings
         # created during this run are appended incrementally.
         self._invalidate_speaker_match_cache(video.channel_id)
-        
+
         # 2. Run Pipeline (No session)
         diarization = None
         audio_input = None
         diarization_path = self._get_temp_diarization_path(video.id)
-        
+
         start_diar = time.time()
-        
+
         if diarization_path.exists():
             try:
                 log_verbose(f"Loading existing diarization from {diarization_path}")
@@ -267,7 +268,7 @@ class DiarizePhaseMixin:
                     raise RuntimeError(f"Diarization pipeline failed to load: {self._diarization_load_error}")
                 else:
                     raise RuntimeError("Diarization pipeline not loaded.")
-            
+
             # Use ffmpeg+soundfile helper
             audio_input = self._load_audio_for_pyannote(str(audio_path))
 
@@ -310,7 +311,7 @@ class DiarizePhaseMixin:
                     diarization_output = self._run_diarization_with_adaptive_batch(audio_input, job_id=job_id)
                 else:
                     raise
-            
+
             # Convert DiarizeOutput
             if hasattr(diarization_output, 'speaker_diarization'):
                 diarization = diarization_output.speaker_diarization
@@ -320,7 +321,7 @@ class DiarizePhaseMixin:
                 diarization = diarization_output
 
             log_verbose(f"Diarization complete in {time.time() - start_diar:.1f}s")
-            
+
             # Save RTTM
             try:
                 with open(diarization_path, 'w') as f:
@@ -442,7 +443,7 @@ class DiarizePhaseMixin:
                         raw_embedding,
                     )
                     persisted += 1
-            
+
             # Pre-process speakers
             diarization_labels = list(diarization.labels())
             total_labels = len(diarization_labels) or 1
@@ -484,7 +485,7 @@ class DiarizePhaseMixin:
                         found_speaker = None
                         matched_profile = None
                         matched_score = None
-                    
+
                     if found_speaker:
                         local_speaker_map[label] = {
                             "speaker": found_speaker,
@@ -525,7 +526,7 @@ class DiarizePhaseMixin:
                             select(func.count(Speaker.id)).where(Speaker.channel_id == video_attached.channel_id)
                         ).one()
                         new_name = f"Speaker {existing_count + 1}"
-                        
+
                         new_spk = Speaker(
                             channel_id=video_attached.channel_id,
                             name=new_name,
@@ -786,10 +787,10 @@ class DiarizePhaseMixin:
             if job_id:
                 self._update_job_status_detail(job_id, "Saving transcript files...")
                 self._update_job_progress(job_id, 99)
-            
+
             # Save final files
             self._save_transcripts(session, video_attached, final_segments, audio_path)
-            
+
             # Cleanup temp
             try:
                 if diarization_path.exists(): os.unlink(diarization_path)
@@ -799,7 +800,7 @@ class DiarizePhaseMixin:
                 if transcript_jsonl.exists(): os.unlink(transcript_jsonl)
             except: pass
             self._reset_partial_checkpoint_state(video.id)
-            
+
             log(f"Processing complete for {video_attached.title}")
             video_attached.status = "completed"
             video_attached.processed = True

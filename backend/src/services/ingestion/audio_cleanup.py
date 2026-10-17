@@ -104,6 +104,8 @@ class AudioCleanupMixin:
             except Exception:
                 use_cuda = False
 
+            if use_cuda:
+                self._release_phonon_model("before_voicefixer", job_id=job_id)
             restorer = VoiceFixer()
             restorer.restore(input=str(input_wav), output=str(restored_wav), cuda=use_cuda, mode=mode)
 

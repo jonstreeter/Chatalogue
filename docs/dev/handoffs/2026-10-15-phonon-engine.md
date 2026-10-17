@@ -9,7 +9,7 @@
 
 Owner explicitly approved the revised app-owned integration plan with `d`.
 Planning checkpoint 02a8360; native feasibility 0c5ad07; private installer 5c35ea1.
-Tracker: 9/13 complete after the owned-worker checkpoint. Do not request another
+Owned-worker checkpoint 3245eae. Tracker: 10/13 complete after the app-phase checkpoint. Do not request another
 plan approval. No product settings/global engine activation or production media
 processing was performed by these tests. Installed settings UI is still the old
 HTTP form until tasks 10–11 wire the new runtime and replace its controls.
@@ -33,12 +33,23 @@ GPU requests reused PID 42932, BF16/K16/six buckets, 383 words per 120s request;
 55.729s startup, 4.745/4.691s requests. No end-to-end app performance claim yet.
 Report: `backend/data/asr-benchmark/owned-worker-probe.json`.
 
-Next: task 10 — one manager per ingestion service, managed adapter in the existing
-Phonon phase, GPU handoff/engine switch, model purge and main shutdown. Then task
-11 replaces settings connection fields with asynchronous setup/load/test/unload
-and backward-compatible deprecated no-op URL/key fields. Preserve all strict
-checkpoints, language routing, existing engines and defaults. Run preflight and
-read authorities; use isolated SQLite before app imports and scratch files only.
+Task 10 uses the managed adapter in the actual app phase, with GPU handoff,
+explicit purge and main shutdown. No job inference uses URL/key settings now.
+Retained child memory no longer triggers false host allocator recovery; host
+reserved/allocated checks are unchanged. Full backend 126 passed; additional
+Diarization handoff/recovery cases 4 passed, Ruff and SDD passed. Actual isolated
+app phases: 44.599s separate startup, 5.780/6.824s per 120s recording, same PID
+18868, correct Phonon provenance and valid clocks. Report:
+`backend/data/asr-benchmark/app-phonon-managed-120s-task10.json`.
+
+Next: task 11 — replace settings connection fields with asynchronous app-owned
+setup/load/test/unload. Remove the obsolete HTTP adapter/probe once its settings
+callers are migrated; keep deprecated URL/key inputs accepted as no-ops without
+erasing stored keys or exposing them in responses. Preserve all strict checkpoints,
+language routing, existing engines and defaults. Run preflight/read authorities;
+use isolated SQLite before app imports and scratch files only. Afterwards task 12
+runs short/long benchmarks and documentation, then task 13 final verification and
+local installation update without global engine activation or media reprocessing.
 
 Historical status/next-step sections below are superseded by this revision.
 

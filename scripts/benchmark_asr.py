@@ -25,9 +25,10 @@ import shutil
 import sys
 import tempfile
 import time
+from contextlib import ExitStack
 
 
-def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint=None, app_engine=None, phonon_env=None):
+def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint=None, app_engine=None, phonon_env=None, phonon_runtime=None):
     """Run the real transcription phase; isolate DB before any app import."""
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "backend"))
@@ -54,10 +55,10 @@ def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint
         "PARAKEET_UNLOAD_AFTER_TRANSCRIBE", "PIPELINE_EXECUTION_MODE",
         "WHISPER_BACKEND", "TRANSCRIPTION_MODEL", "TRANSCRIPTION_COMPUTE_TYPE",
         "TRANSCRIPTION_BATCHED", "TRANSCRIPTION_BEAM_SIZE", "MULTILINGUAL_ROUTING_ENABLED")}
-    with tempfile.TemporaryDirectory(prefix="app-", dir=root / "backend/data/asr-benchmark") as scratch:
+    with tempfile.TemporaryDirectory(prefix="app-", dir=root / "backend/data/asr-benchmark") as scratch, ExitStack() as cleanup:
         scratch = Path(scratch)
         names = ("DATA_DIR", "TEMP_DIR", "PYTHON_TEMP_DIR", "RUNTIME_DIR",
-                 "AUDIO_DIR", "MANUAL_MEDIA_DIR", "EXPORT_DIR")
+                 "AUDIO_DIR", "MANUAL_MEDIA_DIR", "EXPORT_DIR", "PHONON_RUNTIME_DIR")
         # Mixins import directory constants by value; redirect every loaded copy.
         for name, module in list(sys.modules.items()):
             if name.startswith("src.services.ingestion") and module:
@@ -69,7 +70,11 @@ def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint
                 for key in ("HEARTBEAT_FILE", "CUDA_RESTART_STATE_FILE"):
                     if hasattr(module, key):
                         setattr(module, key, scratch / key.lower())
+        if phonon_runtime:
+            runtime.PHONON_RUNTIME_DIR = phonon_runtime.resolve(strict=True)
+        runtime.configure_python_temp_dir()
         service = IngestionService()
+        cleanup.callback(service.shutdown_phonon)
         if parakeet_checkpoint:
             # Resolve the already-downloaded artifact only. All app loading,
             # device placement, decoding, chunking and fallback methods stay intact.
@@ -94,13 +99,15 @@ def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint
                   "local_parakeet_checkpoint": str(parakeet_checkpoint) if parakeet_checkpoint else None,
                   "comparison_note": "Offline cache misses can force fallback. This is not proof of a live app's engine.",
                   "vram_note": "PyTorch allocation excludes CTranslate2; zero does not mean zero GPU memory."}
-        if app_engine == "phonon":
-            from src.services.ingestion.phonon import PhononClient
-            with PhononClient(os.getenv("PHONON_URL", "http://127.0.0.1:8010"), os.getenv("PHONON_API_KEY", "")) as client:
-                result["runtime_before"] = client.readiness()
         if setup_only:
             result["setup_verified"] = True
             return result, []
+        if app_engine == "phonon":
+            if not phonon_runtime:
+                raise ValueError("Phonon benchmark requires explicit --phonon-runtime; production runtime is never selected implicitly")
+            begin = time.perf_counter()
+            result["runtime_before"] = service._get_phonon_runtime().load()["runtime"]
+            result["runtime_startup_seconds"] = time.perf_counter() - begin
         import torch
 
         words = []
@@ -132,8 +139,7 @@ def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint
                                    "peak_pytorch_bytes": torch.cuda.max_memory_allocated()
                                    if torch.cuda.is_available() else None})
         if app_engine == "phonon":
-            with PhononClient(os.getenv("PHONON_URL", "http://127.0.0.1:8010"), os.getenv("PHONON_API_KEY", "")) as client:
-                result["runtime_after"] = client.readiness()
+            result["runtime_after"] = service._get_phonon_runtime().status()["runtime"]
         return result, words
 
 
@@ -199,6 +205,7 @@ def main():
     parser.add_argument("--parakeet-checkpoint", type=Path, help="Local checkpoint for app's configured Parakeet model")
     parser.add_argument("--app-engine", choices=["phonon", "parakeet", "whisper", "auto"], help="Process-local engine override; never saved")
     parser.add_argument("--phonon-env", type=Path, help="Ignored runtime credential env file; contents are never reported")
+    parser.add_argument("--phonon-runtime", type=Path, help="Explicit existing app-owned runtime cache for isolated Phonon app benchmarks")
     parser.add_argument("--phonon-repetitions", type=int, default=1, help="Inputs in one Phonon process (CUDA CLI only)")
     parser.add_argument("--command", nargs=argparse.REMAINDER,
                         help="Phonon executable or docker command; must be last")
@@ -223,7 +230,7 @@ def main():
     begin = time.perf_counter()
     if args.engine == "app":
         report["application"], words = benchmark_application(
-            args.audio, duration, args.setup_only, args.parakeet_checkpoint, args.app_engine, args.phonon_env)
+            args.audio, duration, args.setup_only, args.parakeet_checkpoint, args.app_engine, args.phonon_env, args.phonon_runtime)
         report["process_wall_seconds"] = time.perf_counter() - begin
     elif args.engine == "phonon-native":
         report["native"], words = benchmark_native_phonon(args.audio, args.native_source, args.native_model)

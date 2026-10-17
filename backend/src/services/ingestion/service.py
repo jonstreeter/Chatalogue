@@ -81,6 +81,8 @@ class IngestionService(
         self.device = None
         self.whisper_model = None
         self.parakeet_model = None
+        self._phonon_runtime = None
+        self._phonon_runtime_guard = threading.Lock()
         self.diarization_pipeline = None
         self.embedding_model = None
         self.embedding_inference = None
@@ -144,6 +146,29 @@ class IngestionService(
             )
             log(f"CUDA permanently disabled due to prior restart loop. "
                 f"Reason: {restart_state.get('last_restart_reason', 'unknown')}")
+
+    def _get_phonon_runtime(self):
+        from . import runtime
+        from .phonon_runtime import PhononRuntime
+        with self._phonon_runtime_guard:
+            if self._phonon_runtime is None:
+                self._phonon_runtime = PhononRuntime(runtime.PHONON_RUNTIME_DIR, runtime.TEMP_DIR / "phonon-ipc")
+            return self._phonon_runtime
+
+    def _release_phonon_model(self, reason: str = "", job_id: int = None):
+        manager = getattr(self, "_phonon_runtime", None)
+        if manager is None:
+            return False
+        loaded = manager.status()["model_loaded"]
+        manager.unload()  # Busy is a visible error; do not purge a live decode.
+        if loaded:
+            log(f"Released Phonon worker from GPU memory ({reason}).")
+        return loaded
+
+    def shutdown_phonon(self):
+        manager = getattr(self, "_phonon_runtime", None)
+        if manager is not None:
+            manager.shutdown()
 
     def get_pipeline_focus_mode(self) -> Literal["transcribe", "diarize"]:
         with self._pipeline_focus_guard:
@@ -321,263 +346,3 @@ class IngestionService(
 
 
     # ── CUDA auto-restart state management ───────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

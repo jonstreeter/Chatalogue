@@ -65,6 +65,7 @@ class LlmProviderMixin:
             return None, None
 
         self._release_parakeet_model("pre_local_ollama_llm", job_id=job_id)
+        self._release_phonon_model("pre_local_ollama_llm", job_id=job_id)
         self._release_whisper_model("pre_local_ollama_llm", job_id=job_id)
         self._release_diarization_models("pre_local_ollama_llm", job_id=job_id)
         self._clear_cuda_cache()

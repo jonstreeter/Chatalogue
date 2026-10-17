@@ -104,7 +104,7 @@ class CudaMemoryMixin:
 
     def _cast_pipeline_to_float32(self, pipeline):
         """Cast pyannote pipeline sub-models to float32 for GPU compatibility.
-        
+
         The pyannote Pipeline/SpeakerDiarization class does NOT inherit from
         torch.nn.Module and has no .float() method. Instead we cast the
         individual sub-models (_segmentation, _embedding) which ARE nn.Modules.
@@ -883,6 +883,8 @@ class CudaMemoryMixin:
         This is used by restart/reload controls so a user can recover GPU memory
         and allow Parakeet retries without needing a full machine reboot.
         """
+        # Check the owned worker first: a busy purge must not alter competing models.
+        had_phonon = self._release_phonon_model(reason)
         had_whisper = self.whisper_model is not None
         had_parakeet = self.parakeet_model is not None
         had_diar = any([
@@ -914,6 +916,7 @@ class CudaMemoryMixin:
         self._record_cuda_health_event(f"purge_loaded_models:{reason}")
 
         return {
+            "purged_phonon": had_phonon,
             "purged_whisper": had_whisper,
             "purged_parakeet": had_parakeet,
             "purged_diarization": had_diar,
@@ -943,7 +946,12 @@ class CudaMemoryMixin:
 
         recover = False
         reason_bits = []
-        if free_drop_gb >= _env_float("CUDA_HEADROOM_RECOVERY_DROP_GB", "1.5"):
+        phonon = getattr(self, "_phonon_runtime", None)
+        retained_worker = bool(phonon and phonon.status().get("model_loaded"))
+        # A known resident child owns its weights/graphs independently of the host
+        # allocator. Global free-memory drop alone must not evict it after each job.
+        # Host reserved/allocated checks below still apply without altered thresholds.
+        if not retained_worker and free_drop_gb >= _env_float("CUDA_HEADROOM_RECOVERY_DROP_GB", "1.5"):
             recover = True
             reason_bits.append(f"free_drop={free_drop_gb:.1f}GB")
         if reserved_b > 0 and total_b > 0:

@@ -22,6 +22,29 @@ class PhononError(RuntimeError):
     """Safe to display: never includes runtime bodies, credentials or URLs."""
 
 
+class ManagedPhononClient:
+    """Job-scoped adapter; the service-owned worker outlives each client/job."""
+
+    def __init__(self, manager, timeout=None):
+        self.manager = manager
+        self.timeout = timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass  # Explicit model purge, GPU phase handoff and app shutdown own lifetime.
+
+    def transcribe(self, audio: bytes, duration: float):
+        from .phonon_runtime import PhononRuntimeError
+        try:
+            data = self.manager.transcribe(audio, duration, self.timeout)
+            words = validate_result(data, duration)
+            return words, {**data.get("runtime", {}), "segments": data.get("segments") or []}
+        except PhononRuntimeError as error:
+            raise PhononError(str(error)) from None
+
+
 def validate_url(value: str) -> str:
     try:
         parsed = urlsplit(value)

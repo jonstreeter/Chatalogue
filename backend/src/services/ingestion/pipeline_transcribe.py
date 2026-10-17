@@ -16,12 +16,12 @@ from . import runtime
 
 class TranscribePhaseMixin:
     def _process_phonon_phase(self, video, audio_path, job_id, route, force_retranscription=False):
-        """Decode bounded PCM windows on one persistent local service, committing each seam."""
+        """Decode bounded PCM windows in the app-owned worker, committing each seam."""
         import math
         import subprocess
         import tempfile
         import wave
-        from .phonon import CHUNK_SECONDS, OVERLAP_SECONDS, SAMPLE_RATE, PhononClient, PhononError, wav_bytes
+        from .phonon import CHUNK_SECONDS, OVERLAP_SECONDS, SAMPLE_RATE, ManagedPhononClient, PhononError, wav_bytes
 
         self._check_job_not_paused(job_id)
         if force_retranscription:
@@ -45,9 +45,8 @@ class TranscribePhaseMixin:
                                     capture_output=True, check=False)
             if result.returncode:
                 raise PhononError("Phonon audio normalization failed; check the source audio and FFmpeg")
-            with wave.open(str(normalized), "rb") as source, PhononClient(
-                os.getenv("PHONON_URL", "http://127.0.0.1:8010"), os.getenv("PHONON_API_KEY", ""),
-                float(deadline) if deadline else None,
+            with wave.open(str(normalized), "rb") as source, ManagedPhononClient(
+                self._get_phonon_runtime(), float(deadline) if deadline else None,
             ) as client:
                 duration = source.getnframes() / SAMPLE_RATE
                 if duration <= 0:
