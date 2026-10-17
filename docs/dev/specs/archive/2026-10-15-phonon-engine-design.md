@@ -1,9 +1,9 @@
 # Optional Phonon Engine — Design Spec
 
 **Date:** 2026-10-15
-**Status:** Approved for implementation
+**Status:** Shipped
 **Owner:** Jon / Codex
-**Plan:** `docs/dev/plans/2026-10-15-phonon-engine.md`
+**Plan:** `docs/dev/plans/archive/2026-10-15-phonon-engine.md`
 **Scope:** Optional Phonon-2 with app-owned installation and model lifecycle; preserve existing transcription, routing, diarization and checkpoint behavior.
 
 ## Motivation
@@ -12,7 +12,7 @@ The original operator-managed HTTP integration was approved on 2026-10-15 and
 implemented in 76976c0. On 2026-10-16 the owner rejected the connection-oriented
 experience and explicitly requested revision of this spec and plan for full
 integration. Original approval remains historical; the owner approved this revision on 2026-10-16 by replying `d` to its approval Handhold.
-The revised app-owned implementation, verification and local build/cache refresh are complete (plan 13/13). Push/shipping and artifact archival remain separately authorized.
+The revised app-owned implementation, verification and local build/cache refresh are complete (plan 13/13). Implementation pushed on 2026-10-16; local assets/cache refreshed and artifacts archived during owner-authorized closeout.
 
 Selecting Phonon should work like selecting another local model: Chatalogue owns
 setup, download, loading, reuse and unloading. Users must not operate a server,

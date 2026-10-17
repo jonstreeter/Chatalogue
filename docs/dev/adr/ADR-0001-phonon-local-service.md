@@ -47,7 +47,7 @@ Connect an explicitly selected Phonon engine to an operator-managed persistent
 loopback server. Reuse one loaded model across requests/jobs and keep upstream
 optimized BF16/CUDA graph defaults. Bound and checkpoint request chunks using
 existing pipeline objects and storage. Keep production app defaults and existing
-engines unchanged. Detailed contract: `docs/dev/specs/2026-10-15-phonon-engine-design.md`.
+engines unchanged. Detailed contract: `docs/dev/specs/archive/2026-10-15-phonon-engine-design.md`.
 
 ## Alternatives considered
 

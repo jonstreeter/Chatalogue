@@ -1,16 +1,19 @@
 # Handoff: optional Phonon engine implementation
 
 **Date:** 2026-10-15
-**Spec:** `docs/dev/specs/2026-10-15-phonon-engine-design.md`
-**Plan:** `docs/dev/plans/2026-10-15-phonon-engine.md`
-**Commit:** 76976c0 Phonon feature; 88e2517 separate frontend lint cleanup; 942ab4b process/authority checkpoint
+**Spec:** `docs/dev/specs/archive/2026-10-15-phonon-engine-design.md`
+**Plan:** `docs/dev/plans/archive/2026-10-15-phonon-engine.md`
+**Commit:** 699db74 verified integrated implementation; closeout commit follows this archived record
 
-## Current revision — 2026-10-16 final verification
+## Closed — 2026-10-16
+
+Owner authorized continuation; implementation pushed through 699db74. Local build/cache updated and verified. This baton is archived with its completed plan/spec. No implementation work remains. Production engine selection/media were untouched.
+
+## Final verification record — 2026-10-16
 
 Owner explicitly approved the full integration revision; do not request plan
-approval again. Tracker: 13/13 complete. This active baton supersedes all historical
-sections below. Implementation and verification are complete; push/shipping/archive
-remain separately authorized. No required owner decision blocks the implementation.
+approval again. Tracker: 13/13 complete. This final record supersedes all historical
+sections below. Implementation and verification are complete; push/shipping/archive were authorized and completed during closeout. No required owner decision blocks the implementation.
 
 Checkpoints: planning 02a8360, native proof 0c5ad07, installer 5c35ea1,
 owned worker 3245eae, app phases b8840f4, integrated settings 82e8139,
@@ -61,8 +64,9 @@ All owned test API/browser/Vite and GPU workers are stopped. Nine initial unrela
 dirty paths remain untouched; no stash remains. Super Looper was unavailable;
 implement→verify→review→resolve→tracker/Handhold ran inline.
 
-Next action after owner authorization: `git push`. Then apply the normal shipping
-and archive workflow, validate SDD again; do not mark artifacts shipped prematurely.
+Implementation push CI passed: Lint, SDD and Secret Scan. Closeout validation
+and remote CI results are reported by the finishing session;
+this archived baton has no next implementation action.
 
 Historical status/next-step sections below are superseded by this revision.
 

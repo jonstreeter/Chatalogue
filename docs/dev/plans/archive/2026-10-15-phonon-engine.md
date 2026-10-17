@@ -1,8 +1,8 @@
 # Optional Phonon Engine — Implementation Plan
 
 **Date:** 2026-10-15
-**Status:** In progress
-**Spec:** `docs/dev/specs/2026-10-15-phonon-engine-design.md`
+**Status:** Done
+**Spec:** `docs/dev/specs/archive/2026-10-15-phonon-engine-design.md`
 
 ## Summary
 
@@ -267,3 +267,5 @@ review gate passed; the separate owner approval gate passed on 2026-10-15.
 
 - 2026-10-16 task 13 PASS: full final backend 108 passed (obsolete HTTP-only tests removed with that transport), one upstream Transformers cache warning plus SWIG exit deprecation. Frontend typecheck/build PASS; lint zero errors/43 unchanged warnings using `npm run lint -- --ignore-pattern 'playwright-report/**'` after plain lint hit EPERM on that generated HTML folder; no lint rules weakened. Ruff entire repository PASS; full SDD validation PASS; actual committed-range impact from 02a8360 PASS with spec/ADR acknowledgement; whitespace PASS. Two isolated Chromium tests and live Settings/model lifecycle proof cover changed UI; the existing live-data E2E suite was not run because it scans/deletes production media. Inline review found no remaining necessary code finding; no subagents.
 - Local update: source is this install checkout; frontend/dist rebuilt. Moved only the verified standalone b0806992 environment into backend/runtime/phonon under source/target installation locks, verified manifest/model hashes and native model/DLL imports, then real GPU readiness and confirmed unload from the final path. Original probe environment with backend-sharing .pth was never promoted. No broad updater (which pulls/upgrades unrelated dependencies), production backend/queue launch, .env setting change, engine activation or media reprocessing. Owned temporary Vite stopped. All 13 tasks complete; active artifacts retained pending separately authorized push/shipping/archive.
+
+- 2026-10-16 closeout: owner authorized continuation through shipping. Implementation pushed through 699db74; local source/build/cache already verified. Spec/plan/handoff archived together, with accepted ADR promoted to current contract and archived spec retained as context. No production worker launch, engine activation or media reprocessing.

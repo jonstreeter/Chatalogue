@@ -14,12 +14,12 @@
       ],
       "authorities": [
         {
-          "path": "docs/dev/specs/2026-10-15-phonon-engine-design.md",
-          "role": "contract"
+          "path": "docs/dev/specs/archive/2026-10-15-phonon-engine-design.md",
+          "role": "context"
         },
         {
           "path": "docs/dev/adr/ADR-0001-phonon-local-service.md",
-          "role": "refines"
+          "role": "contract"
         }
       ]
     }
