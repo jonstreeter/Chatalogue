@@ -5,62 +5,64 @@
 **Plan:** `docs/dev/plans/2026-10-15-phonon-engine.md`
 **Commit:** 76976c0 Phonon feature; 88e2517 separate frontend lint cleanup; 942ab4b process/authority checkpoint
 
-## Current revision — 2026-10-16
+## Current revision — 2026-10-16 final verification
 
-Task 12 final real app measurements: short 6.021/7.136s, long 125.762/128.842s; startup ~46s. Actual GPU unload 0.202s and next short phase including reload 49.451s. No structural clock issues; correct provenance/PID reuse. Native long runs are slower than earlier Docker measurements. Task 13 checks pass (backend108, typecheck, Ruff, SDD; lint0errors/43warnings with generated report excluded; buildPASS). Default runtime cache promotion/readiness is in progress; do not stop its owned verification process. Final commit/impact and handoff remain.
+Owner explicitly approved the full integration revision; do not request plan
+approval again. Tracker: 13/13 complete. This active baton supersedes all historical
+sections below. Implementation and verification are complete; push/shipping/archive
+remain separately authorized. No required owner decision blocks the implementation.
 
+Checkpoints: planning 02a8360, native proof 0c5ad07, installer 5c35ea1,
+owned worker 3245eae, app phases b8840f4, integrated settings 82e8139,
+setup/benchmarks 0ec0c16; final tracker checkpoint follows this note.
 
-Owner explicitly approved the revised app-owned integration plan with `d`.
-Planning checkpoint 02a8360; native feasibility 0c5ad07; private installer 5c35ea1.
-Owned-worker checkpoint 3245eae. App-phase checkpoint b8840f4. Settings checkpoint 82e8139. Tracker: 12/13 complete after benchmark/documentation verification. Do not request another
-plan approval. No product settings/global engine activation or production media
-processing was performed by these tests. The settings source now has app-owned controls; the installed frontend build
-will be refreshed in task 13.
+Implemented app-owned hash-pinned private installation and persistent native worker;
+no URL/key controls, Docker prerequisite or external inference service. Real setup,
+load/test/unload, busy refusal, competing-GPU release and shutdown/parent-exit
+ownership are verified. BF16/K16/six duration buckets retained. Existing bounded
+chunks, absolute clocks/overlap, silent/interrupted checkpoints and queue provenance
+remain; existing engines, routing and defaults are preserved. Native platform is
+Windows x64/Python3.11/NVIDIA hardware BF16 only, tested RTX5090.
 
-Task 7 proved native Windows CUDA with unmodified verified upstream 1.0.8 source.
-Task 8 installed the standalone hash-pinned environment. The first clean install
-exposed a missing DLL in the generic SoundFile wheel; the lock now pins its
-Windows wheel and publication requires an actual model/DLL import, not just pip
-metadata checks. Current private interpreter path:
-`backend/data/asr-benchmark/phonon-owned-install/installed-path.txt`.
-This is a proper private venv; never use the earlier probe's backend-sharing .pth
-file in the product. Backend Transformers remains 4.57.1.
+Verification: full backend108 PASS; frontend typecheck/build PASS; Ruff whole repo
+PASS; full SDD validate PASS; actual committed-range impact from 02a8360 PASS with
+spec/ADR acknowledgement. Frontend lint0errors/43unchanged warnings; plain command
+hit EPERM on generated playwright-report, so same rules ran with only that generated
+folder ignored. Two isolated Chromium settings/queue tests PASS and live Playwright
+against isolated SQLite/scratch settings verified real model readiness/unload and
+save/reload. The existing live-data E2E suite was not run: it scans/deletes installed
+media. No gate bypass. Inline review resolved necessary findings; no subagents.
 
-Task 9 owns a private IPC worker in a Windows Job Object, assigning its suspended
-venv launcher before execution and verifying the actual interpreter's membership.
-It serializes GPU requests, reuses warmed weights/graphs, checks protocol and word
-clocks, refuses busy purge and confirms actual interpreter exit on unload. Abrupt
-parent exit, crashes, malformed replies, readiness failure and configured deadline
-cleanup have regression coverage. Twenty-nine focused tests pass. Real private
-GPU requests reused PID 42932, BF16/K16/six buckets, 383 words per 120s request;
-55.729s startup, 4.745/4.691s requests. No end-to-end app performance claim yet.
-Report: `backend/data/asr-benchmark/owned-worker-probe.json`.
+Measured actual app phases (routing disabled only in benchmark processes):
+120s audio 6.021/7.136s, separate initial load46.664s; 2880s audio
+125.762/128.842s, load46.025s. Same worker per pair, no structural timing issues;
+383/8704 words,41/1043 segments; long5chunks. GPU release0.202s followed by
+49.451s next short transcription including reload/newPID. Competing model inference,
+download and queue wait excluded. Native long measurements are slower than prior
+Docker app timings; no throughput improvement, WER or batch128 claim.
 
-Task 10 uses the managed adapter in the actual app phase, with GPU handoff,
-explicit purge and main shutdown. No job inference uses URL/key settings now.
-Retained child memory no longer triggers false host allocator recovery; host
-reserved/allocated checks are unchanged. Full backend 126 passed; additional
-Diarization handoff/recovery cases 4 passed, Ruff and SDD passed. Actual isolated
-app phases: 44.599s separate startup, 5.780/6.824s per 120s recording, same PID
-18868, correct Phonon provenance and valid clocks. Report:
-`backend/data/asr-benchmark/app-phonon-managed-120s-task10.json`.
+Local install update complete: frontend/dist rebuilt and verified standalone runtime
+moved under locks into `backend/runtime/phonon/installs/b0806992a441ad3623fe35e78d30063ac845467f3f68289700a636ba19211b99`.
+Manifest/model hashes, model/DLL imports, real GPU readiness and confirmed unload
+passed at that final path. The ignored installed-path.txt pointer now names it.
+Never promote the original probe venv with backend-sharing .pth. The broad Windows
+updater was not run because it pulls and upgrades unrelated dependencies; this
+checkout already contains the new source/dependencies, with its local assets/cache
+updated directly. No production backend is running; start/restart the app and refresh
+Settings to use the new build. Default selection/global activation was not changed.
+Do not start queues, reprocess existing media, or push/deploy without authorization.
 
-Task 11 removed all URL/key controls and obsolete HTTP adapter/probe. The API
-accepts deprecated fields as no-ops, keeps stored keys and never returns them.
-Async model status/setup/load/test/unload is implemented, with post-install GPU
-work recheck and busy-safe model controls. TypeScript and Ruff pass; frontend lint
-has zero errors and 43 existing warnings. Two isolated Chromium regressions pass.
-Live Playwright CLI against a dedicated in-memory SQLite backend/scratch .env
-verified real RTX5090/BFLOAT16 readiness, unload, save and reload. Evidence:
-`backend/data/asr-benchmark/phonon-ui-evidence.json`; screenshot:
-`output/playwright/phonon-ready.png`. The isolated API/browser were stopped.
-The dedicated Vite verification server (5175, node PID 50232) remains running
-until remaining browser verification is finished; do not kill unrelated servers.
+Evidence under ignored `backend/data/asr-benchmark/`:
+- `app-phonon-managed-120s-final.json`, `app-phonon-managed-2880s-final.json`
+- `phonon-local-install-final.json` (final path readiness, actual child stopped)
+- `phonon-ui-evidence.json` (isolated settings, secret retained)
+- `output/playwright/phonon-ready.png` is the reviewed live UI screenshot.
+All owned test API/browser/Vite and GPU workers are stopped. Nine initial unrelated
+dirty paths remain untouched; no stash remains. Super Looper was unavailable;
+implement→verify→review→resolve→tracker/Handhold ran inline.
 
-Next: task 13 — replace obsolete setup documentation and run short/long actual
-app benchmarks using the verified private cache. Then task 13 final checks and
-local build/cache update. Do not activate the engine globally, reprocess production
-media, invoke broad process-killing launchers, push or deploy without authorization.
+Next action after owner authorization: `git push`. Then apply the normal shipping
+and archive workflow, validate SDD again; do not mark artifacts shipped prematurely.
 
 Historical status/next-step sections below are superseded by this revision.
 
