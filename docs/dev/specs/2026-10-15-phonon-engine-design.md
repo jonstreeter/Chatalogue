@@ -12,7 +12,7 @@ The original operator-managed HTTP integration was approved on 2026-10-15 and
 implemented in 76976c0. On 2026-10-16 the owner rejected the connection-oriented
 experience and explicitly requested revision of this spec and plan for full
 integration. Original approval remains historical; the owner approved this revision on 2026-10-16 by replying `d` to its approval Handhold.
-The installed UI remains the original implementation until the revised plan is built.
+The revised app-owned implementation is complete; final verification and local build refresh are tracked in the plan.
 
 Selecting Phonon should work like selecting another local model: Chatalogue owns
 setup, download, loading, reuse and unloading. Users must not operate a server,
@@ -41,7 +41,7 @@ ParakeetForTDT class used by the upstream CUDA implementation. Isolated native
 worker feasibility was therefore the first implementation gate. Task 7 passed on
 2026-10-16: native Windows inference retained BF16/K16/six buckets and valid
 repeated word timings. See the research report for package differences, cold-load
-costs and process-exit evidence; full app integration remains unimplemented.
+costs and process-exit evidence. Tasks 8–11 implemented the private installer, owned worker, app phases and model controls.
 
 Task 7 must pin the source/dependencies from verified image
 `ghcr.io/fermionresearch/phonon-cuda:1.0.8` (digest

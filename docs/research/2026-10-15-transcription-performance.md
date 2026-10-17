@@ -280,3 +280,43 @@ recovery. Regression cases cover retained worker, no worker and actual host
 allocator pressure. Language probing through GPU Whisper and actual competing
 GPU phases still release Phonon by design and can add reload time; staged mode
 alone does not eliminate every reload when audio-language probing is needed.
+
+
+### Final integrated native long-audio measurement — 2026-10-16
+
+Actual app phase, 2880s (48 minutes) of authorized fixture audio, in-memory
+SQLite and temporary copies; language routing disabled only in the benchmark
+process. Separate worker startup/readiness: 46.025s. Two complete app phases:
+125.762s / 128.842s (22.90x / 22.35x real time). Both produced 8704 words,
+1043 upstream-preserving segments and five committed chunks, with no structural
+word-clock issues. Same actual PID 22728, request counter 1→11 including initial
+silence, BF16/K16/six warmed buckets and actual Phonon provenance throughout.
+The worker was stopped by the harness on exit.
+
+This native run is slower than the earlier Docker HTTP app measurements
+(46.257s / 62.129s for the same 2880s fixture). Host conditions and dependencies
+were not controlled as a cross-platform performance experiment. Full integration
+is established; a throughput improvement over that prior implementation is not.
+Do not substitute decoder-only timing or promise batch-128/backlog performance.
+Neither WER nor listening-based alignment accuracy was measured.
+Report: ignored `backend/data/asr-benchmark/app-phonon-managed-2880s-final.json`.
+The benchmark now rejects a missing/invalid explicit native cache before loading,
+so its offline claim cannot silently initiate an installation.
+
+
+### Final short-audio and GPU handoff measurement — 2026-10-16
+
+Actual 120s app phases: 6.021s / 7.136s with the same worker PID 56284
+(counter 2→3); initial load/readiness separately 46.664s. Both returned 383 words,
+41 segments and no structural timing issues. The third phase used the app's
+actual `_release_phonon_model` boundary: unload 0.202s, then 49.451s for the next
+transcription including reload, with new worker PID 3688. That phase also returned
+383 valid words/41 segments. This measures release plus subsequent app reload,
+not the inference duration of a competing diarization/Whisper/cloning model.
+The full backend suite separately verifies the actual diarization handoff hook.
+Defaults and production settings were not changed; controlled English routing was
+disabled only in the benchmark process. Reports exclude downloading, queue wait
+and diarization. No recognition-accuracy or batch throughput claim follows.
+Report: ignored `backend/data/asr-benchmark/app-phonon-managed-120s-final.json`.
+Reproduce with `scripts/benchmark_asr.py app <wav> --app-engine phonon
+--phonon-runtime backend/runtime/phonon --phonon-handoff --output <fresh-json>`.

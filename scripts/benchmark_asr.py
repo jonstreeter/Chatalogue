@@ -28,7 +28,7 @@ import time
 from contextlib import ExitStack
 
 
-def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint=None, app_engine=None, phonon_env=None, phonon_runtime=None):
+def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint=None, app_engine=None, phonon_env=None, phonon_runtime=None, phonon_handoff=False):
     """Run the real transcription phase; isolate DB before any app import."""
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "backend"))
@@ -105,13 +105,25 @@ def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint
         if app_engine == "phonon":
             if not phonon_runtime:
                 raise ValueError("Phonon benchmark requires explicit --phonon-runtime; production runtime is never selected implicitly")
+            from src.services.ingestion.phonon_runtime import PhononInstallation
+
+            if PhononInstallation(phonon_runtime)._installed(verify=True) is None:
+                raise ValueError("Offline benchmark requires an already verified Phonon installation")
             begin = time.perf_counter()
             result["runtime_before"] = service._get_phonon_runtime().load()["runtime"]
             result["runtime_startup_seconds"] = time.perf_counter() - begin
         import torch
 
         words = []
-        for index, label in enumerate(("cold", "warm")):
+        labels = ("cold", "warm", "after_gpu_handoff") if phonon_handoff else ("cold", "warm")
+        if phonon_handoff and app_engine != "phonon":
+            raise ValueError("GPU handoff benchmark requires --app-engine phonon")
+        for index, label in enumerate(labels):
+            if label == "after_gpu_handoff":
+                begin = time.perf_counter()
+                service._release_phonon_model("benchmark competing GPU phase boundary")
+                result["handoff_unload_seconds"] = time.perf_counter() - begin
+                result["handoff_note"] = "Actual app release boundary and subsequent transcription reload; competing model inference is excluded"
             provenance.clear()
             run_dir = scratch / label
             run_dir.mkdir()
@@ -138,6 +150,8 @@ def benchmark_application(audio, duration, setup_only=False, parakeet_checkpoint
                                    "raw": raw, "timestamp_review": timestamp_review(words, duration),
                                    "peak_pytorch_bytes": torch.cuda.max_memory_allocated()
                                    if torch.cuda.is_available() else None})
+            if app_engine == "phonon":
+                result["runs"][-1]["runtime"] = service._get_phonon_runtime().status()["runtime"]
         if app_engine == "phonon":
             result["runtime_after"] = service._get_phonon_runtime().status()["runtime"]
         return result, words
@@ -204,8 +218,9 @@ def main():
     parser.add_argument("--setup-only", action="store_true", help="Validate app isolation without loading models")
     parser.add_argument("--parakeet-checkpoint", type=Path, help="Local checkpoint for app's configured Parakeet model")
     parser.add_argument("--app-engine", choices=["phonon", "parakeet", "whisper", "auto"], help="Process-local engine override; never saved")
-    parser.add_argument("--phonon-env", type=Path, help="Ignored runtime credential env file; contents are never reported")
+    parser.add_argument("--phonon-env", type=Path, help="Process-local benchmark environment overrides; legacy connection values are ignored")
     parser.add_argument("--phonon-runtime", type=Path, help="Explicit existing app-owned runtime cache for isolated Phonon app benchmarks")
+    parser.add_argument("--phonon-handoff", action="store_true", help="Add a third app phase after releasing Phonon at the competing-GPU boundary")
     parser.add_argument("--phonon-repetitions", type=int, default=1, help="Inputs in one Phonon process (CUDA CLI only)")
     parser.add_argument("--command", nargs=argparse.REMAINDER,
                         help="Phonon executable or docker command; must be last")
@@ -230,7 +245,7 @@ def main():
     begin = time.perf_counter()
     if args.engine == "app":
         report["application"], words = benchmark_application(
-            args.audio, duration, args.setup_only, args.parakeet_checkpoint, args.app_engine, args.phonon_env, args.phonon_runtime)
+            args.audio, duration, args.setup_only, args.parakeet_checkpoint, args.app_engine, args.phonon_env, args.phonon_runtime, args.phonon_handoff)
         report["process_wall_seconds"] = time.perf_counter() - begin
     elif args.engine == "phonon-native":
         report["native"], words = benchmark_native_phonon(args.audio, args.native_source, args.native_model)

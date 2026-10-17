@@ -7,9 +7,12 @@
 
 ## Current revision — 2026-10-16
 
+Task 12 final real app measurements: short 6.021/7.136s, long 125.762/128.842s; startup ~46s. Actual GPU unload 0.202s and next short phase including reload 49.451s. No structural clock issues; correct provenance/PID reuse. Native long runs are slower than earlier Docker measurements. Task 13 checks pass (backend108, typecheck, Ruff, SDD; lint0errors/43warnings with generated report excluded; buildPASS). Default runtime cache promotion/readiness is in progress; do not stop its owned verification process. Final commit/impact and handoff remain.
+
+
 Owner explicitly approved the revised app-owned integration plan with `d`.
 Planning checkpoint 02a8360; native feasibility 0c5ad07; private installer 5c35ea1.
-Owned-worker checkpoint 3245eae. App-phase checkpoint b8840f4. Tracker: 11/13 complete after the settings checkpoint. Do not request another
+Owned-worker checkpoint 3245eae. App-phase checkpoint b8840f4. Settings checkpoint 82e8139. Tracker: 12/13 complete after benchmark/documentation verification. Do not request another
 plan approval. No product settings/global engine activation or production media
 processing was performed by these tests. The settings source now has app-owned controls; the installed frontend build
 will be refreshed in task 13.
@@ -54,7 +57,7 @@ verified real RTX5090/BFLOAT16 readiness, unload, save and reload. Evidence:
 The dedicated Vite verification server (5175, node PID 50232) remains running
 until remaining browser verification is finished; do not kill unrelated servers.
 
-Next: task 12 — replace obsolete setup documentation and run short/long actual
+Next: task 13 — replace obsolete setup documentation and run short/long actual
 app benchmarks using the verified private cache. Then task 13 final checks and
 local build/cache update. Do not activate the engine globally, reprocess production
 media, invoke broad process-killing launchers, push or deploy without authorization.

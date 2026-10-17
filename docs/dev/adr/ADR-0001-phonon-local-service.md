@@ -1,4 +1,4 @@
-# ADR-0001: Connect optional Phonon through a persistent local service
+# ADR-0001: Own optional Phonon through a persistent private worker
 
 **Date:** 2026-10-15
 **Status:** Accepted
@@ -13,14 +13,14 @@ spec/plan. This accepted amendment defines an app-owned private native worker us
 stdin/stdout, app-managed installation/cache and real load/unload/shutdown. No
 URL/key UI, Docker prerequisite or operator-managed server. Preserve upstream
 inference and strict checkpoints. The revised spec governs the proposal details.
-The accepted decision below is historical and remains the installed behavior;
+The original decision below is historical; the app-owned implementation replaces it;
 the owner separately approved this replacement on 2026-10-16 (`d`). This
 amendment is now the decision and the original is historical only.
 
 Alternatives: embedding into the backend conflicts with its pinned ML stack;
 app-managed Docker preserves the tested Linux path but retains the prerequisite
 the owner rejected; an isolated native worker is recommended subject to a hard
-Windows CUDA feasibility gate. If that gate fails, stop before downstream product
+Windows CUDA feasibility gate (passed on 2026-10-16). If that gate fails, stop before downstream product
 work and seek an owner decision. Do not silently fall back to CPU or Docker.
 
 Consequences: app owns installation, progress, concurrent lifecycle and parent-exit
