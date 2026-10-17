@@ -19,10 +19,21 @@ must prove native Windows CUDA using exact verified upstream 1.0.8 source and
 cached weights before downstream product work. Task 7 native CUDA feasibility passed on 2026-10-16 with unmodified upstream
 source, BF16/K16/six buckets, valid repeated inference and actual child exit.
 Evidence and reproducible command are in the research report. Future gate failure requires owner decision,
-not a silent CPU or Docker substitute. Current installed code is still HTTP mode. Tracker is now 7/13 complete.
+not a silent CPU or Docker substitute. Current installed code is still HTTP mode. Tracker is now 8/13 complete.
+
+Task 7 checkpoint: 0c5ad07. Task 8 implementation is verified:
+`phonon_runtime.py`, private wheel lock, `test_phonon_runtime.py`, runtime path
+constant and registry mapping. Fifteen installer tests and Ruff pass. Real scratch
+root: `backend/data/asr-benchmark/phonon-owned-install`. First standalone install
+exposed a missing DLL in the generic SoundFile wheel despite passing pip check;
+lock now pins the Windows wheel and publication requires a native-import check.
+The corrected clean install passed pip check, native imports and post-publication
+Python isolation checks; task 8 is complete. Private interpreter path is stored in
+`backend/data/asr-benchmark/phonon-owned-install/installed-path.txt`.
+Never use the backend-sharing probe .pth file in the product environment.
 
 Planning checkpoint committed as 02a8360. Next action: implement task 8, the
-private optional installer/cache, then task 9 owned IPC worker. No product implementation changes,
+owned IPC worker (task 9); installer/cache task 8 is complete. No product implementation changes,
 production settings writes or media reprocessing occurred during this revision.
 Historical status/next-step sections below describe the prior completed delivery
 and are superseded by this current revision. Cached artifacts and verification

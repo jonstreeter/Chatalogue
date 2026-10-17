@@ -38,7 +38,10 @@ enter a URL/API key, install Docker, or diagnose a separate service.
 Upstream documents NVIDIA CUDA through Docker; a supported native Windows CUDA
 package has not been established. The backend's Transformers 4.57.1 lacks the
 ParakeetForTDT class used by the upstream CUDA implementation. Isolated native
-worker feasibility is therefore the first implementation gate, not a proven fact.
+worker feasibility was therefore the first implementation gate. Task 7 passed on
+2026-10-16: native Windows inference retained BF16/K16/six buckets and valid
+repeated word timings. See the research report for package differences, cold-load
+costs and process-exit evidence; full app integration remains unimplemented.
 
 Task 7 must pin the source/dependencies from verified image
 `ghcr.io/fermionresearch/phonon-cuda:1.0.8` (digest
@@ -184,7 +187,7 @@ no subagents. Spec-only followed by paired spec/plan review.
   serialized staging/atomic manifest, observable progress and offline cache tests.
 
 No necessary planning finding remains open. Final paired artifact review passes;
-revised owner approval passed on 2026-10-16; the task-7 implementation feasibility gate remains.
+revised owner approval and the task-7 native feasibility gate passed on 2026-10-16.
 Remember to follow the MSW deletion rule for all claims — no exceptions.
 
 ## Out of scope
@@ -196,7 +199,8 @@ accuracy claims, defaults/routing changes or automatic production reprocessing.
 ## Open questions
 
 Owner approval of this revision passed on 2026-10-16. Native Windows
-CUDA feasibility is deliberately unproven and must pass task 7 before proceeding.
+CUDA inference feasibility passed task 7 on 2026-10-16; integrated lifecycle and
+app performance verification remain in the numbered implementation tasks.
 
 Sources: [upstream CUDA deployment](https://github.com/fermionresearch/phonon/blob/main/docs/cuda.md),
 [installation](https://github.com/fermionresearch/phonon/blob/main/docs/install.md),

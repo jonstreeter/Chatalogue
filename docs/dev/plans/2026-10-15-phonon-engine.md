@@ -11,7 +11,7 @@ integration with app-owned installation and an isolated persistent native worker
 The original approval and completed tasks 1–6 remain historical. The owner
 explicitly authorized revising the spec and plan; revised implementation approval
 passed on 2026-10-16 (`d`). Tasks 7 onward implement this approved revision.
-Native Windows CUDA is not yet verified: task 7 must pass before product work.
+Task 7 native Windows CUDA feasibility passed on 2026-10-16; product work can proceed.
 
 ## Affected modules
 
@@ -55,7 +55,7 @@ The affected-module list above records original tasks 1–6. For this revision:
 | # | Task | Files | Size | Status |
 | --- | --- | --- | --- | --- |
 | 7 | Prove native Windows CUDA in a disposable private environment using exact 1.0.8 inference source and cached weights; record pins/hashes, real short repeated inference, BF16/graphs and exit VRAM evidence. Stop if this gate fails; do not build a Docker/CPU substitute | `scripts/benchmark_asr.py`, `docs/research/2026-10-15-transcription-performance.md` (research artifacts under ignored `backend/data/asr-benchmark/`) | M | ✅ done |
-| 8 | Implement isolated optional installer/cache with pinned manifest, progress, lock, staged atomic publication and interrupted/offline recovery; verify scratch installs and concurrent requests | `backend/src/services/ingestion/phonon_runtime.py` (new), `backend/src/services/ingestion/phonon_worker_requirements.txt` (new), `backend/src/services/ingestion/runtime.py`, `backend/src/test_phonon_runtime.py` (new) | M | ☐ todo |
+| 8 | Implement isolated optional installer/cache with pinned manifest, progress, lock, staged atomic publication and interrupted/offline recovery; verify scratch installs and concurrent requests | `backend/src/services/ingestion/phonon_runtime.py` (new), `backend/src/services/ingestion/phonon_worker_requirements.txt` (new), `backend/src/services/ingestion/runtime.py`, `backend/src/test_phonon_runtime.py` (new) | M | ✅ done |
 | 9 | Package attributed upstream inference worker and serialized versioned IPC; implement owned process load/reuse/shutdown/parent-exit behavior; verify real requests, crash recovery, stderr separation and VRAM release | `backend/src/services/ingestion/phonon_worker.py` (new), `backend/src/services/ingestion/phonon_runtime.py`, `backend/src/services/ingestion/phonon.py`, `backend/src/test_phonon_runtime.py`, `backend/src/services/ingestion/phonon_upstream/` (pinned source and notices, only if redistribution needed) | M | ☐ todo |
 | 10 | Wire worker into existing app phase and GPU lifecycle, replacing HTTP calls; retain checkpoint/routing semantics; verify repeated isolated app jobs, busy purge, engine switch and diarization handoff | `backend/src/services/ingestion/service.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/routers/system.py`, `backend/src/main.py`, `backend/src/test_phonon.py`, `backend/src/test_phonon_runtime.py`, `backend/src/test_transcription_routing.py` | L | ☐ todo |
 | 11 | Replace connection settings with app-owned setup/load/readiness state; preserve old-client no-op compatibility and sanitized responses; browser-verify progress/failure/save/reload/unload and existing engines | `backend/src/schemas.py`, `backend/src/routers/settings.py`, `frontend/src/pages/Settings.tsx`, `frontend/e2e/phonon-settings.spec.ts`, `backend/src/test_phonon.py` | M | ☐ todo |
@@ -64,7 +64,7 @@ The affected-module list above records original tasks 1–6. For this revision:
 
 Each task uses implement → verify → review → resolve necessary findings → tracker
 and Handhold; commit only coherent verified slices through existing gates.
-Task 7 is authorized by the revised implementation approval, not a completed proof.
+Task 7 passed with evidence in the research report and verification log.
 Before tasks 8–13 run preflight and read updated authorities. Keep the backend
 ML environment unchanged. Resolve exact private-environment and model paths via
 runtime.py; record source/dependency hashes from the tested image before installer
@@ -100,8 +100,8 @@ code. No arbitrary native-worker output cap or setup timeout is invented.
 no subagents. Necessary findings resolved in the revised spec and sequenced above:
 native feasibility first, GPU phase ownership, backward-compatible partials and
 settings, supervised exit, atomic installer and truthful UI. Artifact review gate
-passes. No native-runtime verification is claimed; failed task 7 requires an owner
-decision. Original tests below prove the HTTP implementation only. Adding CPU/MLX,
+passes. Task 7 now verifies native inference; a subsequent feasibility failure
+requires an owner decision. Original tests below prove the HTTP implementation only. Adding CPU/MLX,
 Docker management, a new queue or kernel tuning fails the MSW necessity test for
 this revision and is excluded. Revised owner approval passed on 2026-10-16.
 
@@ -150,7 +150,7 @@ this revision and is excluded. Revised owner approval passed on 2026-10-16.
 
 ## Open questions
 
-Revision: owner approval passed on 2026-10-16; native feasibility must pass task 7. The following
+Revision: owner approval and task 7 native feasibility passed on 2026-10-16. The following
 paragraph records the original design only.
 
 
@@ -252,3 +252,7 @@ review gate passed; the separate owner approval gate passed on 2026-10-15.
 - 2026-10-16: owner replied `d` to approve the revised integration plan. Proceed to planning checkpoint and task 7; no repeat approval required.
 
 - 2026-10-16 task 7 PASS: native Windows CUDA unmodified upstream source; BF16/K16/six buckets, repeated real 120s inference with valid timings, actual child exit checked. Reproducible native benchmark added and exercised; Ruff PASS. Details, cold-load costs, package differences and WDDM limits in research report. No product runtime or production settings changed.
+
+- Task 8 in progress: versioned private installer/cache, hash-pinned wheel closure, atomic publication, download resume, installation lock and recovery implemented. Fifteen focused installer tests PASS; Ruff PASS. First real scratch installation passed pip check but failed model import because the generic SoundFile wheel omitted its Windows DLL. Corrected to the official pinned Windows wheel; added mandatory native-import gate before publication. Fresh corrected installation is running, so task 8 remains in progress.
+
+- 2026-10-16 task 8 PASS: corrected clean standalone installation, full pinned/hash-verified wheel closure, pip check and pre-publication model/DLL import PASS. Post-publication interpreter imports ParakeetForTDT/SoundFile, sees CUDA, has user site disabled and no backend package path; Torch 2.11.0+cu128 / Transformers 5.17.0 / NumPy 2.4.6. Fifteen installer tests, Ruff, full SDD validation and whitespace checks PASS. Inline review resolved the missing Windows DLL and immutable-lock race; no necessary finding remains. Backend environment/defaults/settings remain unchanged.

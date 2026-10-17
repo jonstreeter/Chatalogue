@@ -1,12 +1,24 @@
 {
   "version": 1,
-  "domains": [{
-    "id": "phonon-adapter",
-    "summary": "Optional persistent local Phonon transcription transport.",
-    "paths": ["backend/src/services/ingestion/phonon.py"],
-    "authorities": [
-      {"path": "docs/dev/specs/2026-10-15-phonon-engine-design.md", "role": "contract"},
-      {"path": "docs/dev/adr/ADR-0001-phonon-local-service.md", "role": "refines"}
-    ]
-  }]
+  "domains": [
+    {
+      "id": "phonon-adapter",
+      "summary": "Optional app-owned Phonon runtime, installation and transcription boundary.",
+      "paths": [
+        "backend/src/services/ingestion/phonon.py",
+        "backend/src/services/ingestion/phonon_runtime.py",
+        "backend/src/services/ingestion/phonon_worker_requirements.txt"
+      ],
+      "authorities": [
+        {
+          "path": "docs/dev/specs/2026-10-15-phonon-engine-design.md",
+          "role": "contract"
+        },
+        {
+          "path": "docs/dev/adr/ADR-0001-phonon-local-service.md",
+          "role": "refines"
+        }
+      ]
+    }
+  ]
 }
