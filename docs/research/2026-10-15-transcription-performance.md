@@ -320,3 +320,49 @@ and diarization. No recognition-accuracy or batch throughput claim follows.
 Report: ignored `backend/data/asr-benchmark/app-phonon-managed-120s-final.json`.
 Reproduce with `scripts/benchmark_asr.py app <wav> --app-engine phonon
 --phonon-runtime backend/runtime/phonon --phonon-handoff --output <fresh-json>`.
+
+### Production episode observations and closeout — 2026-10-18
+
+Owner-provided completed queue screenshots compare the same 3:11:16 episode,
+“Gamblers Anonymous,” using each engine:
+
+| Queue metric | Phonon-2 | Parakeet (Coexist) |
+| --- | ---: | ---: |
+| Transcription | 4:16 (45x realtime) | 3:21 (57x realtime) |
+| Diarization | 5:28 | 5:06 |
+| Combined processing | 9:44 | 8:28 |
+| Wall-clock elapsed | 10:19 | 11:22 |
+
+Parakeet transcription took 55 seconds less (21.5% less time). Phonon completed
+sooner by wall clock in this observation, but elapsed time exceeded combined
+processing by 35 seconds versus 2:54; the screenshots do not identify that
+overhead. These are comparable practical alternatives, not evidence of a Phonon
+speed advantage. Warm/cold state and concurrent activity were not controlled;
+accuracy was not measured. Diarization is the largest measured processing stage.
+
+Follow-up fixes are committed and pushed: setup wizard selection, download
+compatibility, truthful queue provenance, name-repair performance/progress,
+stable episode-page metadata snapshots (`2292ce8`), and cold diarization resume
+voice-model initialization (`6de54ee`). The latter fails before replacing rows
+if voice inference cannot initialize; isolated regression coverage exercises
+both successful matching to an existing voice and preservation on load failure.
+Final code verification: 114 backend tests passed; Ruff, frontend typecheck,
+frontend lint (zero errors, 43 existing warnings), build, SDD validation and
+published CI passed. Browser verification confirmed the episode interface and
+recognized speaker names. The live-data destructive E2E suite was not run.
+
+The owner-authorized backed-up diarization-only repair of episode 16962,
+“Modest Mice,” completed as job 31420 in 4:00.880, reusing saved ASR words.
+After consolidation: 3916 segments, 3439 assigned and 477 unassigned (12.2%).
+Recognized profiles include Chris Hanna (1599 segments), Jared Higdon (926)
+and Flip Johnson (297); other segments retain generic speaker labels.
+These counts establish restored matching, not listening-verified attribution
+accuracy. The original 4210-row transcript backup remains under
+`backend/data/temp/redo_diarization_backup_16962_1792331485036.json`.
+
+Phonon implementation remains complete: the archived plan has all 13 tasks done.
+The local app is running the pushed fixes; no active jobs were present at
+closeout. Optional runtime caches, benchmark evidence and the repair backup are
+retained. Existing defaults and unrelated uncommitted development work are not
+part of this closeout. Future work can start from the committed code baseline;
+use a separate worktree when it overlaps the existing unrelated dirty files.
