@@ -120,7 +120,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
   const [validating, setValidating] = useState(false);
   const [hfSkipped, setHfSkipped] = useState(false);
 
-  const [engine, setEngine] = useState<'auto' | 'whisper' | 'parakeet'>('auto');
+  const [engine, setEngine] = useState<'auto' | 'whisper' | 'parakeet' | 'phonon'>('auto');
   const [whisperModel, setWhisperModel] = useState('medium');
   const [parakeetAllowWhisperFallback, setParakeetAllowWhisperFallback] = useState(true);
   const [engineTest, setEngineTest] = useState<{
@@ -129,6 +129,8 @@ export function SetupWizard({ onClose, onComplete }: Props) {
     device?: string;
     resolvedEngine?: string;
     fallbackUsed?: boolean;
+    pending?: boolean;
+    detail?: string;
   } | null>(null);
   const [testingEngine, setTestingEngine] = useState(false);
 
@@ -243,6 +245,40 @@ export function SetupWizard({ onClose, onComplete }: Props) {
     }
   };
 
+  const applyEngineTest = useCallback((data: {
+    status?: string; available?: boolean; state?: string; device?: string;
+    resolved_engine?: string; engine?: string; fallback_used?: boolean;
+    error?: string; detail?: string; runtime?: { gpu?: string; device?: string };
+  }) => {
+    const pending = engine === 'phonon' && ['installing', 'loading', 'busy'].includes(data.state || '');
+    const success = data.status ? data.status.toLowerCase() === 'ok' : Boolean(data.available);
+    setEngineTest({
+      pending, success, detail: data.detail,
+      device: data.runtime?.gpu || data.runtime?.device || data.device,
+      resolvedEngine: data.resolved_engine || data.engine || engine,
+      fallbackUsed: Boolean(data.fallback_used),
+      error: success || pending ? undefined : (data.error || data.detail || 'Engine not available'),
+    });
+    setTestingEngine(pending);
+  }, [engine]);
+
+  useEffect(() => {
+    if (engine !== 'phonon' || !engineTest?.pending) return;
+    let stopped = false;
+    // Match the existing Settings model-status polling cadence.
+    const timer = window.setInterval(() => {
+      api.post('/settings/test-transcription-engine', { engine: 'phonon', phonon_action: 'status' })
+        .then(res => { if (!stopped) applyEngineTest(res.data || {}); })
+        .catch(e => {
+          if (!stopped) {
+            setEngineTest({ success: false, error: getErrorDetail(e) || 'Unable to check Phonon setup' });
+            setTestingEngine(false);
+          }
+        });
+    }, 5000);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [engine, engineTest?.pending, applyEngineTest]);
+
   const handleTestEngine = async () => {
     setTestingEngine(true);
     setEngineTest(null);
@@ -253,19 +289,9 @@ export function SetupWizard({ onClose, onComplete }: Props) {
         parakeet_allow_whisper_fallback: parakeetAllowWhisperFallback,
       });
       const res = await api.post('/settings/test-transcription-engine', { engine });
-      const data = res.data || {};
-      const status = String(data.status || '').toLowerCase();
-      const success = status ? status === 'ok' : Boolean(data.available);
-      setEngineTest({
-        success,
-        device: data.device,
-        resolvedEngine: data.resolved_engine || data.engine || engine,
-        fallbackUsed: Boolean(data.fallback_used),
-        error: success ? undefined : (data.error || data.detail || 'Engine not available'),
-      });
+      applyEngineTest(res.data || {});
     } catch (e) {
       setEngineTest({ success: false, error: getErrorDetail(e) || 'Test failed' });
-    } finally {
       setTestingEngine(false);
     }
   };
@@ -652,6 +678,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                   { value: 'auto' as const, label: 'Auto (Recommended)', desc: 'Automatically picks the best available engine' },
                   { value: 'whisper' as const, label: 'Whisper', desc: 'OpenAI Whisper — reliable, well-tested, supports many languages' },
                   { value: 'parakeet' as const, label: 'Parakeet', desc: 'NVIDIA NeMo — significantly faster transcription, English-focused' },
+                  { value: 'phonon' as const, label: 'Phonon-2', desc: 'English transcription — app-managed setup, Windows NVIDIA GPU with BF16 support' },
                 ]).map(opt => (
                   <label
                     key={opt.value}
@@ -664,6 +691,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                       name="engine"
                       value={opt.value}
                       checked={engine === opt.value}
+                      disabled={testingEngine}
                       onChange={() => { setEngine(opt.value); setEngineTest(null); }}
                       className="mt-0.5 accent-rose-500"
                     />
@@ -676,7 +704,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
               </div>
 
               <div className="mb-4 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
-                Both Whisper and Parakeet support word-level timestamps.
+                All engines support word-level timestamps.
                 Parakeet is typically 2&ndash;5x faster but currently English-only.
                 Whisper supports 90+ languages.
               </div>
@@ -715,18 +743,31 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                 </div>
               )}
 
+              {engine === 'phonon' && (
+                <p className="mb-4 text-sm text-slate-600">
+                  Chatalogue installs and loads Phonon automatically. Initial setup downloads a private runtime
+                  and model; no server or API key is required. Enabled language routing still uses Whisper
+                  for non-English audio. Model unloading is available in Settings.
+                </p>
+              )}
+
               <button
                 onClick={handleTestEngine}
                 disabled={testingEngine}
                 className="px-4 py-2 text-sm font-medium text-white bg-rose-600 rounded-lg hover:bg-rose-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
               >
                 {testingEngine ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
-                Test Engine
+                {engine === 'phonon' ? 'Set up and test Phonon' : 'Test Engine'}
               </button>
 
               {engineTest && (
-                <div className={`mt-3 p-3 rounded-lg text-sm ${engineTest.success ? 'bg-green-50 border border-green-200 text-green-800' : 'bg-red-50 border border-red-200 text-red-800'}`}>
-                  {engineTest.success ? (
+                <div className={`mt-3 p-3 rounded-lg text-sm ${engineTest.pending ? 'bg-slate-50 border border-slate-200 text-slate-700' : engineTest.success ? 'bg-green-50 border border-green-200 text-green-800' : 'bg-red-50 border border-red-200 text-red-800'}`}>
+                  {engineTest.pending ? (
+                    <div role="status" className="flex items-center gap-2">
+                      <Loader2 size={16} className="animate-spin" />
+                      <span>{engineTest.detail || 'Setting up Phonon…'}</span>
+                    </div>
+                  ) : engineTest.success ? (
                     <div className="flex items-center gap-2">
                       <CheckCircle2 size={16} className="text-green-600" />
                       <span>
