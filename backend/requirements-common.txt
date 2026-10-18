@@ -3,7 +3,9 @@
 # App
 fastapi==0.135.1
 uvicorn==0.42.0
-yt-dlp==2026.3.17
+yt-dlp==2026.8.19
+# Matching upstream YouTube challenge solver; runs through a supported JS runtime.
+yt-dlp-ejs==0.8.0
 python-dotenv==1.2.2
 sqlmodel==0.0.37
 aiosqlite==0.22.1

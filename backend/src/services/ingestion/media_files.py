@@ -372,9 +372,9 @@ class MediaFilesMixin:
 
         # Determine paths
         new_output_path = self.get_audio_path(video)
-        
+
         # Check if already exists in new location
-        
+
         # Check if already exists in new location
         if new_output_path.exists():
             log_verbose(f"File found at new location: {new_output_path}")
@@ -389,7 +389,7 @@ class MediaFilesMixin:
                 return new_output_path
             except Exception as e:
                 log(f"Error migrating file: {e}")
-                # Fallthrough to re-download if move fails? Or just fail? 
+                # Fallthrough to re-download if move fails? Or just fail?
                 # Better to fail and let user know or try copy.
                 pass
 
@@ -438,7 +438,7 @@ class MediaFilesMixin:
             """Provide feedback during post-processing phases"""
             status = d.get('status')
             pp_name = d.get('postprocessor', 'Unknown')
-            
+
             if status == 'started':
                 log_verbose(f"Post-processing started: {pp_name}")
             elif status == 'finished':
@@ -457,7 +457,7 @@ class MediaFilesMixin:
                 downloaded_file[0] = d.get('filename')
 
         ydl_opts = {
-            # Prefer 'best' (mixed A/V) to avoid pacing/padding drift between YouTube's separate audio streams 
+            # Prefer 'best' (mixed A/V) to avoid pacing/padding drift between YouTube's separate audio streams
             # and the iframe player. If unavailable or too large, fallback to bestaudio.
             'format': 'best[ext=mp4]/best/bestaudio[ext=webm]/bestaudio[ext=m4a]',
             'outtmpl': str(new_output_path.with_suffix('')) + '.%(ext)s',
@@ -467,6 +467,8 @@ class MediaFilesMixin:
             'socket_timeout': 30,
             'retries': 3,
             'fragment_retries': 3,
+            # yt-dlp enables only Deno by default; also use the app's Node runtime.
+            'js_runtimes': {'deno': {}, 'node': {}},
             'noprogress': not is_verbose(),
             'progress_hooks': [progress_hook, track_filename_hook],
             'postprocessor_hooks': [postprocessor_hook],
@@ -518,11 +520,11 @@ class MediaFilesMixin:
                 dur_tag = str(int(max(0.0, float(duration)) * 1000))
             except Exception:
                 dur_tag = "full"
-        
-        # Output as precise 16kHz mono WAV to avoid -c copy keyframe snapping 
+
+        # Output as precise 16kHz mono WAV to avoid -c copy keyframe snapping
         # which pulls in older audio and causes timestamp drift.
         output_path = TEMP_DIR / f"temp_slice_{start_ms}_{dur_tag}_{threading.get_ident()}_{input_path.stem}.wav"
-        
+
         # Determine ffmpeg location (copied from download_audio logic)
         ffmpeg_bin = BACKEND_DIR / "bin"
         ffmpeg_cmd = str(ffmpeg_bin / "ffmpeg.exe") if (ffmpeg_bin / "ffmpeg.exe").exists() else "ffmpeg"
@@ -530,9 +532,9 @@ class MediaFilesMixin:
         cmd = [ffmpeg_cmd, "-y", "-ss", str(start_time), "-i", str(input_path)]
         if duration is not None:
             cmd.extend(["-t", str(duration)])
-        
+
         cmd.extend(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(output_path)])
-        
+
         log_verbose(f"Slicing audio: {' '.join(cmd)}")
         try:
             subprocess.run(cmd, check=True, capture_output=True)
@@ -561,7 +563,7 @@ class MediaFilesMixin:
             log("Deleted corrupt audio file. Retrying with fallback format...")
             self._update_job_status_detail(job_id, "Re-downloading (corrupt audio detected)...")
 
-            # Determine which format to try as fallback. Now that we default to 'best', 
+            # Determine which format to try as fallback. Now that we default to 'best',
             # if that is corrupt, we fall back to audio-only streams as a last resort,
             # accepting potential timing drift if it means getting the file at all.
             current_ext = audio_path.suffix.lower()
@@ -588,6 +590,7 @@ class MediaFilesMixin:
                 'socket_timeout': 30,
                 'retries': 3,
                 'fragment_retries': 3,
+                'js_runtimes': {'deno': {}, 'node': {}},
                 'progress_hooks': [track_fn],
             }
             ydl_opts = self._apply_ytdlp_auth_opts(ydl_opts, purpose="download_audio_fallback")
