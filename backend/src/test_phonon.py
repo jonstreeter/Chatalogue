@@ -238,8 +238,11 @@ def test_actual_phase_failure_resume_and_absolute_seam(isolated_service, tmp_pat
     audio.write_bytes(wav_bytes(bytes(32000 * 1201)))
     calls = []
     failing = [True]
+    status_details = []
+    monkeypatch.setattr(service, "_update_job_status_detail", lambda job_id, detail: status_details.append(detail))
 
     def transcribe(client, blob, duration):
+        assert status_details[-1].startswith("Transcribing with Phonon-2 (chunk ")
         calls.append(duration)
         if len(calls) == 2 and failing[0]:
             raise PhononError("runtime unavailable")
@@ -250,6 +253,7 @@ def test_actual_phase_failure_resume_and_absolute_seam(isolated_service, tmp_pat
     video = Video(id=1, youtube_id="isolated-phonon", title="test", duration=1201)
     with pytest.raises(PhononError, match="unavailable"):
         service._process_transcribe_phase(video, audio)
+    assert status_details[0] == "Preparing audio for Phonon-2..."
     assert service._load_phonon_partial(1)["completed_until_seconds"] == pytest.approx(600.175)
     failing[0] = False
     segments, duration = service._process_transcribe_phase(video, audio)

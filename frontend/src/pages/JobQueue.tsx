@@ -570,7 +570,7 @@ const getStatusLabel = (status: string): string => {
         if (engineRouted) return engineRouted;
         const engineRequested = normalizeEngine(payload.transcription_engine_requested);
         if (engineRequested) return engineRequested;
-        if (payload.stage_model_load_started_at || payload.stage_model_load_completed_at || payload.parakeet_input_mode) {
+        if (payload.parakeet_input_mode) {
             return 'parakeet';
         }
         const hasTranscribePhase = Boolean(payload.stage_transcribe_phase_started_at || payload.stage_transcribing_phase_started_at);
@@ -578,13 +578,11 @@ const getStatusLabel = (status: string): string => {
         if (hasTranscribePhase && !hasTranscribeStart && (job.status || '').toLowerCase() === 'completed') {
             return 'cached';
         }
-        if (hasTranscribeStart) {
-            return 'whisper';
-        }
         if (payload.transcription_reused_existing === true) {
             return 'cached';
         }
         const detail = (job.status_detail || '').toLowerCase();
+        if (detail.includes('phonon')) return 'phonon';
         if (detail.includes('parakeet')) return 'parakeet';
         if (detail.includes('whisper')) return 'whisper';
         const err = (job.error || '').toLowerCase();

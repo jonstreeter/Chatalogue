@@ -37,6 +37,7 @@ class TranscribePhaseMixin:
         deadline = os.getenv("PHONON_REQUEST_TIMEOUT_SECONDS")
         details = {}
         chunk_count = 0
+        self._update_job_status_detail(job_id, "Preparing audio for Phonon-2...")
         # Normalize once, including WAV inputs whose encoding/rate may differ.
         with tempfile.TemporaryDirectory(prefix="phonon-", dir=self._get_temp_transcript_path(video.id).parent) as scratch:
             normalized = Path(scratch) / "audio.wav"
@@ -63,6 +64,7 @@ class TranscribePhaseMixin:
                     pcm = source.readframes(round((end - start) * SAMPLE_RATE))
                     actual_duration = len(pcm) / (2 * SAMPLE_RATE)
                     begin = time.perf_counter()
+                    self._update_job_status_detail(job_id, f"Transcribing with Phonon-2 (chunk {chunk_count + 1}/{math.ceil(duration / CHUNK_SECONDS)})...")
                     words, runtime_details = client.transcribe(wav_bytes(pcm), actual_duration)
                     self._check_job_not_paused(job_id)
                     from bisect import bisect_right
