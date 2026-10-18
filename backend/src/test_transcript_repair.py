@@ -301,3 +301,39 @@ def test_consolidation_preserves_same_speaker_sentence_break_after_meaningful_pa
 
     assert result["merged_count"] == 0
     assert len(result["segments"]) == 2
+
+
+def test_entity_repair_skips_impossible_names_before_similarity(monkeypatch):
+    from src.services.ingestion import transcript_quality
+    service = ingestion_mod.IngestionService.__new__(ingestion_mod.IngestionService)
+    calls = []
+    original = transcript_quality.SequenceMatcher
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(transcript_quality, 'SequenceMatcher', counted)
+    candidates = [
+        {'canonical': name, 'normalized': name.lower(), 'tokens': [name],
+         'token_count': 1, 'priority': 1., 'source': 'speaker_name'}
+        for name in ['Donathan', 'JohnathanVeryLongName', 'Johnathan']
+    ]
+    segment = TranscriptSegment(video_id=-1, start_time=0, end_time=2, text='Johnathen speaks',
+        words=json.dumps([{'word': 'Johnathen', 'start': 0, 'end': 1}, {'word': 'speaks', 'start': 1, 'end': 2}]))
+    result = service._repair_segment_entities(segment, candidates)
+    assert result['changed']
+    assert segment.text == 'Johnathan speaks'
+    assert json.loads(segment.words)[0] == {'word': 'Johnathan', 'start': 0, 'end': 1}
+    assert len(calls) == 1
+
+
+def test_entity_repair_reports_progress_even_without_corrections(monkeypatch):
+    service = ingestion_mod.IngestionService.__new__(ingestion_mod.IngestionService)
+    monkeypatch.setattr(service, '_collect_entity_repair_candidates', lambda *args: [{}])
+    monkeypatch.setattr(service, '_repair_segment_entities', lambda *args: {'changed': False})
+    segments = [TranscriptSegment(video_id=-1, start_time=i, end_time=i+1, text='hello') for i in range(3)]
+    progress = []
+    result = service._apply_entity_repair_to_segments(None, None, segments, progress_callback=lambda done, total: progress.append((done,total)))
+    assert not result['changed']
+    assert progress == [(0,3), (1,3), (2,3), (3,3)]

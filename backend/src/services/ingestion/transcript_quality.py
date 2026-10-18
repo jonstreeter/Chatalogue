@@ -508,6 +508,10 @@ class TranscriptQualityMixin:
                     candidate_normalized = str(candidate.get("normalized") or "")
                     if not candidate_normalized:
                         continue
+                    if abs(len(candidate_normalized) - len(current_normalized)) > 3:
+                        continue
+                    if current_normalized[0] != candidate_normalized[0]:
+                        continue
                     similarity = SequenceMatcher(None, current_normalized, candidate_normalized).ratio()
                     exact_normalized = current_normalized == candidate_normalized
                     candidate_source = str(candidate.get("source") or "")
@@ -515,10 +519,6 @@ class TranscriptQualityMixin:
                     if candidate_source.startswith("title_"):
                         required_similarity = 0.84
                     if not exact_normalized and similarity < required_similarity:
-                        continue
-                    if abs(len(candidate_normalized) - len(current_normalized)) > 3:
-                        continue
-                    if current_normalized[0] != candidate_normalized[0]:
                         continue
                     canonical = str(candidate.get("canonical") or "")
                     if exact_normalized and current_phrase == canonical:
@@ -571,6 +571,7 @@ class TranscriptQualityMixin:
         *,
         persist_revisions: bool = False,
         revision_source: str = "entity_repair",
+        progress_callback=None,
     ) -> dict:
         candidates = self._collect_entity_repair_candidates(session, video)
         if not candidates:
@@ -579,7 +580,14 @@ class TranscriptQualityMixin:
         changed_segments = 0
         replacements = 0
         sources: set[str] = set()
-        for seg in segments or []:
+        total = len(segments or [])
+        last_percent = -1
+        for index, seg in enumerate(segments or []):
+            # Update when the displayed whole-percent changes, not for every row.
+            percent = index * 100 // total
+            if progress_callback and percent != last_percent:
+                progress_callback(index, total)
+                last_percent = percent
             old_text = str(getattr(seg, "text", "") or "")
             result = self._repair_segment_entities(seg, candidates)
             if not result.get("changed"):
@@ -600,6 +608,8 @@ class TranscriptQualityMixin:
                         source=revision_source,
                     )
                 )
+        if progress_callback:
+            progress_callback(total, total)
         return {
             "changed": changed_segments > 0,
             "segments_changed": changed_segments,

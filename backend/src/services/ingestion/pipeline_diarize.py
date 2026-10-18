@@ -751,9 +751,16 @@ class DiarizePhaseMixin:
                 )
             if should_apply_text_cleanup:
                 if job_id:
-                    self._update_job_status_detail(job_id, "Applying entity repair...")
+                    self._update_job_status_detail(job_id, "Correcting names in transcript...")
                     self._update_job_progress(job_id, 97)
-                entity_repair = self._apply_entity_repair_to_segments(session, video_attached, final_segments, persist_revisions=False)
+                entity_repair = self._apply_entity_repair_to_segments(
+                    session, video_attached, final_segments, persist_revisions=False,
+                    progress_callback=(
+                        lambda done, total: self._update_job_status_detail(
+                            job_id, f"Correcting names in transcript ({done}/{total} segments)..."
+                        )
+                    ) if job_id else None,
+                )
                 if entity_repair["changed"]:
                     log(
                         f"Transcript entity repair for {video_attached.title}: "
