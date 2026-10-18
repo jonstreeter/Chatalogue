@@ -330,6 +330,12 @@ class DiarizePhaseMixin:
             except Exception as e:
                 log_verbose(f"Failed to save RTTM checkpoint: {e}")
 
+        # RTTM caches speaker turns, not the voice model needed to identify them.
+        if self.embedding_model is None or self.embedding_inference is None:
+            self._load_models(job_id)
+        if self.embedding_model is None or self.embedding_inference is None:
+            raise RuntimeError("Speaker voice model is unavailable; refusing to save unidentified speakers. Retry diarization after model loading succeeds.")
+
         # If we resumed from a saved RTTM diarization checkpoint, we still need decoded
         # audio for speaker embedding extraction during the identification step below.
         if audio_input is None:

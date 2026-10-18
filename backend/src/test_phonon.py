@@ -422,3 +422,61 @@ def test_settings_invalid_deadline(deadline):
     from src.schemas import Settings
     with pytest.raises(ValueError):
         Settings(hf_token="", phonon_request_timeout_seconds=deadline)
+
+
+@pytest.mark.parametrize('model_load_succeeds', [True, False])
+def test_cold_diarization_checkpoint_requires_voice_inference_before_replace(isolated_service, tmp_path, monkeypatch, model_load_succeeds):
+    import pickle
+    import numpy as np
+    from types import SimpleNamespace
+    from sqlmodel import Session, select
+    from src.services.ingestion import runtime
+    from src.db.database import Channel, Video, Speaker, SpeakerEmbedding, TranscriptSegment
+
+    service = isolated_service
+    service.device = 'cpu'
+    service.diarization_pipeline = None
+    service.embedding_model = None
+    service.embedding_inference = None
+    vector = np.ones(16, dtype=np.float32)
+    with Session(runtime.engine) as session:
+        channel = Channel(id=1, url='https://example.com/test', name='Test')
+        video = Video(id=1, channel_id=1, youtube_id='resume-voice', title='Resume voice')
+        speaker = Speaker(id=1, channel_id=1, name='Known Host', embedding_blob=pickle.dumps(vector))
+        profile = SpeakerEmbedding(id=1, speaker_id=1, embedding_blob=pickle.dumps(vector))
+        original = TranscriptSegment(video_id=1, start_time=0, end_time=2, text='Existing transcript')
+        session.add_all([channel, video, speaker, profile, original]); session.commit()
+    checkpoint = service._get_temp_diarization_path(1)
+    checkpoint.write_text('SPEAKER test 1 0.000 2.000 <NA> <NA> voice_0 <NA> <NA>\n')
+    loaded = []
+
+    class VoiceInference:
+        def crop(self, audio, segment):
+            return vector
+
+    def load_models(job_id=None):
+        loaded.append(True)
+        if model_load_succeeds:
+            service.embedding_model = object()
+            service.embedding_inference = VoiceInference()
+
+    monkeypatch.setattr(service, '_load_models', load_models)
+    monkeypatch.setattr(service, '_load_audio_for_pyannote', lambda path: {})
+    monkeypatch.setattr(service, '_save_transcripts', lambda *args: None)
+    monkeypatch.setenv('SPEAKER_PROFILE_PERSIST_RAW_SAMPLES', '0')
+    segments = [SimpleNamespace(start=0., end=2., text='Hello', words=[])]
+    video = Video(id=1, channel_id=1, youtube_id='resume-voice', title='Resume voice')
+    if model_load_succeeds:
+        service._process_diarize_phase(video, tmp_path/'audio.wav', segments)
+    else:
+        with pytest.raises(RuntimeError, match='voice model is unavailable'):
+            service._process_diarize_phase(video, tmp_path/'audio.wav', segments)
+    assert loaded == [True]
+    with Session(runtime.engine) as session:
+        rows = session.exec(select(TranscriptSegment).where(TranscriptSegment.video_id == 1)).all()
+        assert len(rows) == 1
+        if model_load_succeeds:
+            assert rows[0].speaker_id == 1
+            assert rows[0].matched_profile_id == 1
+        else:
+            assert rows[0].text == 'Existing transcript'
