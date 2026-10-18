@@ -108,7 +108,18 @@ export const getVideoDetailDerivedMetadata = (video: Video | null): VideoDetailD
     };
 };
 
-export const selectVideoDetailDerivedMetadata = (state: VideoState) => getVideoDetailDerivedMetadata(state.video);
+// React's external-store snapshot must retain its identity between store changes.
+const derivedMetadataCache = new WeakMap<Video, VideoDetailDerivedMetadata>();
+const emptyDerivedMetadata = getVideoDetailDerivedMetadata(null);
+export const selectVideoDetailDerivedMetadata = (state: VideoState): VideoDetailDerivedMetadata => {
+    if (!state.video) return emptyDerivedMetadata;
+    let metadata = derivedMetadataCache.get(state.video);
+    if (!metadata) {
+        metadata = getVideoDetailDerivedMetadata(state.video);
+        derivedMetadataCache.set(state.video, metadata);
+    }
+    return metadata;
+};
 
 export interface VideoState {
     video: Video | null;
@@ -195,4 +206,3 @@ export const useVideoStore = create<VideoState>()(
         { name: 'VideoStore' },
     ),
 );
-
