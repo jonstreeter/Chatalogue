@@ -120,7 +120,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
   const [validating, setValidating] = useState(false);
   const [hfSkipped, setHfSkipped] = useState(false);
 
-  const [engine, setEngine] = useState<'auto' | 'whisper' | 'parakeet' | 'phonon'>('auto');
+  const [engine, setEngine] = useState<'auto' | 'whisper' | 'parakeet' | 'phonon' | 'moss'>('auto');
   const [whisperModel, setWhisperModel] = useState('medium');
   const [parakeetAllowWhisperFallback, setParakeetAllowWhisperFallback] = useState(true);
   const [engineTest, setEngineTest] = useState<{
@@ -250,7 +250,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
     resolved_engine?: string; engine?: string; fallback_used?: boolean;
     error?: string; detail?: string; runtime?: { gpu?: string; device?: string };
   }) => {
-    const pending = engine === 'phonon' && ['installing', 'loading', 'busy'].includes(data.state || '');
+    const pending = ['phonon', 'moss'].includes(engine) && ['installing', 'loading', 'busy'].includes(data.state || '');
     const success = data.status ? data.status.toLowerCase() === 'ok' : Boolean(data.available);
     setEngineTest({
       pending, success, detail: data.detail,
@@ -263,15 +263,15 @@ export function SetupWizard({ onClose, onComplete }: Props) {
   }, [engine]);
 
   useEffect(() => {
-    if (engine !== 'phonon' || !engineTest?.pending) return;
+    if (!['phonon', 'moss'].includes(engine) || !engineTest?.pending) return;
     let stopped = false;
     // Match the existing Settings model-status polling cadence.
     const timer = window.setInterval(() => {
-      api.post('/settings/test-transcription-engine', { engine: 'phonon', phonon_action: 'status' })
+      api.post('/settings/test-transcription-engine', { engine, [engine === 'moss' ? 'moss_action' : 'phonon_action']: 'status' })
         .then(res => { if (!stopped) applyEngineTest(res.data || {}); })
         .catch(e => {
           if (!stopped) {
-            setEngineTest({ success: false, error: getErrorDetail(e) || 'Unable to check Phonon setup' });
+            setEngineTest({ success: false, error: getErrorDetail(e) || `Unable to check ${engine} setup` });
             setTestingEngine(false);
           }
         });
@@ -283,7 +283,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
     setTestingEngine(true);
     setEngineTest(null);
     try {
-      await saveSettings({
+      if (engine !== 'moss') await saveSettings({
         transcription_engine: engine,
         transcription_model: whisperModel,
         parakeet_allow_whisper_fallback: parakeetAllowWhisperFallback,
@@ -678,6 +678,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                   { value: 'auto' as const, label: 'Auto (Recommended)', desc: 'Automatically picks the best available engine' },
                   { value: 'whisper' as const, label: 'Whisper', desc: 'OpenAI Whisper — reliable, well-tested, supports many languages' },
                   { value: 'parakeet' as const, label: 'Parakeet', desc: 'NVIDIA NeMo — significantly faster transcription, English-focused' },
+                  { value: 'moss' as const, label: 'MOSS', desc: 'Multilingual — segment timing only, initial 90-minute input limit' },
                   { value: 'phonon' as const, label: 'Phonon-2', desc: 'English transcription — app-managed setup, Windows NVIDIA GPU with BF16 support' },
                 ]).map(opt => (
                   <label
@@ -704,7 +705,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
               </div>
 
               <div className="mb-4 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
-                All engines support word-level timestamps.
+                MOSS provides segment timestamps; other engines support word-level timestamps.
                 Parakeet is typically 2&ndash;5x faster but currently English-only.
                 Whisper supports 90+ languages.
               </div>
@@ -743,6 +744,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                 </div>
               )}
 
+              {engine === 'moss' && <p className="mb-4 text-sm text-slate-600">MOSS provides segment timing only, without word highlighting. Initial input limit: 90 minutes; retries restart the whole input. Setup checks inference readiness, not transcription accuracy. Model unloading is available in Settings. Only saving the wizard persists your selection.</p>}
               {engine === 'phonon' && (
                 <p className="mb-4 text-sm text-slate-600">
                   Chatalogue installs and loads Phonon automatically. Initial setup downloads a private runtime
@@ -757,7 +759,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                 className="px-4 py-2 text-sm font-medium text-white bg-rose-600 rounded-lg hover:bg-rose-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
               >
                 {testingEngine ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
-                {engine === 'phonon' ? 'Set up and test Phonon' : 'Test Engine'}
+                {engine === 'moss' ? 'Set up and test MOSS' : engine === 'phonon' ? 'Set up and test Phonon' : 'Test Engine'}
               </button>
 
               {engineTest && (
@@ -765,7 +767,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                   {engineTest.pending ? (
                     <div role="status" className="flex items-center gap-2">
                       <Loader2 size={16} className="animate-spin" />
-                      <span>{engineTest.detail || 'Setting up Phonon…'}</span>
+                      <span>{engineTest.detail || `Setting up ${engine}…`}</span>
                     </div>
                   ) : engineTest.success ? (
                     <div className="flex items-center gap-2">

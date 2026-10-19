@@ -19,7 +19,7 @@ interface TokenValidation {
 }
 
 type SettingsTab = 'transcription' | 'diarization' | 'llm' | 'youtube' | 'funny' | 'runtimes' | 'system';
-type TranscriptionEngine = 'auto' | 'whisper' | 'parakeet' | 'phonon';
+type TranscriptionEngine = 'auto' | 'whisper' | 'parakeet' | 'phonon' | 'moss';
 type WhisperBackend = 'faster_whisper' | 'insanely_fast_whisper';
 type PipelineExecutionMode = 'sequential' | 'staged';
 type LlmProvider = 'ollama' | 'nvidia_nim' | 'openai' | 'anthropic' | 'gemini' | 'groq' | 'openrouter' | 'xai';
@@ -610,7 +610,7 @@ export function Settings() {
             setToken(res.data.hf_token);
             {
                 const rawEngine = String(res.data.transcription_engine || 'auto').toLowerCase();
-                const engine: TranscriptionEngine = rawEngine === 'whisper' || rawEngine === 'parakeet' || rawEngine === 'phonon' ? rawEngine : 'auto';
+                const engine: TranscriptionEngine = rawEngine === 'whisper' || rawEngine === 'parakeet' || rawEngine === 'phonon' || rawEngine === 'moss' ? rawEngine : 'auto';
                 setTranscriptionEngine(engine);
                 setPhononDeadline(res.data.phonon_request_timeout_seconds == null ? '' : String(res.data.phonon_request_timeout_seconds));
             }
@@ -1456,19 +1456,21 @@ export function Settings() {
 
     // Use the existing settings health polling cadence; status never installs/loads.
     useEffect(() => {
-        if (transcriptionEngine !== 'phonon' || activeTab !== 'transcription') return;
+        if (!['phonon', 'moss'].includes(transcriptionEngine) || activeTab !== 'transcription') return;
         let stopped = false;
         const refresh = async () => {
             try {
                 const res = await api.post<PhononModelStatus>('/settings/test-transcription-engine', {
-                    engine: 'phonon', phonon_action: 'status',
+                    engine: transcriptionEngine, [transcriptionEngine === 'moss' ? 'moss_action' : 'phonon_action']: 'status',
                 });
                 if (!stopped) setPhononModel(res.data);
             } catch (error) {
                 if (!stopped) setPhononModel({ status: 'error', state: 'error', model_loaded: false,
-                    process_running: false, error: getErrorMessage(error) || 'Unable to check Phonon status' });
+                    process_running: false, error: getErrorMessage(error) || `Unable to check ${transcriptionEngine} status` });
             }
         };
+        setPhononModel(null);
+        setPhononActionError(null);
         void refresh();
         const timer = window.setInterval(() => { void refresh(); }, 5000);
         return () => { stopped = true; window.clearInterval(timer); };
@@ -1479,16 +1481,17 @@ export function Settings() {
         setPhononActionError(null);
         try {
             const res = await api.post<PhononModelStatus>('/settings/test-transcription-engine', {
-                engine: 'phonon', phonon_action: action,
+                engine: transcriptionEngine, [transcriptionEngine === 'moss' ? 'moss_action' : 'phonon_action']: action,
             });
             setPhononModel(res.data);
-            if (res.data.status === 'error') setPhononActionError(res.data.error || res.data.detail || 'Phonon action failed');
+            if (res.data.status === 'error') setPhononActionError(res.data.error || res.data.detail || `${transcriptionEngine} action failed`);
         } catch (error) {
-            setPhononActionError(String(getErrorDetail(error) || getErrorMessage(error) || 'Phonon action failed'));
+            setPhononActionError(String(getErrorDetail(error) || getErrorMessage(error) || `${transcriptionEngine} action failed`));
         } finally {
             setTestingTranscriptionEngine(false);
         }
     };
+    const managedEngineName = transcriptionEngine === 'moss' ? 'MOSS' : 'Phonon';
     const phononBusy = testingTranscriptionEngine || ['installing', 'loading', 'busy', 'unloading'].includes(phononModel?.state || '');
 
     const testTranscriptionEngine = async () => {
@@ -1713,6 +1716,7 @@ export function Settings() {
                                                             <option value="parakeet">NVIDIA Parakeet first (fallback to Whisper)</option>
                                                             <option value="whisper">Whisper only</option>
                                                             <option value="phonon">Phonon-2 (English)</option>
+                                                            <option value="moss">MOSS (Multilingual, segment timing)</option>
                                                         </select>
                                                         <p className="mt-2 text-xs text-slate-500">
                                                             Auto keeps cross-platform behavior: Parakeet is used when supported on host/runtime, otherwise Whisper runs automatically.
@@ -1742,7 +1746,7 @@ export function Settings() {
                                                                     Multilingual Routing
                                                                 </label>
                                                                 <p className="text-xs text-slate-500 mt-0.5">
-                                                                    Detect likely non-English or mixed-language episodes before transcription and route them to Whisper with a stronger multilingual model.
+                                                                    {transcriptionEngine === 'moss' ? 'MOSS transcribes all supported languages directly. These routing controls do not apply to MOSS.' : 'Detect likely non-English or mixed-language episodes before transcription and route them to Whisper with a stronger multilingual model.'}
                                                                 </p>
                                                             </div>
                                                             <label className="relative inline-flex items-center cursor-pointer">
@@ -1807,18 +1811,18 @@ export function Settings() {
                                                         )}
                                                     </div>
 
-                                                    {transcriptionEngine === 'phonon' && (
-                                                        <section aria-label="Phonon model" className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
+                                                    {['phonon', 'moss'].includes(transcriptionEngine) && (
+                                                        <section aria-label={`${managedEngineName} model`} className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
                                                             <div className="flex items-center justify-between gap-3">
-                                                                <h4 className="font-semibold text-slate-800">Phonon-2</h4>
+                                                                <h4 className="font-semibold text-slate-800">{transcriptionEngine === 'moss' ? 'MOSS' : 'Phonon-2'}</h4>
                                                                 <span className="text-sm font-medium text-slate-700">{phononModel?.state === 'ready' ? 'Ready' : phononModel?.state === 'installed' ? 'Unloaded' : phononModel?.state === 'absent' ? 'Not installed' : phononModel?.state || 'Checking model'}</span>
                                                             </div>
-                                                            <p className="text-sm text-slate-600">Chatalogue downloads and manages Phonon-2 locally. English only; enabled language routing still uses Whisper for other languages.</p>
+                                                            <p className="text-sm text-slate-600">{transcriptionEngine === 'moss' ? 'MOSS is multilingual with segment timing only; word highlighting is unavailable. Initial input limit: 90 minutes. Retries restart the whole input. Chatalogue manages the model locally. Setup checks inference readiness, not transcription accuracy.' : 'Chatalogue downloads and manages Phonon-2 locally. English only; enabled language routing still uses Whisper for other languages.'}</p>
                                                             <p role="status" className="text-sm text-slate-700">{phononModel?.detail || 'Checking model availability…'}</p>
                                                             {phononModel?.runtime?.gpu && <p className="text-xs text-slate-500">{phononModel.runtime.gpu}{phononModel.runtime.dtype ? ` · ${phononModel.runtime.dtype.toUpperCase()}` : ''}</p>}
                                                             {phononModel?.total_bytes && (
                                                                 <div>
-                                                                    <progress aria-label="Phonon download progress" className="w-full" max={phononModel.total_bytes} value={phononModel.downloaded_bytes || 0} />
+                                                                    <progress aria-label={`${managedEngineName} download progress`} className="w-full" max={phononModel.total_bytes} value={phononModel.downloaded_bytes || 0} />
                                                                     <p className="text-xs text-slate-500">{((phononModel.downloaded_bytes || 0) / (1024 * 1024)).toFixed(1)} / {(phononModel.total_bytes / (1024 * 1024)).toFixed(1)} MiB</p>
                                                                 </div>
                                                             )}
@@ -1826,16 +1830,16 @@ export function Settings() {
                                                             <div className="flex flex-wrap gap-2">
                                                                 <button type="button" onClick={() => { void controlPhonon('load'); }} disabled={phononBusy} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-sm text-white disabled:opacity-60">
                                                                     {phononBusy && <Loader2 size={14} className="animate-spin" />}
-                                                                    {phononModel?.model_loaded ? 'Test Phonon model' : phononModel?.state === 'installed' ? 'Load and test Phonon' : 'Set up and test Phonon'}
+                                                                    {phononModel?.model_loaded ? `Test ${managedEngineName} model` : phononModel?.state === 'installed' ? `Load and test ${managedEngineName}` : `Set up and test ${managedEngineName}`}
                                                                 </button>
-                                                                <button type="button" onClick={() => { void controlPhonon('unload'); }} disabled={phononBusy || !phononModel?.process_running} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-60">Unload Phonon model</button>
+                                                                <button type="button" onClick={() => { void controlPhonon('unload'); }} disabled={phononBusy || !phononModel?.process_running} className="rounded-lg border border-slate-300 px-3 py-2 text-sm disabled:opacity-60">Unload {managedEngineName} model</button>
                                                             </div>
                                                             <p className="text-xs text-slate-500">Loading keeps the model warm for transcription. Unloading releases GPU memory and keeps the downloaded files.</p>
-                                                            <details><summary className="cursor-pointer text-sm">Advanced model options</summary>
+                                                            {transcriptionEngine === 'phonon' && <details><summary className="cursor-pointer text-sm">Advanced model options</summary>
                                                                 <label className="block text-sm mt-2">Inference deadline (seconds)
                                                                     <input type="number" step="any" className="block w-full border rounded p-2" value={phononDeadline} onChange={e => setPhononDeadline(e.target.value)} placeholder="Unset: wait for inference" />
                                                                 </label>
-                                                            </details>
+                                                            </details>}
                                                         </section>
                                                     )}
                                                     {transcriptionEngine === 'parakeet' && (
@@ -2016,7 +2020,7 @@ export function Settings() {
                                                         </div>
                                                     )}
 
-                                                    <div hidden={transcriptionEngine === 'phonon'} className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                                                    <div hidden={['phonon', 'moss'].includes(transcriptionEngine)} className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
                                                         <div className="flex items-center justify-between">
                                                             <h4 className="text-sm font-medium text-slate-800">Transcription Engine Test</h4>
                                                             <button
@@ -2103,7 +2107,7 @@ export function Settings() {
                                             <div className="pt-4 border-t border-slate-100">
                                                 <div className="flex items-center gap-2 mb-4">
                                                     <Zap className="w-5 h-5 text-amber-500" />
-                                                    <h3 className="font-semibold text-slate-800">{transcriptionEngine === 'phonon' ? 'Whisper routing options' : 'Speed Optimization'}</h3>
+                                                    <h3 className="font-semibold text-slate-800">{transcriptionEngine === 'moss' ? 'Whisper options (unused by MOSS)' : transcriptionEngine === 'phonon' ? 'Whisper routing options' : 'Speed Optimization'}</h3>
                                                 </div>
                                                 {transcriptionEngine === 'phonon' && <p className="text-sm text-slate-600 mb-4">These controls apply only when language routing selects Whisper. They do not tune Phonon; its managed model uses upstream decoding defaults and serial GPU requests.</p>}
 

@@ -45,7 +45,7 @@ runtime feasibility gate passes.
 | 4 | Wire manager/GPU lifecycle, settings engine-test actions and explicit multilingual MOSS route; verify no default change or production job creation. | `backend/src/services/ingestion/service.py`, `backend/src/services/ingestion/runtime.py`, `backend/src/services/ingestion/cuda_memory.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/main.py`, `backend/src/schemas.py`, `backend/src/routers/settings.py`, `backend/src/test_moss_runtime.py` | M | ✅ done: app lifecycle/settings/routing; 193 isolated tests PASS |
 | 5 | Add full-input transcription and atomic native-label checkpoint, duration/context rejection, provenance and retry semantics. Preserve raw clock tokens, source sample count/rate and moss-eof-v1 corrections across identity retries without cumulative normalization. Test old cache reuse, mixed-engine partial rejection, failure/cancellation and forced reprocessing. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | M | ✅ done |
 | 6 | Reuse identity/profile matching with explicit native speaker attribution and overlap-safe samples; retain standard save/cleanup. Test two recordings matching saved names, nested overlapping speakers, no clean sample and missing embedding model. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/test_moss_pipeline.py` | L | ✅ done |
-| 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ☐ todo |
+| 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: managed UI and five Chromium checks PASS |
 | 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ☐ todo |
 
 ## Test plan
@@ -272,3 +272,17 @@ guarantee. No review subagents or product changes for this refinement.
   task 6, browser task 7 and actual inference/full regression task 8.
 
 - 2026-10-19 task 6 PASS, 6/8 complete. Revalidated native checkpoint chooses explicit attribution; no clustering, RTTM attribution, midpoint mapping or turn consolidation. Other-label subtraction feeds existing sample thresholds; no-clean speakers remain distinct unresolved locals without profile enrollment, with job payload warning. Existing matcher, channel isolation, names/profile persistence, transcript files and checkpoint cleanup retained. Embedding-only mode reuses existing loader and owned MOSS exit barrier. Packed SQLite suite: **59 PASS**, 44.55s. Scoped Ruff, SDD validation and whitespace PASS; required hooks run at commit. Initial fixture assertion corrected to respect existing sample threshold; fixture model-load guards added after initial cached CPU model load. No production DB/settings changes. Real inference/identity evidence remains task 8.
+
+- 2026-10-19 task 7 PASS, 7/8 complete. MOSS Settings/SetupWizard selection,
+  managed lifecycle/status/progress/retry/unload, multilingual segment-timing and
+  90-minute/whole-input retry notices, explicit save and queue provenance badge.
+  Wizard MOSS setup does not save selection. Combined Chromium suite **5 PASS**,
+  30.1s: lifecycle/save/reload, wizard setup/finish, queue and real PCM media
+  segment seek/playback with two named overlapping words=null segments; existing
+  Phonon regressions pass. `npx tsc -b` PASS; `npm run lint` PASS (0 errors,
+  43 existing warnings); SDD/whitespace PASS. All API routes intercepted before
+  navigation. Installed Chrome env override and owned Vite5175 polling avoid
+  missing bundled browser and Windows watcher EBUSY. Initial fixture errors fixed
+  with health/quality response shapes and HTTP206 media range support. Native
+  seek allows100ms browser tolerance. Ignored output/playwright screenshots
+  reviewed. Task8 retains actual app/runtime/identity/GPU/full regression evidence.

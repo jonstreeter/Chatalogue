@@ -555,12 +555,12 @@ const getStatusLabel = (status: string): string => {
         }
     };
 
-    const getTranscriptionEngineUsed = (job: Job): 'parakeet' | 'whisper' | 'phonon' | 'cached' | null => {
+    const getTranscriptionEngineUsed = (job: Job): 'parakeet' | 'whisper' | 'phonon' | 'moss' | 'cached' | null => {
         if ((job.job_type || '').toLowerCase() !== 'process') return null;
         const payload = getJobPayload(job);
-        const normalizeEngine = (value: unknown): 'parakeet' | 'whisper' | 'phonon' | null => {
+        const normalizeEngine = (value: unknown): 'parakeet' | 'whisper' | 'phonon' | 'moss' | null => {
             const engine = String(value || '').trim().toLowerCase();
-            if (engine === 'parakeet' || engine === 'whisper' || engine === 'phonon') return engine;
+            if (engine === 'parakeet' || engine === 'whisper' || engine === 'phonon' || engine === 'moss') return engine;
             return null;
         };
         const engineUsed = normalizeEngine(payload.transcription_engine_used);
@@ -582,6 +582,7 @@ const getStatusLabel = (status: string): string => {
             return 'cached';
         }
         const detail = (job.status_detail || '').toLowerCase();
+        if (detail.includes('moss')) return 'moss';
         if (detail.includes('phonon')) return 'phonon';
         if (detail.includes('parakeet')) return 'parakeet';
         if (detail.includes('whisper')) return 'whisper';
@@ -591,7 +592,7 @@ const getStatusLabel = (status: string): string => {
         return null;
     };
 
-    const EngineBadge = ({ engine }: { engine: 'parakeet' | 'whisper' | 'phonon' | 'cached' }) => (
+    const EngineBadge = ({ engine }: { engine: 'parakeet' | 'whisper' | 'phonon' | 'moss' | 'cached' }) => (
         <span className={`text-[11px] px-2 py-0.5 rounded border font-medium ${
             engine === 'parakeet'
                 ? 'bg-violet-50 text-violet-700 border-violet-200'
@@ -599,7 +600,7 @@ const getStatusLabel = (status: string): string => {
                     ? 'bg-cyan-50 text-cyan-700 border-cyan-200'
                     : 'bg-slate-50 text-slate-600 border-slate-200'
         }`}>
-            {engine === 'parakeet' ? 'Parakeet' : engine === 'whisper' ? 'Whisper' : engine === 'phonon' ? 'Phonon-2' : 'Cached'}
+            {engine === 'parakeet' ? 'Parakeet' : engine === 'whisper' ? 'Whisper' : engine === 'phonon' ? 'Phonon-2' : engine === 'moss' ? 'MOSS' : 'Cached'}
         </span>
     );
 
