@@ -1418,3 +1418,69 @@ Final managed-proof SHA256:
 `dc13089a006f7d9d8e4316ffae8540b326fac21f90ccb63e51019f68eecc5eee`.
 The strict result is `MossRuntime.transcribe(audio_bytes)["result"]`; runtime
 provenance is its sibling `runtime`, outside the strict result object.
+
+## Task 8 verification checkpoint — 2026-10-19 (blocked)
+
+Static verification passed: frontend `npx tsc -b`; root backend-venv
+`python -m ruff check .`; frontend `npm run lint` (0 errors, 43 existing
+warnings). Full backend suite passed: **252 tests**, one pytest warning,
+124.31 seconds. TRANSFORMERS_CACHE deprecation and post-exit swigvarlink warning
+are recorded; neither is a model-quality result.
+
+Safe backend invocation, from backend/:
+
+```powershell
+$env:PYTHONPATH='F:/Projects/PorchtimeIndex/backend/runtime/moss/task8;F:/Projects/PorchtimeIndex/backend'
+$env:DB_PROVIDER='sqlite'; $env:DATABASE_URL='sqlite://'
+$env:PYTHONDONTWRITEBYTECODE='1'
+.venv/Scripts/python.exe -m pytest src -q --basetemp=runtime/moss/task8/pytest-tmp
+```
+
+Ignored `task8/sitecustomize.py` disables dotenv before application imports,
+sets SQLite before imports, redirects ingestion DATA_DIR/RUNTIME_DIR, src.paths
+and env_utils.ENV_PATH into task8/fixture, and denies production backend/data
+and backend/.env access via an audit hook. Test assertions and collection remain
+unchanged. Bootstrap SHA256:
+`6cdddf1da8c65799def6423bb037a4a44f40aedb32e1c5ecff431235d26676ed`.
+Backend log SHA256:
+`c7abf382e27756700c6d914f1b6a350e82be52f72a566ce988dd703405e93a70`.
+
+Full browser collection selected **19 tests** using installed Chrome and one
+worker. It stopped at the first failure: **1 PASS, 1 FAIL, 17 not run**, 10.7s.
+Command from frontend/:
+
+```powershell
+$env:PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='C:/Program Files/Google/Chrome/Application/chrome.exe'
+npm run test:e2e -- --config F:/Projects/PorchtimeIndex/backend/runtime/moss/task8/playwright.config.cjs
+```
+
+Task8 config applies installed Chrome globally, baseURL5173, workers1 and
+maxFailures1; it excludes no test. Strict-port owned Vites5173/5175 used a
+scratch config with task8 envDir and polling, VITE_API_URL fixture8000. A bind
+probe established8000 was free before the task-owned stdlib fixture API started.
+Synthetic channel1/video198/speaker26 records handle legacy tests; scan/process
+responses are simulated with no jobs, downloader or external operations. The
+first audio-download PASS proves fixture-backed browser expectations only,
+not actual downloader behavior. No research or production audio was served in
+this stopped browser run.
+
+BLOCKER: frontend/e2e/channel-detail.spec.ts:18 uses
+`getByRole('link', { name: 'Open' })` and strict mode finds three links: two
+`aria-label="Open Chatalogue fixture"` and the exact `Open` link. This existing
+channel test/UI mismatch is outside MOSS phase ownership. Proposed minimal
+follow-up is test-only `{ name: 'Open', exact: true }`; no fix or workaround was
+written. Root belongs to a different subsystem; full verification stops here.
+
+Ignored evidence under backend/runtime/moss/task8/: pytest.log, e2e.log,
+fixture-api.jsonl, sitecustomize.py, fixture_api.py, vite.config.mjs,
+playwright.config.cjs and e2e-results/channel-detail-Channel-Det-90ab1-s-export-and-delete-buttons-chromium/
+(test-failed-1.png and error-context.md). Owned fixture API/Vites were stopped.
+Warnings: Node module.register deprecation, NO_COLOR/FORCE_COLOR notice and old
+Browserslist data. No dependency update was attempted.
+
+Task8 remains incomplete, 7/8 complete overall. No new real MOSS inference,
+voice embeddings, cross-recording names, staged worker reuse, GPU handoff or
+sequential reload measurement was performed. Prior task1/3 evidence remains
+unchanged; it does not satisfy these remaining app-phase requirements. Do not
+claim 120-second app-phase or 90-minute performance/memory coverage. Resume
+this phase after explicit ownership/approval of the unrelated verification fix.

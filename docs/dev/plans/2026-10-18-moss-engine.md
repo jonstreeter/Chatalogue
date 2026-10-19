@@ -1,7 +1,7 @@
 # Optional MOSS Engine — Implementation Plan
 
 **Date:** 2026-10-18
-**Status:** In progress
+**Status:** Blocked
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
 
 ## Summary
@@ -46,7 +46,7 @@ runtime feasibility gate passes.
 | 5 | Add full-input transcription and atomic native-label checkpoint, duration/context rejection, provenance and retry semantics. Preserve raw clock tokens, source sample count/rate and moss-eof-v1 corrections across identity retries without cumulative normalization. Test old cache reuse, mixed-engine partial rejection, failure/cancellation and forced reprocessing. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | M | ✅ done |
 | 6 | Reuse identity/profile matching with explicit native speaker attribution and overlap-safe samples; retain standard save/cleanup. Test two recordings matching saved names, nested overlapping speakers, no clean sample and missing embedding model. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/test_moss_pipeline.py` | L | ✅ done |
 | 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: managed UI and five Chromium checks PASS |
-| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ☐ todo |
+| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ▶ incomplete — blocked by existing channel browser selector |
 
 ## Test plan
 
@@ -286,3 +286,15 @@ guarantee. No review subagents or product changes for this refinement.
   with health/quality response shapes and HTTP206 media range support. Native
   seek allows100ms browser tolerance. Ignored output/playwright screenshots
   reviewed. Task8 retains actual app/runtime/identity/GPU/full regression evidence.
+
+- 2026-10-19 task8 WIP, **7/8 complete; blocked**. Ordered static checks PASS:
+  typecheck, root Ruff, frontend lint (0 errors/43 existing warnings). Full
+  isolated backend suite **252 PASS**, one warning,124.31s; SQLite/fixture paths
+  and dotenv disabled before imports, production data/env audit guard active.
+  Full Chromium collection19 selected, **1 PASS/1 FAIL/17 not run**,10.7s,
+  stopped at first failure. Fixture-only localhost8000 and owned Vites5173/5175;
+  audio-download pass simulates state only. Existing channel-detail.spec.ts:18
+  Open locator matches3 links; proposed test-only exact:true follow-up outside
+  this phase ownership. No product/test edit or rerun. Actual MOSS app-phase,
+  real voice identity, staged reuse and GPU handoff remain unrun. Evidence and
+  commands in research Task8 checkpoint; resume:yes handoff records blocker.
