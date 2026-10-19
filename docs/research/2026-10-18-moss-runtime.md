@@ -1,12 +1,12 @@
 # MOSS native Windows CUDA feasibility — 2026-10-18
 
-Task 1 is **blocked**, not passed. Native Windows NVIDIA CUDA load and complete
-decode work, including native overlapping speaker turns. However, a synthetic
-9.00-second cross-talk fixture generated an end clock of 9.01 seconds. The approved
-strict source-bound validation rejects it. No tolerance, clamping, fabricated word
-clocks, CPU fallback or product implementation was introduced. An owner decision
-is required before more attempts or task 2. This is one invalid fixture result,
-not evidence of general CUDA incompatibility or recognition accuracy.
+Task 1 is **PASS (1/8 complete)** after the separately authorized moss-eof-v1
+proof below. Existing pinned-environment, eight ordinary complete decodes,
+cold/warm timing and successful/failed process-release evidence are reused.
+The original strict 9.01s/9.00s overlap rejection remains a historical FAIL.
+The new proof accepts only its exact 0.01s end overrun under the owner-approved
+policy. Product tasks 2–8 remain unstarted; this is runtime feasibility evidence,
+not application integration or recognition/timing accuracy validation.
 
 ## Environment and immutable inputs
 
@@ -882,3 +882,420 @@ assert all(p['complete'] for p in report['paths'].values())
 print(json.dumps({'event':'normal_exit','pid':os.getpid(),'comparison':report['comparison']}),flush=True)
 
 ```
+
+## Separate approved EOF proof — task 1 PASS, 2026-10-18
+
+The retained synthetic cross-talk/abrupt-cut fixture is unchanged: 144000 samples
+at 16000 Hz, exact duration 9 seconds, PCM SHA256
+`6fa9e0bfb2a432a37680625901b449a429e99c2e4128f407ac69b7474fed7e11`.
+No model, source, config, backend environment or production data changed.
+CUDA/BF16/SDPA and default transcription prompt remain as pinned above.
+This targeted run uses model generation_config max_new_tokens=5120 bounded by
+available model context, replacing the earlier unsupported local 4096 cap for
+this proof. Prompt 200 + generated 108 tokens fits the context; final token
+151645 is EOS, far below the budget. Full decoded output is consumed by the
+strict segment grammar. This proves completeness for this fixture, not a generic
+silence/early-EOS coverage guarantee.
+
+Exact Fraction comparisons implement D=sample_count/sample_rate and independent
+end-only clipping when 0 < raw_end-D <= 1/100. Raw starts and all finite decimal
+clocks are validated first; any malformed/invalid segment rejects the whole
+result. No sorting, dropping, splitting, text/speaker changes or invented word
+timestamps occurs. In-range clocks retain their exact values (rational strings
+below are diagnostic serialization, not a proposed checkpoint format).
+
+18 runnable checks PASS: inclusive 9.010000, rejected 9.010001; unchanged in-range;
+negative/out-of-range/reversed/nonfinite clocks; corrected collapse; multiple
+overlapping ends with independent allowance; sample-derived D=1/3 accepted and
+rejected fractional boundaries; atomic mixed-result rejection; incomplete raw
+generation still rejected; trailing junk/nested brackets/nondecimal/fraction
+tokens rejected. Decimal grammar checks were tightened after the real decode;
+the retained raw result was revalidated with that final normalizer and is
+identical. No additional CUDA inference was run.
+
+Measured load 53.435088s, decode/preparation 29.205355s; these slower cold-run
+observations do not replace earlier cold/warm benchmarks or establish a speed
+guarantee. Process-local peak allocated 1,874,400,256 bytes, reserved
+1,929,379,840 bytes. Python child 26664 emitted normal_exit; private launcher
+46912 and child were both absent after shell exit 0. Global GPU memory was
+3976 MiB before and 4020 MiB after; 44 MiB difference cannot be attributed to
+MOSS amid unrelated desktop/app GPU usage. Process exit plus disappearance of
+the ~1.9 GB local model allocation support release; global memory is not an
+isolated allocator measurement. No unrelated processes were stopped. Existing
+Python 4976 was identified read-only as the app's uvicorn process before launch;
+no private MOSS process was present.
+
+Full raw generation and normalized evidence (also retained in ignored
+`eof-proof-raw.json`, `eof-proof.json`, `eof-proof.log`, `eof-exit.txt`,
+`eof-before-memory.txt`, `eof-after-memory.txt`):
+
+```json
+{
+  "raw": {
+    "pid": 26664,
+    "frames": 144000,
+    "rate": 16000,
+    "pcm_sha256": "6fa9e0bfb2a432a37680625901b449a429e99c2e4128f407ac69b7474fed7e11",
+    "raw_text": "[0.00][S01] A drastic overhaul than even Utah has.[2.35][2.12][S02] I mean, I was born in 91, so I really don't.[4.75][2.98][S01] We're getting there in every possible way in Salt Lake City.[5.83][5.41][S02] I don't remember not living with a bunch of Mexicans.[9.01]<|im_end|>",
+    "decoded_text": "[0.00][S01] A drastic overhaul than even Utah has.[2.35][2.12][S02] I mean, I was born in 91, so I really don't.[4.75][2.98][S01] We're getting there in every possible way in Salt Lake City.[5.83][5.41][S02] I don't remember not living with a bunch of Mexicans.[9.01]",
+    "generated_ids": [
+      58,
+      15,
+      13,
+      15,
+      15,
+      60,
+      42474,
+      15,
+      16,
+      60,
+      362,
+      59783,
+      51674,
+      1091,
+      1496,
+      22389,
+      702,
+      7873,
+      17,
+      13,
+      18,
+      20,
+      1457,
+      17,
+      13,
+      16,
+      17,
+      60,
+      42474,
+      15,
+      17,
+      60,
+      358,
+      3076,
+      11,
+      358,
+      572,
+      9223,
+      304,
+      220,
+      24,
+      16,
+      11,
+      773,
+      358,
+      2167,
+      1513,
+      944,
+      7873,
+      19,
+      13,
+      22,
+      20,
+      1457,
+      17,
+      13,
+      24,
+      23,
+      60,
+      42474,
+      15,
+      16,
+      60,
+      1205,
+      2299,
+      3709,
+      1052,
+      304,
+      1449,
+      3204,
+      1616,
+      304,
+      27040,
+      11678,
+      4311,
+      7873,
+      20,
+      13,
+      23,
+      18,
+      1457,
+      20,
+      13,
+      19,
+      16,
+      60,
+      42474,
+      15,
+      17,
+      60,
+      358,
+      1513,
+      944,
+      6099,
+      537,
+      5382,
+      448,
+      264,
+      15493,
+      315,
+      96762,
+      7873,
+      24,
+      13,
+      15,
+      16,
+      60,
+      151645
+    ],
+    "prompt_tokens": 200,
+    "budget": 5120,
+    "eos": [
+      151645
+    ],
+    "complete": true,
+    "load_seconds": 53.435088100028224,
+    "decode_seconds": 29.20535549998749,
+    "peak_allocated": 1874400256,
+    "peak_reserved": 1929379840,
+    "torch": "2.10.0+cu128",
+    "cuda": "12.8",
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "attention": "sdpa"
+  },
+  "normalized": {
+    "policy": "moss-eof-v1",
+    "frames": 144000,
+    "rate": 16000,
+    "duration": "9",
+    "segments": [
+      {
+        "raw_start": "0.00",
+        "raw_end": "2.35",
+        "start": "0",
+        "end": "47/20",
+        "speaker": "S01",
+        "text": "A drastic overhaul than even Utah has.",
+        "words": null
+      },
+      {
+        "raw_start": "2.12",
+        "raw_end": "4.75",
+        "start": "53/25",
+        "end": "19/4",
+        "speaker": "S02",
+        "text": "I mean, I was born in 91, so I really don't.",
+        "words": null
+      },
+      {
+        "raw_start": "2.98",
+        "raw_end": "5.83",
+        "start": "149/50",
+        "end": "583/100",
+        "speaker": "S01",
+        "text": "We're getting there in every possible way in Salt Lake City.",
+        "words": null
+      },
+      {
+        "raw_start": "5.41",
+        "raw_end": "9.01",
+        "start": "541/100",
+        "end": "9",
+        "speaker": "S02",
+        "text": "I don't remember not living with a bunch of Mexicans.",
+        "words": null
+      }
+    ],
+    "corrections": [
+      {
+        "index": 3,
+        "raw_end": "9.01",
+        "normalized_end": "9",
+        "policy": "moss-eof-v1"
+      }
+    ]
+  },
+  "overlaps": [
+    [
+      0,
+      1
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      2,
+      3
+    ]
+  ]
+}
+```
+
+All four native segments remain in order with words=null; only index 3 has
+raw end 9.01 normalized to 9, policy moss-eof-v1. Native cross-speaker overlap
+pairs are (0,1), (1,2), (2,3). The original strict failure is unchanged; this
+separate policy acceptance does not repair or explain model timestamps.
+Synthetic overlap survival is structural evidence, not natural-overlap accuracy.
+The source marker investigation and Parakeet comparison limitations remain.
+Backend correction-evidence trust and checkpoint retry validation belong to
+tasks 2/5 and are not claimed here.
+
+Reproduce from repository root in PowerShell with retained assets (no installs):
+
+```powershell
+& backend/runtime/moss/venv/Scripts/python.exe backend/runtime/moss/eof_check.py
+$eofBefore = nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits
+$eofBefore | Set-Content backend/runtime/moss/eof-before-memory.txt
+& backend/runtime/moss/venv/Scripts/python.exe backend/runtime/moss/eof_probe.py *> backend/runtime/moss/eof-proof.log
+$eofExit = $LASTEXITCODE
+$eofExit | Set-Content backend/runtime/moss/eof-exit.txt
+nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | Set-Content backend/runtime/moss/eof-after-memory.txt
+Get-Process -Id 26664,46912 -ErrorAction SilentlyContinue | Select-Object Id
+```
+
+PIDs above are this run's observed IDs; use emitted PID and its launcher on a
+fresh run. Exact post-decode validation command used after decimal grammar
+tightening:
+
+```powershell
+& backend/runtime/moss/venv/Scripts/python.exe -c "import sys,json; sys.path.insert(0,'backend/runtime/moss'); from eof_check import normalize; from pathlib import Path; p=Path('backend/runtime/moss'); r=json.loads((p/'eof-proof.json').read_text()); assert normalize(r['raw']['decoded_text'],r['raw']['frames'],r['raw']['rate'],r['raw']['complete'])==r['normalized']; print('PASS retained real output with final decimal-token rejection checks')"
+```
+
+Runnable research validator (`backend/runtime/moss/eof_check.py`, ignored):
+
+```python
+"""Research-only exact moss-eof-v1 validator and runnable boundary checks."""
+from fractions import Fraction
+import re
+
+POLICY = 'moss-eof-v1'
+PATTERN = re.compile(r'\[([^\[\]]+)\]\[(S[0-9]+)\]([^\[\]]+)\[([^\[\]]+)\]')
+
+def normalize(text, frames, rate, complete=True):
+    if not complete:
+        raise ValueError('incomplete generation')
+    duration = Fraction(frames, rate)
+    segments, corrections = [], []
+    cursor = 0
+    for i, m in enumerate(PATTERN.finditer(text)):
+        if text[cursor:m.start()].strip():
+            raise ValueError('unparsed output')
+        if not all(re.fullmatch(r'[0-9]+(?:\.[0-9]*)?', token) for token in (m[1], m[4])):
+            raise ValueError('malformed decimal clock')
+        start, end = Fraction(m[1]), Fraction(m[4])
+        if not (0 <= start <= duration and start <= end):
+            raise ValueError('invalid raw clocks')
+        normalized = end
+        if end > duration:
+            if end-duration > Fraction(1,100):
+                raise ValueError('EOF allowance exceeded')
+            normalized = duration
+            corrections.append({'index':i,'raw_end':m[4],'normalized_end':str(duration),'policy':POLICY})
+        if normalized <= start or not m[3].strip():
+            raise ValueError('empty span/text')
+        segments.append({'raw_start':m[1],'raw_end':m[4],'start':str(start),'end':str(normalized),'speaker':m[2],'text':m[3].strip(),'words':None})
+        cursor = m.end()
+    if not segments or text[cursor:].strip():
+        raise ValueError('missing segments/unparsed tail')
+    return {'policy':POLICY,'frames':frames,'rate':rate,'duration':str(duration),'segments':segments,'corrections':corrections}
+
+def checks():
+    cases = [
+        ('boundary','[0][S0]x[9.010000]',144000,16000,True,True),
+        ('epsilon','[0][S0]x[9.010001]',144000,16000,True,False),
+        ('inrange','[0.1][S0]x[8.999]',144000,16000,True,True),
+        ('negative','[-0.1][S0]x[1]',144000,16000,True,False),
+        ('start-outside','[9.001][S0]x[9.01]',144000,16000,True,False),
+        ('reversed','[2][S0]x[1]',144000,16000,True,False),
+        ('nan','[NaN][S0]x[1]',144000,16000,True,False),
+        ('infinity','[0][S0]x[Infinity]',144000,16000,True,False),
+        ('collapse','[9][S0]x[9.01]',144000,16000,True,False),
+        ('independent-overlap','[0][S0]x[9.01][1][S1]y[9.01]',144000,16000,True,True),
+        ('fractional-duration','[0][S0]x[0.343333]',1,3,True,True),
+        ('fractional-reject','[0][S0]x[0.343334]',1,3,True,False),
+        ('atomic-reject','[0][S0]x[1][1][S1]y[9.010001]',144000,16000,True,False),
+        ('incomplete','[0][S0]x[9.01]',144000,16000,False,False),
+        ('malformed','[0][S0]x[1]junk',144000,16000,True,False),
+        ('nested','[0][S0]x[1][2]',144000,16000,True,False),
+        ('fraction-token','[0][S0]x[1/2]',144000,16000,True,False),
+        ('nondecimal','[0][S0]x[1e0]',144000,16000,True,False),
+    ]
+    for name,text,frames,rate,complete,expected in cases:
+        try:
+            result = normalize(text,frames,rate,complete)
+            accepted = True
+        except (ValueError,ZeroDivisionError):
+            accepted = False
+        assert accepted == expected, name
+        if name == 'inrange':
+            assert result['segments'][0]['end'] == str(Fraction('8.999')) and not result['corrections']
+        if name == 'independent-overlap':
+            assert len(result['corrections']) == 2
+    return [c[0] for c in cases]
+
+if __name__ == '__main__':
+    print('PASS', checks())
+
+```
+
+Runnable targeted probe (`backend/runtime/moss/eof_probe.py`, ignored):
+
+```python
+"""One retained-fixture decode; preserve raw evidence before exact correction."""
+import hashlib, json, os, time, wave
+from pathlib import Path
+from fractions import Fraction
+from eof_check import normalize, checks
+root = Path(__file__).resolve().parent
+os.environ['HF_HOME'] = str(root/'hf')
+os.environ['HF_MODULES_CACHE'] = str(root/'modules')
+os.environ['HF_HUB_OFFLINE'] = '1'
+import torch
+from transformers import AutoModelForCausalLM, AutoProcessor
+from moss_transcribe_diarize.inference_utils import build_transcription_messages, prepare_inputs
+assert torch.cuda.is_available()
+fixture = root/'synthetic-overlap-2s.wav'
+with wave.open(str(fixture)) as wav:
+    frames, rate = wav.getnframes(), wav.getframerate()
+    pcm_hash = hashlib.sha256(wav.readframes(frames)).hexdigest()
+assert (frames, rate) == (144000,16000)
+assert pcm_hash == '6fa9e0bfb2a432a37680625901b449a429e99c2e4128f407ac69b7474fed7e11'
+print(json.dumps({'event':'boundary_checks','passed':checks()}),flush=True)
+started=time.perf_counter()
+model=AutoModelForCausalLM.from_pretrained(str(root/'model'),trust_remote_code=True,local_files_only=True,dtype=torch.bfloat16,attn_implementation='sdpa').to('cuda:0').eval()
+processor=AutoProcessor.from_pretrained(str(root/'model'),trust_remote_code=True,local_files_only=True)
+torch.cuda.synchronize()
+load_seconds=time.perf_counter()-started
+started=time.perf_counter()
+torch.cuda.reset_peak_memory_stats()
+with torch.autocast('cuda',dtype=torch.bfloat16):
+    inputs=prepare_inputs(processor,build_transcription_messages(fixture),device=torch.device('cuda:0')).to('cuda:0')
+prompt=inputs['input_ids'].shape[1]
+budget=min(model.generation_config.max_new_tokens,model.config.text_config.max_position_embeddings-prompt)
+assert budget>0
+with torch.inference_mode(),torch.autocast('cuda',dtype=torch.bfloat16):
+    output=model.generate(**inputs,max_new_tokens=budget,do_sample=False)
+torch.cuda.synchronize()
+ids=output[0,prompt:].tolist()
+eos=model.generation_config.eos_token_id
+eos=[eos] if isinstance(eos,int) else eos
+text=processor.tokenizer.decode(ids,skip_special_tokens=True).strip()
+raw={'pid':os.getpid(),'frames':frames,'rate':rate,'pcm_sha256':pcm_hash,'raw_text':processor.tokenizer.decode(ids,skip_special_tokens=False),'decoded_text':text,'generated_ids':ids,'prompt_tokens':prompt,'budget':budget,'eos':eos,'complete':bool(ids and ids[-1] in eos),'load_seconds':load_seconds,'decode_seconds':time.perf_counter()-started,'peak_allocated':torch.cuda.max_memory_allocated(),'peak_reserved':torch.cuda.max_memory_reserved(),'torch':torch.__version__,'cuda':torch.version.cuda,'gpu':torch.cuda.get_device_name(),'attention':model.config._attn_implementation}
+(root/'eof-proof-raw.json').write_text(json.dumps(raw,indent=2),encoding='utf-8')
+assert prompt+len(ids)<=model.config.text_config.max_position_embeddings
+normalized=normalize(text,frames,rate,raw['complete'])
+segments=normalized['segments']
+overlaps=[(a,b) for a,s in enumerate(segments) for b,t in enumerate(segments) if a<b and s['speaker']!=t['speaker'] and max(Fraction(s['start']),Fraction(t['start']))<min(Fraction(s['end']),Fraction(t['end']))]
+assert overlaps and normalized['corrections']
+result={'raw':raw,'normalized':normalized,'overlaps':overlaps}
+(root/'eof-proof.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
+print(json.dumps(result),flush=True)
+print(json.dumps({'event':'normal_exit','pid':os.getpid()}),flush=True)
+
+```
+
+Task-1 gate conclusion: PASS from the new exact EOF/overlap proof together with
+the retained pinned Windows CUDA environment, ordinary complete decodes,
+cold/warm timings and exit/release evidence. No full app suites apply to this
+research-only phase. SDD validation and git whitespace checks PASS.

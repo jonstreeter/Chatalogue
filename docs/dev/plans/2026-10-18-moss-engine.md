@@ -39,7 +39,7 @@ runtime feasibility gate passes.
 
 | # | Task | Files | Size | Status |
 | --- | --- | --- | --- | --- |
-| 1 | Prove native Windows CUDA load/decode with pinned MOSS source/model in an isolated environment; record dependency pins, parse completeness, overlapping example, cold/warm timing, VRAM and process exit. Reuse existing proof and rerun retained overlap fixture under spec's moss-eof-v1 rule, retaining raw clocks and correction evidence. Stop on failure before task 2. | `docs/research/2026-10-18-moss-runtime.md`, ignored scratch runtime | M | ▶ in progress: Parakeet timing comparison complete; EOF proof pending |
+| 1 | Prove native Windows CUDA load/decode with pinned MOSS source/model in an isolated environment; record dependency pins, parse completeness, overlapping example, cold/warm timing, VRAM and process exit. Reuse existing proof and rerun retained overlap fixture under spec's moss-eof-v1 rule, retaining raw clocks and correction evidence. Stop on failure before task 2. | `docs/research/2026-10-18-moss-runtime.md`, ignored scratch runtime | M | ✅ done: separate moss-eof-v1 proof PASS; retained runtime evidence complete |
 | 2 | Record approved architecture/registry mapping; implement overlap-aware parser/result validation and complete-generation checks with malformed/nested-clock tests, exact moss-eof-v1 boundary/rejection tests and backend validation of raw correction evidence. | `docs/dev/adr/ADR-0002-moss-managed-engine.md`, `docs/dev/contracts.json`, `backend/src/services/ingestion/moss.py`, `backend/src/test_moss.py` | M | ☐ todo |
 | 3 | Add isolated managed installer/worker using task-1 pins, process ownership, observable setup and offline cache; test concurrent setup, interruption, busy unload, worker death and parent-exit cleanup. | `backend/src/services/ingestion/moss_runtime.py`, `backend/src/services/ingestion/moss_worker.py`, `backend/src/services/ingestion/moss_worker_requirements.txt`, `backend/src/services/ingestion/phonon_process.py`, `backend/src/test_moss_runtime.py` | L | ☐ todo |
 | 4 | Wire manager/GPU lifecycle, settings engine-test actions and explicit multilingual MOSS route; verify no default change or production job creation. | `backend/src/services/ingestion/service.py`, `backend/src/services/ingestion/runtime.py`, `backend/src/services/ingestion/cuda_memory.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/main.py`, `backend/src/schemas.py`, `backend/src/routers/settings.py`, `backend/src/test_moss_runtime.py` | M | ☐ todo |
@@ -101,8 +101,8 @@ Strict validation rejected it; the exact diagnostic rerun reproduced it.
 Owner subsequently requested the explicit tiny-boundary refinement. The spec now
 defines moss-eof-v1: end-only EOF normalization up to 0.01s inclusive, exact clock
 comparison and preserved raw evidence; larger overruns and invalid spans fail.
-Task 1 is reopened solely for the targeted rerun under that policy. Tasks 2–8
-remain unstarted until it passes. Prior ordinary-audio, pins and exit evidence
+Task 1 now passes the separate targeted rerun under that policy (1/8 complete).
+Tasks 2–8 remain unstarted. Prior ordinary-audio, pins and exit evidence
 are reused; the old failure is not relabeled as a pass. No repeat approval of
 the original plan is needed.
 
@@ -113,8 +113,8 @@ Spec findings and resolutions are recorded in its Adversarial review section.
 Ordering gates runtime first, then parser/runtime, API, checkpoint, identity, UI
 and real integration. Every tracker task has specific verification evidence.
 Final planning review passed; owner approval received and task 1 executed.
-Runtime acceptance remains blocked as recorded below. No tests or
-runtime feasibility are claimed complete by the planning review.
+Runtime acceptance now passes the separate EOF proof recorded below. The
+planning review itself did not claim runtime feasibility.
 Remember to follow the MSW deletion rule for all claims — no exceptions.
 
 2026-10-18 paired refinement review applied architect, planner,
@@ -125,6 +125,21 @@ policy is derived from the recorded fixture failure, not an upstream precision
 guarantee. No review subagents or product changes for this refinement.
 
 ## Verification log
+
+- 2026-10-18 separate approved moss-eof-v1 proof PASS; task 1 complete, 1/8.
+  Retained 9s PCM hash unchanged; native CUDA/BF16/SDPA, pinned default budget
+  5120 bounded by context, 200 prompt/108 output tokens, EOS 151645. Four native
+  segments fully parsed, index 3 raw 9.01 normalized to exact 9; three overlap
+  pairs preserved, words=null. Exact Fraction normalizer: 18 boundary/rejection
+  checks PASS; retained real raw output revalidated after strict decimal grammar
+  tightening. Load/decode 53.435/29.205s; process-local peak allocated/reserved
+  1,874,400,256/1,929,379,840 bytes; child 26664/launcher 46912 absent, shell 0.
+  Global VRAM 3976→4020 MiB has unrelated-desktop caveat. Report includes full
+  raw/normalized evidence, runnable source and exact commands. Reused existing
+  pinned environment, eight complete ordinary decodes, cold/warm timings and
+  successful/failed exit evidence; historical strict FAIL remains unchanged.
+  `python scripts/check_sdd_docs.py validate` PASS; `git diff --check` PASS.
+  No app tests or task 2 work. Plan stays In progress; spec is not Shipped.
 
 - 2026-10-18 owner-requested MOSS/Parakeet timestamp comparison PASS as research.
   PCM identity proven for retained 120s result; fresh isolated actual-app 9s

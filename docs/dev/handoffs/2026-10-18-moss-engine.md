@@ -1,4 +1,4 @@
-# Handoff: optional MOSS engine — Parakeet timing comparison complete
+# Handoff: optional MOSS engine — task 1 EOF proof PASS
 
 **Date:** 2026-10-18
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
@@ -6,59 +6,61 @@
 
 ## Status
 
-Task 1 remains in progress; 0/8 complete. The owner-requested timestamp
-comparison is complete. No EOF-policy normalization or product work ran.
+Task 1 complete, 1/8. Plan remains In progress; spec is not Shipped.
+Tasks 2–8 remain unstarted. User authorized only the separate EOF proof.
 
 ## Evidence
 
-`docs/research/2026-10-18-moss-parakeet-timing.md` contains complete reproducible
-comparison source, commands, all exact phrase matches, separate endpoint anchors,
-ambiguities, unmatched text, engine/model provenance and limitations.
+`docs/research/2026-10-18-moss-runtime.md` now contains the full new raw and
+normalized result, precise commands and runnable scratch validator/probe source.
+The existing pinned Windows CUDA environment, eight complete ordinary decodes,
+cold/warm timings and successful/failed process-release evidence are reused.
+Historical strict 9.01s/9s validation FAIL remains unchanged.
 
-- Proved 120s WAV PCM identity before reusing retained actual-app Parakeet result:
-  1,920,000 frames, mono PCM16/16kHz; SHA256
-  `836fc11d4a1de01270096e65aebedfbe272596761c7fc9e308da16e26e55322c`.
-- Conversation: 9/31 unique exact full phrases (97/392 MOSS normalized tokens),
-  18 endpoints; median absolute delta 0.11s, mean 0.231667s, signed range
-  -1.11 to +1.35s. Four repeated phrases ambiguous; 18 unmatched segments.
-- Fresh retained 9s fixture processed by actual app Parakeet CUDA in isolated
-  in-memory SQLite/temp directories, no production jobs/settings/media writes.
-  Both runs requested/routed/used Parakeet; metadata route, no Whisper probe or
-  transcription fallback. Cold/warm app phases 272.232/2.087s, model load 243.54s.
-  Child 33104 and launcher 3628 absent afterward; shell exit 0 retained.
-- Overlap: 0/4 exact full phrases (0/39 tokens); Parakeet has 23 words and lexical
-  disagreement including 81 versus MOSS 91 and the competing S01 utterance.
-  Three globally unique endpoint anchors give -0.16/+0.35/+0.13s deltas.
-  No whole-phrase aggregate, speaker accuracy or audio ground truth claimed.
-- Parakeet structural checks pass (both fresh runs and retained warm 120s).
-  MOSS native9.01s terminal remains the previous strict-bound failure, unchanged.
+- Retained 144000-sample/16000-Hz PCM hash unchanged. One fresh CUDA/BF16/SDPA
+  decode; pinned generation_config budget 5120 bounded by context, prompt 200,
+  108 output tokens ending EOS 151645. Full output parsed into four segments.
+- Exact Fraction moss-eof-v1: only index 3 end 9.01→9. All text, native labels,
+  order and three cross-speaker overlap pairs preserved; words=null.
+- 18 scratch boundary/rejection checks PASS, including exact inclusive threshold,
+  epsilon rejection, fractional duration, independent overlapping allowances,
+  invalid clocks/collapse, incomplete generation and atomic rejection. Decimal
+  grammar tightening followed decode; retained raw output revalidated identically.
+- Load 53.435s, preparation/decode 29.205s. Peak local allocated/reserved
+  1,874,400,256/1,929,379,840 bytes. Child 26664/launcher 46912 absent after shell
+  exit 0. Global VRAM 3976→4020 MiB is affected by unrelated desktop usage.
+- Scratch `eof_check.py`, `eof_probe.py`, `eof-proof-raw.json`, `eof-proof.json`,
+  log, exit and memory snapshots remain ignored. No pinned source/model/config,
+  backend venv or production settings/data/jobs changed.
 
-Scratch evidence in `backend/runtime/moss/`: `compare_parakeet_timing.py`,
-`parakeet-timing-comparison-20261018.{json,log}`,
-`parakeet-overlap-9s-20261018.{json,log}` and
-`parakeet-overlap-9s-20261018-exit.txt`. Prior artifacts were preserved.
-Previous helper-comparison baton is archived as
-`archive/2026-10/2026-10-18-moss-engine-helper-comparison.md`.
-
-## Next step
-
-Report comparison to owner, then resume pending task1 EOF-policy proof as a
-separate phase. Preserve raw clocks/labels and pinned assets. Do not treat
-Parakeet as timing ground truth or infer a uniform clock drift. Do not rerun
-these completed comparison inferences. Tasks2–8 remain unstarted.
+Synthetic fixture overlap is structural feasibility, not natural-overlap or
+timestamp accuracy proof. The causal clock explanation remains unproven.
+Parakeet comparisons are not timing ground truth. Backend evidence trust and
+checkpoint retries remain tasks 2/5.
 
 ## Verification
 
-- Comparison script: PASS; PCM equality, actual engine, Parakeet bounds and
-  endpoint arithmetic assertions completed. Child session 83135 exit 0.
+- `backend/runtime/moss/venv/Scripts/python.exe backend/runtime/moss/eof_check.py`:
+  PASS, 18 cases.
+- One `eof_probe.py` retained-fixture CUDA run: PASS; complete raw output, exact
+  correction, overlap, exit 0 and process absence. Final normalizer revalidation
+  of retained raw output: PASS.
 - `python scripts/check_sdd_docs.py validate`: PASS.
 - `git diff --check`: PASS.
-- Application suites omitted: research-only scope.
+- Application suites omitted: research-only phase.
 
-## Ownership and next worker prompt
+## Next step and ownership
 
-Nine unrelated baseline dirty paths remain outside this phase's ownership.
-No production settings, DB/jobs/media, backend venv or pinned upstream changed.
-Conductor rebuilds task1 context pack with `resume: yes`; scope the next phase
-to the approved moss-eof-v1 proof in ignored runtime, research, plan and baton.
-Task1 remains incomplete until all required gate evidence passes.
+Task 2: architecture/registry and overlap-aware parser/result validation.
+Await user Do next before starting. No task 2 or product implementation here.
+Previous baton archived at
+`archive/2026-10/2026-10-18-moss-engine-parakeet-comparison.md`.
+Nine unrelated baseline dirty paths remain outside ownership and untouched.
+
+## Next worker prompt
+
+Repack task 2 from its approved plan/spec and fresh preflight, with its own
+explicit file ownership. Reuse task-1 evidence; do not rerun setup or benchmarks.
+Preserve raw EOF provenance and exact duration arithmetic. Implement backend
+validation and tests only within the newly packed task. Do not infer accuracy
+from the synthetic overlap or Parakeet comparisons.
