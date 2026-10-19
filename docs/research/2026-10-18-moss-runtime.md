@@ -1526,3 +1526,24 @@ or crash error. API stderr/stdout empty; request log ends at audio test with no
 channel navigation requests. No evidence establishes fixture fault or product root
 cause; the failure remains an unresolved navigation timeout. Owned services were
 already cleaned after suite exit; no further request/retry was made.
+- 2026-10-19 task8 approved navigation diagnosis and same-root repair continuation:
+  clean instrumented load PASS874ms/networkidle; Google Fonts denial nonblocking.
+  Earlier Vite HTTP timeouts intermittent, no product root cause established.
+  Scratch fixture delete-preview numeric response and synthetic youtube source
+  corrected under conductor repack; no product changes or external scans.
+  Full diag5:3PASS1FAIL15unrun13.1s (fixture preview shape); fixture6:
+  5PASS1FAIL13unrun42.5s (manual fixture has no Scan); fixture7:
+  5PASS1FAIL13unrun13.5s (same ambiguous Open selector).
+  Existing owner exact Open approval extended by conductor to four identical
+  callers: channel-refresh.spec.ts,channels.spec.ts,video-sort-order.spec.ts,
+  pages/ChannelsPage.ts. Preflight no mapped contract; only exact:true added;
+  scoped ESLint PASS. Full open8: **7 PASS/1 FAIL/11 unrun**,20.5s,19 selected.
+  Current new blocker channels.spec.ts:17 expects inline add input before opening
+  Add Channel wizard. Snapshot has Add Channel button; source shows source-type
+  choice then input. No new test-flow repair authorized/performed. Task8 remains
+  incomplete7/8; actual MOSS app-phase/identity/staged reuse/GPU handoff UNRUN.
+  Evidence task8/e2e-open8.log,e2e-results-open8/; all completed reruns have unique
+  outputDirs. Accidental earlier interrupted run reused resume3 dir after cwd
+  preparation error (3 passes then stopped, not failure); old screenshot lost,
+  original logs retained. Owned API63584/40500,Vites46652/29080 stopped; no listeners
+  8000/5173/5175. No production backend/data/env or fallback.

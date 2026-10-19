@@ -1,4 +1,4 @@
-# MOSS task8 verification — navigation timeout
+# MOSS task8 verification — add-channel test-flow blocker
 
 **Date:** 2026-10-19
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
@@ -6,56 +6,45 @@
 
 ## Status
 
-Task8 incomplete,7/8 complete. Plan Blocked; spec not Shipped. Owner approved
-only stale tab list repair in frontend/e2e/channel-detail.spec.ts; it now visits
-Videos, Transcripts, Speakers, Chats, Clips. Corrected tab expectation remains unverified because navigation failed first. No product change or CPU/remote fallback. WIP checkpoint:
-`test(moss): checkpoint approved tab repair verification`.
-Prior baton preserved unchanged at archive/2026-10/2026-10-18-moss-engine-search-blocked.md.
+Task8 incomplete,7/8 complete. Plan Blocked; spec not Shipped.
+Owner-approved navigation diagnosis and same-root exact Open repair completed.
+Previous baton preserved unchanged at
+archive/2026-10/2026-10-18-moss-engine-navigation-blocked.md.
 
-## Next step
+## Verification
 
-Conductor decision/repack for isolated browser navigation timeout at
-frontend/e2e/pages/BasePage.ts:11. Resume THIS task8 phase, resume:yes.
-No navigation/product/timeout repair authorized. Stop-first-blocker rule applied.
+Instrumented clean navigation PASS874ms/load/networkidle; Google Fonts denial
+nonblocking. Earlier Vite HTTP timeouts intermittent; product root cause unproven.
+Scratch fixture delete-preview response shape and youtube synthetic source fixed
+under conductor repack; no product changes/external scan. Existing exact Open
+approval extended by conductor to channel-refresh.spec.ts,channels.spec.ts,
+video-sort-order.spec.ts,pages/ChannelsPage.ts: identical ambiguous3-link root,
+only exact:true added, scopedESLint PASS, preflight no mapped contract.
 
-## Verification state
+Full frontend command: `npm run test:e2e -- --config F:/Projects/PorchtimeIndex/backend/runtime/moss/task8/playwright.config.cjs`.
+Latest open8:19selected,7PASS/1FAIL/11unrun20.5s,exit1. Navigation/tab/delete/scan
+pass. New blocker channels.spec.ts:17 expects inline https://youtube.com/@...
+input before clicking Add Channel; current Channels.tsx opens a source chooser
+then input. Failure snapshot shows Add Channel button and no URL input.
+No test-flow/product repair made. Evidence task8/e2e-open8.log,e2e-results-open8/.
+Earlier unique diag5/fixture6/fixture7 evidence retained; details in research log.
+Accidental interrupted earlier run reused resume3 outputDir after cwd error:
+3passes then manually stopped, not failure. Old resume3 screenshots overwritten;
+logs retained. Subsequent full runs unique. Owned API63584/40500 and
+Vites46652/29080 stopped; no listeners8000/5173/5175.
 
-- Scoped `npx eslint e2e/channel-detail.spec.ts` PASS.
-- Full frontend `npm run test:e2e -- --config F:/Projects/PorchtimeIndex/backend/runtime/moss/task8/playwright.config.cjs`
-  FAIL:19 selected,1 PASS/1 FAIL/17 unrun,51.0s. Installed Chrome/workers1/
-  maxFailures1; no exclusions. Page goto / timed out before repaired tab assertion.
-- Reuse prior closed typecheck/root Ruff PASS, frontend lint0 errors/43 existing
-  warnings, isolated backend252 PASS124.31s. No product changes justify reruns.
-- Actual isolated app-phase MOSS9s/10s/120s, real voice identity across recordings,
-  clean-only enrollment, staged child reuse, GPU exit barrier/reload measurements
-  remain UNRUN. Task1/3 proofs do not replace them. PLAN_COMPLETE is not justified.
+Prior closed checks reused: typecheck/rootRuff PASS; frontend lint0errors43warnings;
+isolated backend252PASS124.31s. Actual MOSS app-phase9s/10s/120s, real identity
+across recordings, clean-only enrollment, staged reuse and GPU handoff UNRUN.
+No PLAN_COMPLETE, fallback, throughput or90-minute fit claim.
 
-## Blockers
+## Next worker prompt
 
-Channel-detail first test navigation fails page.goto net::ERR_ABORTED after30s
-waiting load at BasePage.ts:11. Prior run passed this test. Root cause unproven;
-no test timeout increase, skip or product workaround. Evidence ignored
-backend/runtime/moss/task8/e2e-resume3.log and unique e2e-results-resume3/.
-
-## Diagnosis worth keeping
-
-Fixture API port8000 owned listener67356 verified by elevated CIM as child of
-venv launcher67052, command fixture_api.py, before any HTTP request. Own Vites
-58848/66484 on5173/5175 and API readiness returned200. PYTHONPATH sitecustomize
-pre-import isolation and scratch envDir retained. All four owned processes stopped;
-netstat no listeners on8000/5173/5175. Mock scan/process state is fixture evidence
-only. Never contact unrelated listeners or production env/settings/DB/recordings.
-
-Preserve all prior task8 evidence; unique Playwright outputDir per run. Keep task3
-managed install/model/proofs immutable; use task8 temp_root and bootstrap before
-backend imports. Private worker must not inherit bootstrap. No fallback/upgrades.
-Remaining real proof must use actual matcher/embedding/profile persistence and
-native labels that change across recordings; no fabricated embeddings. Earlier
-crash/shutdown/parent-death tests can be reused. No push/deploy/archive completion.
-
-Read-only infrastructure review after stopped run: both Vite logs report readiness
-(2161ms/2149ms), only Node deprecation/Browserslist warnings, no EBUSY, compilation
-or crash error. API stderr/stdout empty; request log ends at audio test with no
-channel navigation requests. No evidence establishes fixture fault or product root
-cause; the failure remains an unresolved navigation timeout. Owned services were
-already cleaned after suite exit; no further request/retry was made.
+Resume THIS task8 phase,resume:yes. Conductor/owner decision for distinct stale
+add-channel E2E flow at channels.spec.ts:17,ChannelsPage.ts input locator. Proposed
+minimum test-only flow: click Add Channel, choose YouTube Channel, assert https://youtube.com/@channelname
+URL input and wizard controls. Preserve assertions; no product markup workaround.
+After approval/repack run scopedESLint and full19test suite, unique resolved
+outputDir/cwd before launch, stop first genuine blocker. Then remaining actual
+MOSS app-phase/identity/GPU acceptance. Keep task3 model/runtime/proofs immutable;
+bootstrap before backend imports, worker sanitized; no production settings/media.

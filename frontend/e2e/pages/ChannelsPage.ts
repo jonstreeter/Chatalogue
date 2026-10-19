@@ -32,7 +32,7 @@ export class ChannelsPage extends BasePage {
 
   async openChannel(name: string) {
     const card = this.channelCards.filter({ hasText: name });
-    await card.getByRole('link', { name: 'Open' }).click();
+    await card.getByRole('link', { name: 'Open', exact: true }).click();
   }
 
   async scanChannel(name: string) {

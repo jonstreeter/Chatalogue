@@ -9,7 +9,7 @@ test.describe('Video Sort Order', () => {
     // Find and open the primary channel
     const card = page.locator('.glass-panel').filter({ hasText: /chatalogue|porchtime/i });
     await expect(card.first()).toBeVisible({ timeout: 10_000 });
-    await card.first().getByRole('link', { name: 'Open' }).click();
+    await card.first().getByRole('link', { name: 'Open', exact: true }).click();
     await page.waitForLoadState('networkidle');
 
     // Should be on the Videos tab by default

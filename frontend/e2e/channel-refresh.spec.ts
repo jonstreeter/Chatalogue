@@ -19,7 +19,7 @@ test.describe('Channel Refresh', () => {
     await expect(card.getByRole('button', { name: /Scan/i })).toBeVisible({ timeout: 60_000 });
 
     // Open the channel to check videos
-    await card.getByRole('link', { name: 'Open' }).click();
+    await card.getByRole('link', { name: 'Open', exact: true }).click();
     await page.waitForLoadState('networkidle');
 
     // Should be on channel detail page

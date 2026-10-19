@@ -46,7 +46,7 @@ runtime feasibility gate passes.
 | 5 | Add full-input transcription and atomic native-label checkpoint, duration/context rejection, provenance and retry semantics. Preserve raw clock tokens, source sample count/rate and moss-eof-v1 corrections across identity retries without cumulative normalization. Test old cache reuse, mixed-engine partial rejection, failure/cancellation and forced reprocessing. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | M | ✅ done |
 | 6 | Reuse identity/profile matching with explicit native speaker attribution and overlap-safe samples; retain standard save/cleanup. Test two recordings matching saved names, nested overlapping speakers, no clean sample and missing embedding model. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/test_moss_pipeline.py` | L | ✅ done |
 | 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: managed UI and five Chromium checks PASS |
-| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ▶ incomplete — browser navigation timeout before tab assertions |
+| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ▶ incomplete — add-channel test expects retired inline form |
 
 ## Test plan
 
@@ -327,3 +327,24 @@ guarantee. No review subagents or product changes for this refinement.
   before HTTP requests; Vites58848/66484 returned200. All owned services stopped;
   netstat confirms no listeners8000/5173/5175. No production backend/data/env.
   WIP checkpoint subject: test(moss): checkpoint approved tab repair verification.
+- 2026-10-19 task8 approved navigation diagnosis and same-root repair continuation:
+  clean instrumented load PASS874ms/networkidle; Google Fonts denial nonblocking.
+  Earlier Vite HTTP timeouts intermittent, no product root cause established.
+  Scratch fixture delete-preview numeric response and synthetic youtube source
+  corrected under conductor repack; no product changes or external scans.
+  Full diag5:3PASS1FAIL15unrun13.1s (fixture preview shape); fixture6:
+  5PASS1FAIL13unrun42.5s (manual fixture has no Scan); fixture7:
+  5PASS1FAIL13unrun13.5s (same ambiguous Open selector).
+  Existing owner exact Open approval extended by conductor to four identical
+  callers: channel-refresh.spec.ts,channels.spec.ts,video-sort-order.spec.ts,
+  pages/ChannelsPage.ts. Preflight no mapped contract; only exact:true added;
+  scoped ESLint PASS. Full open8: **7 PASS/1 FAIL/11 unrun**,20.5s,19 selected.
+  Current new blocker channels.spec.ts:17 expects inline add input before opening
+  Add Channel wizard. Snapshot has Add Channel button; source shows source-type
+  choice then input. No new test-flow repair authorized/performed. Task8 remains
+  incomplete7/8; actual MOSS app-phase/identity/staged reuse/GPU handoff UNRUN.
+  Evidence task8/e2e-open8.log,e2e-results-open8/; all completed reruns have unique
+  outputDirs. Accidental earlier interrupted run reused resume3 dir after cwd
+  preparation error (3 passes then stopped, not failure); old screenshot lost,
+  original logs retained. Owned API63584/40500,Vites46652/29080 stopped; no listeners
+  8000/5173/5175. No production backend/data/env or fallback.

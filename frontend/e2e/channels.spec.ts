@@ -26,7 +26,7 @@ test.describe('Channels List', () => {
     const count = await channelsPage.getChannelCount();
     if (count > 0) {
       // Click the first "Open" link
-      await page.locator('.glass-panel').first().getByRole('link', { name: 'Open' }).click();
+      await page.locator('.glass-panel').first().getByRole('link', { name: 'Open', exact: true }).click();
       await expect(page).toHaveURL(/\/channel\/\d+/);
     }
   });
