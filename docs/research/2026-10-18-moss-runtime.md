@@ -440,3 +440,445 @@ for offset in [2,4]:
         w.setparams(params)
         w.writeframes(np.clip(mixed,-32768,32767).astype('<i2').tobytes())
 ```
+
+## Controlled official-helper/probe comparison (2026-10-18)
+
+PASS for this comparison only; task 1 remains in progress. No EOF policy, parser,
+normalization, product code, fixture edit or upstream/config change was applied.
+The pinned environment/model/source above were reused, offline, on native CUDA
+BF16 SDPA. Both paths used the same retained 144000-sample 16 kHz PCM16 fixture,
+default prompt and greedy 4096-token budget (experimental control, not a product
+default). PCM SHA256: `6fa9e0bfb2a432a37680625901b449a429e99c2e4128f407ac69b7474fed7e11`.
+
+Command from repository root:
+
+```powershell
+& backend/runtime/moss/venv/Scripts/python.exe backend/runtime/moss/compare_helper.py *> backend/runtime/moss/helper-comparison.log
+$comparisonExit=$LASTEXITCODE
+"child_exit=$comparisonExit" | Set-Content backend/runtime/moss/helper-comparison-exit.txt
+```
+
+One process loaded one shared model, then serialized probe followed by official
+`generate_transcription`. The original probe generation path was reproduced up
+to raw output capture, deliberately stopping before its strict parser/validation.
+Read-only interception of `model.generate` cloned every supplied input tensor
+and the raw return to CPU, passed the original arguments unchanged and returned
+the untouched original output. Effective configuration was captured from the
+provided configuration (or model configuration) plus generation keyword overrides.
+The official helper retained its upstream deep-copy behavior. No upstream file
+was edited. Full tensors and outputs remain in ignored `helper-comparison-probe.pt`
+and `helper-comparison-official.pt`; IDs, hashes, configurations and raw text are
+in `helper-comparison.json`. The runnable comparison source is retained below.
+
+All five tensor keys, shapes, dtypes and values matched exactly: `input_ids`,
+`attention_mask`, `input_features`, `audio_feature_lengths`, `audio_chunk_mapping`.
+Prompt width, attention length and slicing boundary were all 200 on both paths.
+The complete effective generation configurations matched. Full returned IDs,
+all 108 generated IDs, and raw decoded text including the EOS special token
+matched exactly. Both completed with EOS 151645 before the 4096 budget.
+Both retained the same raw terminal `[9.01]` for the exact 9.00s source.
+This rules out a helper/probe output difference for this controlled execution;
+it does not establish why the model emitted 9.01 or establish general accuracy.
+
+Child PID 36916 loaded in 2.110840s; probe generation 6.081976s (whole path
+7.776997s), official generation 5.834155s (whole path 5.841030s). These are
+serialized first/second observations, not a performance comparison. The log
+contains `normal_exit`; retained shell evidence is `child_exit=0`. Subsequent
+`Get-Process -Id 36916 -ErrorAction SilentlyContinue` returned no process, and
+`nvidia-smi --query-compute-apps=pid,used_gpu_memory --format=csv,noheader` omitted
+that PID. Subsequent global GPU memory was 4452 MiB; no same-run pre-load baseline
+was captured, so no numerical VRAM-release delta is claimed. Other processes
+were untouched.
+
+Raw comparison evidence (full generated IDs and input tensor hashes):
+
+```json
+{
+  "probe": {
+    "prompt_width": 200,
+    "attention_length": 200,
+    "generated_ids": [
+      58,
+      15,
+      13,
+      15,
+      15,
+      60,
+      42474,
+      15,
+      16,
+      60,
+      362,
+      59783,
+      51674,
+      1091,
+      1496,
+      22389,
+      702,
+      7873,
+      17,
+      13,
+      18,
+      20,
+      1457,
+      17,
+      13,
+      16,
+      17,
+      60,
+      42474,
+      15,
+      17,
+      60,
+      358,
+      3076,
+      11,
+      358,
+      572,
+      9223,
+      304,
+      220,
+      24,
+      16,
+      11,
+      773,
+      358,
+      2167,
+      1513,
+      944,
+      7873,
+      19,
+      13,
+      22,
+      20,
+      1457,
+      17,
+      13,
+      24,
+      23,
+      60,
+      42474,
+      15,
+      16,
+      60,
+      1205,
+      2299,
+      3709,
+      1052,
+      304,
+      1449,
+      3204,
+      1616,
+      304,
+      27040,
+      11678,
+      4311,
+      7873,
+      20,
+      13,
+      23,
+      18,
+      1457,
+      20,
+      13,
+      19,
+      16,
+      60,
+      42474,
+      15,
+      17,
+      60,
+      358,
+      1513,
+      944,
+      6099,
+      537,
+      5382,
+      448,
+      264,
+      15493,
+      315,
+      96762,
+      7873,
+      24,
+      13,
+      15,
+      16,
+      60,
+      151645
+    ],
+    "raw_text": "[0.00][S01] A drastic overhaul than even Utah has.[2.35][2.12][S02] I mean, I was born in 91, so I really don't.[4.75][2.98][S01] We're getting there in every possible way in Salt Lake City.[5.83][5.41][S02] I don't remember not living with a bunch of Mexicans.[9.01]<|im_end|>",
+    "tensors": {
+      "input_ids": {
+        "shape": [
+          1,
+          200
+        ],
+        "dtype": "torch.int64",
+        "sha256": "476f056784aca9f1d315eb6b1e3571f6b4588e37acc29dbd43f9be7b5330db7e"
+      },
+      "attention_mask": {
+        "shape": [
+          1,
+          200
+        ],
+        "dtype": "torch.int64",
+        "sha256": "4a2ad471a677320287e08c40cb5f743fa45504ce496319ff4369157f7c0723e7"
+      },
+      "input_features": {
+        "shape": [
+          1,
+          80,
+          3000
+        ],
+        "dtype": "torch.float32",
+        "sha256": "5d785df1f008dd9338c6a849739e39ca1aa5c3358869952299cad0973f176a62"
+      },
+      "audio_feature_lengths": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.int64",
+        "sha256": "6d0d22a95af6226f43d672c8a1301c9ae5bb6573ade9e00e0e6344ba3a2b8e6e"
+      },
+      "audio_chunk_mapping": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.int64",
+        "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc"
+      }
+    }
+  },
+  "official": {
+    "prompt_width": 200,
+    "attention_length": 200,
+    "generated_ids": [
+      58,
+      15,
+      13,
+      15,
+      15,
+      60,
+      42474,
+      15,
+      16,
+      60,
+      362,
+      59783,
+      51674,
+      1091,
+      1496,
+      22389,
+      702,
+      7873,
+      17,
+      13,
+      18,
+      20,
+      1457,
+      17,
+      13,
+      16,
+      17,
+      60,
+      42474,
+      15,
+      17,
+      60,
+      358,
+      3076,
+      11,
+      358,
+      572,
+      9223,
+      304,
+      220,
+      24,
+      16,
+      11,
+      773,
+      358,
+      2167,
+      1513,
+      944,
+      7873,
+      19,
+      13,
+      22,
+      20,
+      1457,
+      17,
+      13,
+      24,
+      23,
+      60,
+      42474,
+      15,
+      16,
+      60,
+      1205,
+      2299,
+      3709,
+      1052,
+      304,
+      1449,
+      3204,
+      1616,
+      304,
+      27040,
+      11678,
+      4311,
+      7873,
+      20,
+      13,
+      23,
+      18,
+      1457,
+      20,
+      13,
+      19,
+      16,
+      60,
+      42474,
+      15,
+      17,
+      60,
+      358,
+      1513,
+      944,
+      6099,
+      537,
+      5382,
+      448,
+      264,
+      15493,
+      315,
+      96762,
+      7873,
+      24,
+      13,
+      15,
+      16,
+      60,
+      151645
+    ],
+    "raw_text": "[0.00][S01] A drastic overhaul than even Utah has.[2.35][2.12][S02] I mean, I was born in 91, so I really don't.[4.75][2.98][S01] We're getting there in every possible way in Salt Lake City.[5.83][5.41][S02] I don't remember not living with a bunch of Mexicans.[9.01]<|im_end|>",
+    "tensors": {
+      "input_ids": {
+        "shape": [
+          1,
+          200
+        ],
+        "dtype": "torch.int64",
+        "sha256": "476f056784aca9f1d315eb6b1e3571f6b4588e37acc29dbd43f9be7b5330db7e"
+      },
+      "attention_mask": {
+        "shape": [
+          1,
+          200
+        ],
+        "dtype": "torch.int64",
+        "sha256": "4a2ad471a677320287e08c40cb5f743fa45504ce496319ff4369157f7c0723e7"
+      },
+      "input_features": {
+        "shape": [
+          1,
+          80,
+          3000
+        ],
+        "dtype": "torch.float32",
+        "sha256": "5d785df1f008dd9338c6a849739e39ca1aa5c3358869952299cad0973f176a62"
+      },
+      "audio_feature_lengths": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.int64",
+        "sha256": "6d0d22a95af6226f43d672c8a1301c9ae5bb6573ade9e00e0e6344ba3a2b8e6e"
+      },
+      "audio_chunk_mapping": {
+        "shape": [
+          1
+        ],
+        "dtype": "torch.int64",
+        "sha256": "af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc"
+      }
+    }
+  }
+}
+```
+
+Runnable comparison source (ignored scratch, retained for reproduction):
+
+```python
+"""Controlled raw helper/probe comparison; no parser or EOF policy."""
+import copy, hashlib, json, os, time, wave
+from pathlib import Path
+root=Path(__file__).resolve().parent
+os.environ['HF_HOME']=str(root/'hf')
+os.environ['HF_MODULES_CACHE']=str(root/'modules')
+os.environ['HF_HUB_OFFLINE']='1'
+import torch
+from transformers import AutoModelForCausalLM, AutoProcessor
+from moss_transcribe_diarize.inference_utils import build_transcription_messages, prepare_inputs, generate_transcription
+assert torch.cuda.is_available()
+device=torch.device('cuda:0')
+fixture=root/'synthetic-overlap-2s.wav'
+with wave.open(str(fixture)) as w:
+    frames,rate=w.getnframes(),w.getframerate()
+    pcm=w.readframes(frames)
+assert frames==144000 and rate==16000
+assert hashlib.sha256(pcm).hexdigest()=='6fa9e0bfb2a432a37680625901b449a429e99c2e4128f407ac69b7474fed7e11'
+start=time.perf_counter()
+model=AutoModelForCausalLM.from_pretrained(str(root/'model'),trust_remote_code=True,local_files_only=True,dtype=torch.bfloat16,attn_implementation='sdpa').to(device).eval()
+processor=AutoProcessor.from_pretrained(str(root/'model'),trust_remote_code=True,local_files_only=True)
+torch.cuda.synchronize()
+report={'pid':os.getpid(),'torch':torch.__version__,'cuda':torch.version.cuda,'gpu':torch.cuda.get_device_name(),'attention':model.config._attn_implementation,'load_seconds':time.perf_counter()-start,'frames':frames,'rate':rate,'pcm_sha256':hashlib.sha256(pcm).hexdigest(),'paths':{}}
+print(json.dumps({'event':'loaded',**report}),flush=True)
+original=model.generate
+captures={}
+current=None
+def capture(*args,**kwargs):
+    tensors={k:v.detach().cpu().clone() for k,v in kwargs.items() if torch.is_tensor(v)}
+    config=copy.deepcopy(kwargs.get('generation_config',model.generation_config))
+    config.update(**{k:v for k,v in kwargs.items() if k not in tensors and k!='generation_config'})
+    started=time.perf_counter()
+    output=original(*args,**kwargs)
+    torch.cuda.synchronize()
+    captures[current]={'tensors':tensors,'output':output.detach().cpu().clone(),'config':config.to_dict(),'seconds':time.perf_counter()-started}
+    return output
+model.generate=capture
+messages=build_transcription_messages(fixture)
+for current in ('probe','official'):
+    started=time.perf_counter()
+    torch.cuda.reset_peak_memory_stats()
+    if current=='probe':
+        with torch.autocast('cuda',dtype=torch.bfloat16):
+            inputs=prepare_inputs(processor,messages,device=device).to(device)
+        prompt=inputs['input_ids'].shape[1]
+        budget=min(4096,model.config.text_config.max_position_embeddings-prompt)
+        assert budget==4096
+        with torch.inference_mode(),torch.autocast('cuda',dtype=torch.bfloat16):
+            outputs=model.generate(**inputs,max_new_tokens=budget,do_sample=False)
+    else:
+        helper=generate_transcription(model,processor,messages,max_new_tokens=4096,do_sample=False,device=device,dtype=torch.bfloat16)
+        prompt=helper['prompt_len']
+    cap=captures[current]
+    ids=cap['output'][0,prompt:]
+    eos=model.generation_config.eos_token_id
+    eos=[eos] if isinstance(eos,int) else eos
+    result={'prompt_width':cap['tensors']['input_ids'].shape[1],'attention_length':int(cap['tensors']['attention_mask'][0].sum()),'slice_prompt':prompt,'generated_ids':ids.tolist(),'raw_text':processor.tokenizer.decode(ids,skip_special_tokens=False),'decoded_text':processor.tokenizer.decode(ids,skip_special_tokens=True),'generation_seconds':cap['seconds'],'path_seconds':time.perf_counter()-started,'complete':ids[-1].item() in eos and len(ids)<4096,'last_token':ids[-1].item(),'generated_tokens':len(ids),'peak_allocated':torch.cuda.max_memory_allocated(),'peak_reserved':torch.cuda.max_memory_reserved(),'effective_generation_config':cap['config'],'tensors':{k:{'shape':list(v.shape),'dtype':str(v.dtype),'sha256':hashlib.sha256(v.contiguous().view(torch.uint8).numpy().tobytes()).hexdigest()} for k,v in cap['tensors'].items()}}
+    if current=='official': result['helper_return']=helper
+    report['paths'][current]=result
+    torch.save(cap,root/f'helper-comparison-{current}.pt')
+    (root/'helper-comparison.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+    print(json.dumps({'event':current,'seconds':result['path_seconds'],'tokens':len(ids),'complete':result['complete']}),flush=True)
+a,b=captures['probe'],captures['official']
+report['comparison']={'tensor_keys_equal':a['tensors'].keys()==b['tensors'].keys(),'tensor_equal':{k:torch.equal(v,b['tensors'][k]) for k,v in a['tensors'].items()},'effective_config_equal':a['config']==b['config'],'full_output_equal':torch.equal(a['output'],b['output']),'generated_ids_equal':report['paths']['probe']['generated_ids']==report['paths']['official']['generated_ids'],'raw_text_equal':report['paths']['probe']['raw_text']==report['paths']['official']['raw_text']}
+(root/'helper-comparison.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+assert all(report['comparison']['tensor_equal'].values()) and all(v for k,v in report['comparison'].items() if k!='tensor_equal')
+assert all(p['complete'] for p in report['paths'].values())
+print(json.dumps({'event':'normal_exit','pid':os.getpid(),'comparison':report['comparison']}),flush=True)
+
+```

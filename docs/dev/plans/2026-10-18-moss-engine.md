@@ -126,6 +126,17 @@ guarantee. No review subagents or product changes for this refinement.
 
 ## Verification log
 
+- 2026-10-18 controlled official-helper/probe comparison PASS: same retained
+  144000-sample fixture, default prompt, pinned native CUDA BF16 SDPA, greedy
+  4096 budget, exact equality of all five complete input tensors and effective
+  generation configurations. Both prompt/attention lengths 200, identical full
+  output and 108 generated IDs/raw text, EOS 151645, raw terminal 9.01s.
+  Child 36916 normal exit, shell exit 0, PID absent afterward. See research
+  report for commands, script, tensors/hashes, raw IDs/text and measured times.
+  This comparison does not explain the 9.01s output. Task 1 stays in progress;
+  approved EOF-policy proof is a separate pending step. Tasks 2–8 unstarted.
+
+
 - 2026-10-18 upstream follow-up: initial release, current pinned source and the
   fine-tuning-support commit retain the same marker arithmetic. Released
   fine-tuning collator loads checkpoint processor/config; report v7 describes
