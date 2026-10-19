@@ -56,7 +56,7 @@ established; new chunk behavior needs its own isolated and real verification.
 | 10 | Stream normalized audio through bounded requests; durably commit complete native chunks, exact offsets, source fingerprints and frontier; support adaptive resource split, cancellation/resume and legacy reuse without rejecting long recordings. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | L | ✅ done: bounded streaming and durable native chunks verified |
 | 11 | Reconstruct chunk namespaces and reconcile real channel identities without native overlap loss; verify clean enrollment, swapped labels and identity-only retry. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/test_moss_pipeline.py` | M | ✅ done: chunk identity enrollment, persistent names and retry verified |
 | 12 | Replace recording-limit and whole-input retry UI with automatic batching/resume capability; expose chunk progress and browser-verify controls, persistence and segment playback. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: automatic batching/resume notice and isolated Chromium proof |
-| 13 | Verify isolated >90-minute coverage fixtures and real CUDA multi-chunk seams/identity/checkpoint reuse/GPU handoff; run full workflow and record measured limitations/local handoff. | `docs/research/2026-10-18-moss-runtime.md`, spec, plan, handoff; affected MOSS tests/paths only through explicit conductor repack | L | ☐ todo |
+| 13 | Verify isolated >90-minute coverage fixtures and real CUDA multi-chunk seams/identity/checkpoint reuse/GPU handoff; run full workflow and record measured limitations/local handoff. | `docs/research/2026-10-18-moss-runtime.md`, spec, plan, handoff; affected MOSS tests/paths only through explicit conductor repack | L | ✅ done: real three-chunk CUDA/identity/resume and full local verification |
 
 ## Test plan
 
@@ -503,3 +503,31 @@ guarantee. No review subagents or product changes for this refinement.
   with real existing field and added bar assertions; no product workaround.
   Typecheck PASS; lint PASS with43 existing warnings. SDD/whitespace/hooks run
   at checkpoint. Actual chunk seam/identity/GPU proof remains task13.
+
+- Task13 (2026-10-19): **13/13 tasks verified**. Real default-VAD CUDA three-chunk
+  proof on a distinct240s WAV made by repeating cached120s speech: exact normalized
+  frame coverage0–1169152–3089152–3840000;73.072/120/46.928s requests;
+  vad_gap/vad_gap/eof, no VAD fallback, unchanged120s ceiling. Actual childPID3208
+  reused across all successful calls42.470/73.104/27.779s. Instrumented interruption
+  after first durable publication retained exact first result/frontier; retry
+  inferred only remaining chunks. Strict EOS/context,65 native turns, absolute
+  offsets/namespaces/words=None and final46.93→46.928 localEOF correction retained.
+  Initial scratch wrong manifest-field assertion corrected against completed raw
+  without repeating inference; original failure evidence retained. Actual240s has
+  no cross-label overlap; retained actual9s decoder overlap and v2 fixtures cover
+  overlap separately. Seam-adjacent text inspected; repeated speech and recognition
+  variation disclosed, no lossless or continuous-hard-cut accuracy claim.
+  Real CUDA voice matching saved65rows/19profiles using22 clean-only crops:
+  equal locals differed in identity and changed locals matched same real profile.
+  OS worker absence verified before GPU voice load. Named raw-only identity retry
+  passed65 matched rows,0 ASR/VAD, unchanged rawhash. Models/helpers cleaned.
+  Ordered full workflow: typecheck PASS; root Ruff PASS; frontend lint PASS
+  (0errors/43existing warnings); isolated backend **316PASS**,1 warning,179.58s,
+  exit0; all installed-Chrome browser tests **19PASS**,49.6s,exit0, no exclusions.
+  Full backend includes generated5401s+1frame coverage with real FFmpeg and46
+  instrumented requests; not90-minute CUDA inference. Browser uses only mocked/
+  fixture APIs, owned8000/5173/5175 and unique task13/e2e-results-full; no production
+  scan/process/settings/media/DB. Existing runtime/deprecation warnings recorded
+  in research; no dependencies/threshold changes. SDD/whitespace and normal commit
+  hooks run at checkpoint. Plan remains In progress/spec In Review for local
+  closeout; no push/deploy/installer rerun or feature archive performed.

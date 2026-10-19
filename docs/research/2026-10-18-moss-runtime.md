@@ -1624,3 +1624,133 @@ All owned app proof processes exited and models released; browser helper ports
 8000/5173/5175 are free. No push, deployment, installer rerun or archive completion.
 
 Timing context: initial app13 cached-environment startup/load took129.754s (model3.276s, readiness13.590s); subsequent fresh-worker app14 load14.057s (model2.055s, readiness3.390s). These include variable imports/filesystem cache overhead and are measurements, not guarantees.
+
+## Task 13 — bounded recording proof, 2026-10-19
+
+### Real CUDA recording, durable interruption and resume
+
+Ignored reproduction/evidence root: `backend/runtime/moss/task13/`. Copied and
+inspected `sitecustomize.py` before importing application modules. It disables
+dotenv, redirects runtime/data/env paths, selects isolated SQLite and denies
+production `backend/data` and `.env` through an audit hook. The real worker uses
+the existing verified task3 managed environment/model without installation or pin
+changes and task13 IPC. No production recording, settings, DB or job was opened.
+
+`proof.py` concatenates the cached conversation-120s PCM twice into a distinct
+240-second mono PCM16 16 kHz research WAV. This deliberately repeated source is
+not an independent recording/recognition-accuracy test. Original PCM has
+1,920,000 frames, SHA256
+`836fc11d4a1de01270096e65aebedfbe272596761c7fc9e308da16e26e55322c`;
+the new WAV has 3,840,000 frames, normalized PCM SHA256
+`d4a83b4686ac3db8d82fd00b6f179ca9edde2bac9fc2c3bb1cf249b3b260de9d`
+and whole-file SHA256
+`3404c2da7d650ecda4ef917f8a52586e15f1ca3a380b3cfabfdbae1ef331d18a`.
+The initial scratch source event incorrectly labeled the original byte count as
+frames; the WAV/manifest and the explicit frame counts above are authoritative.
+
+Unmodified `_process_moss_phase`, real FFmpeg normalization and installed VAD
+defaults produced these requests; no ASR/VAD/identity output was mocked:
+
+| Chunk | Owned frames [start,end) | Seconds | Boundary reason | Decode / manager call seconds |
+| --- | --- | --- | --- | --- |
+| 00000000 | 0–1169152 | 73.072 | vad_gap | 42.385 / 42.470 |
+| 00000001 | 1169152–3089152 | 120 | vad_gap | 72.976 / 73.104 |
+| 00000002 | 3089152–3840000 | 46.928 | eof | 27.717 / 27.779 |
+
+Every frame is owned exactly once, including silence. No VAD fallback occurred;
+the 120-second request's recorded reason is `vad_gap`, not a claimed hard-cut
+case. The unchanged 120-second target and 5400-second worker ceiling hold.
+All three requests used actual child PID3208, CUDA/BF16/SDPA, pinned model/source
+revisions. Setup/load took40.132s end to end; worker model load2.259s and readiness
+decode4.298s are separate. Peak allocated bytes by request were
+2,158,451,200 / 2,507,003,392 / 2,019,128,320; peak reserved bytes
+2,229,272,576 / 2,682,257,408 / 2,682,257,408. These are measured values only.
+
+Each result retained strict EOS151645, complete=true, context131072, input/output
+tokens1027/636,1638/1007,690/411 and output budgets130045,129434,130382.
+An instrumented between-request interruption fired only after the first chunk's
+append/fsync/frontier publication. Resume retained frontier1169152 and the exact
+first result, then made only two remaining real calls in the same child. Final
+`moss-recording-v2` preserves all65 native segments, exact rational absolute
+offsets, chunk/local namespace components and words=null. Last chunk raw46.93
+was corrected to46.928 by moss-eof-v1, with original token/correction retained;
+the other chunks have no corrections.
+
+Initial `real1.log` finishes with a scratch assertion KeyError (`sample_count`
+is under `moss_source`); the final artifact was already atomically published.
+`continue_identity.py` verified that saved artifact using the correct field,
+without repeating inference or modifying model output. `proof-initial.py` retains
+the failed harness; corrected `proof.py` retains the runnable proof logic.
+
+### Seams, actual identity and GPU handoff
+
+Inspected both seam-adjacent native turn pairs at73.072/193.072s. The following
+turns begin at local0.24/0.26 with “What?”; preceding output ends at absolute
+70.43/190.552. The repeated dialogue is expected from the repeated source.
+There is no invented text deduplication or discarded native turn. Frame ownership
+does not prove recognition of all speech or accurate timing: the first preceding
+turn ends “True.” while the repeated occurrence ends “true he.”, demonstrating
+recognition variation. No lossless seam or continuous-speech hard-cut claim is made.
+This240s decode contains **zero** cross-label overlapping native intervals.
+Actual9s task8 overlap proof remains evidence for the unchanged strict decoder;
+full v2 overlap regression establishes reconstruction/persistence of overlapping
+native fixture turns. Do not describe this240s run as actual overlapping speech.
+
+`continue_identity.py` asserted PID3208 absent at OS level and manager processfalse
+before loading the existing cached pyannote embedding model on CUDA (revision
+`4db4899737a38b2d618bbd74350915aa10293cb2`). The exit barrier precedes voice load
+by26.062s. All22 real embedding crop intervals exclude other native namespace
+voices;65 transcript rows and19 profiles were saved through the existing matcher.
+Examples of actual routing: chunk0:S01→speaker1/profile1;
+chunk1:S01→speaker2/profile4; chunk1:S02→speaker1/profile1;
+chunk0:S04 and chunk1:S03→speaker4/profile7. Equal locals did not force a match;
+changed locals matched real persisted profiles. The shared speech and repeated
+source do not establish independent identification accuracy.
+
+`named_retry.py` names the saved research speakers, reconstructs the completed
+raw and runs the actual identity/save path again with ASR and VAD forbidden.
+All65 rows retain named matched profiles; inference/VAD calls0; raw SHA256
+`c69124cf76839cb73ef7c0d7df8c8d50b7d6b71e526ecce6af5395782ecad8b8`
+is unchanged. Models were explicitly released after both identity passes.
+Evidence: `real1/proof.json`, immutable `real1/repeated240_transcript_raw.json`,
+isolated `real1/identity.sqlite`, `real1.log`, `identity1.log`, `named-retry.log`.
+
+Runtime warnings: existing Transformers cache deprecation, missing optional Triton
+flop counting, Lightning's in-memory checkpoint-version upgrade notice, unsupported
+Windows expandable_segments allocator and pyannote TF32 reproducibility notice.
+No checkpoint/cache migration or model/threshold adjustment was performed.
+
+### Full workflow and cleanup
+
+Ordered checks: frontend `npx tsc -b` PASS/exit0; root backend-venv
+`python -m ruff check .` PASS/exit0; frontend `npm run lint` PASS/exit0,
+0errors/43 existing warnings. Then, after real proof models were released:
+
+- Backend `python -m pytest src -q` in the backend venv with task13 pre-import
+  isolation and `DB_PROVIDER=sqlite DATABASE_URL=sqlite://`: **316 PASS**,
+  1 reported warning,179.58s,exit0. All tests selected, no skips/failures. Existing
+  Transformers cache warning; interpreter shutdown also emitted swigvarlink
+  __module__ deprecation. `backend-full.log`/`.exit` retain the result.
+- The full suite includes `test_long_real_normalized_wav_has_bounded_exact_coverage`:
+  generated5401s+1frame WAV, real FFmpeg normalization,46 instrumented requests,
+  exact normalized frame/PCM SHA coverage. This is not90-minute CUDA inference.
+- Frontend `npm run test:e2e -- --config=../backend/runtime/moss/task13/playwright.config.cjs`:
+  **19 PASS**,49.6s,exit0; no silent exclusions. Installed Chrome executable env
+  is `C:/Program Files/Google/Chrome/Application/chrome.exe` for per-file launches.
+  Resolved testDir/cwd and unique `task13/e2e-results-full` before launch.
+  Copied fixture API has numeric delete-preview and synthetic example.invalid
+  YouTube shape; scans/process transitions are mocked UI evidence only. Backend
+  Python3.11 fixture childPID68076/launcher41328 and Vites63900/47488 owned
+  ports8000/5173/5175; ownership checked before HTTP. Warmup returned200 on all
+  three. Scratch Vite envDir/API URL and polling isolate production env and avoid
+  prior Windows watcher issues. Logs: `e2e-full.log`/`.exit`, helper logs/pid files.
+- Browser/runtime warnings include existing Node module.register deprecation,
+  NO_COLOR/FORCE_COLOR interaction and stale Browserslist data. No upgrade made.
+- SDD validation and diff whitespace checks run after document/tracker updates;
+  normal required hooks run on the scoped evidence commit.
+
+Owned models were released; exact owned helper command lines were verified
+before terminating only68076/41328/63900/47488. No listeners remain on fixture
+ports8000/5173/5175. No production DB/env/settings/media, external processing,
+push, deployment, installer rerun or feature archive. Plan remains In progress
+and spec In Review pending user-directed local closeout.

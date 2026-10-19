@@ -168,6 +168,29 @@ Remember to follow the MSW deletion rule for all claims — no exceptions.
 
 ## Interface contracts
 
+### Local batching evidence and limits, 2026-10-19
+
+Task13 exercised the actual default120s planner/VAD and CUDA worker on a distinct
+240s WAV made by repeating the cached120s conversation. Three requests owned
+0–1169152–3089152–3840000 normalized frames exactly once; reasons were
+vad_gap/vad_gap/eof, with no VAD fallback. An instrumented interruption after the
+first durable publication resumed only the two remaining chunks in the same
+child. Strict EOS/context,65 native turns, absolute rational offsets, namespaced
+locals, words=null and the final local46.93→46.928 moss-eof-v1 correction survived.
+Real CUDA embeddings matched changed locals to saved profiles while equal locals
+could denote different people. A named-profile identity retry reused completed
+raw without ASR/VAD or raw changes. OS worker exit preceded voice-model GPU load.
+
+This repeated-source proof establishes mechanics, not independent recognition
+accuracy or lossless seam timing. Both cuts were recorded as VAD gaps; it does
+not establish continuous-speech hard-cut accuracy. The240s output contains no
+cross-label overlapping turns. Retained task8 actual9s overlap evidence verifies
+the unchanged decoder separately; v2 native-overlap fixtures verify the recording
+adapter. Over90-minute routing is proved with real FFmpeg normalization and
+instrumented inference, not90-minute CUDA inference. No long-runtime speed or
+memory-fit guarantee follows. Detailed measurements and immutable raw evidence
+locations are in `docs/research/2026-10-18-moss-runtime.md`.
+
 ### Client → API
 
 - Extend transcription_engine with `moss`. Extend existing engine-test request
