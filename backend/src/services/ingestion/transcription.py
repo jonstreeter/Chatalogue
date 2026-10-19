@@ -2529,7 +2529,7 @@ class TranscriptionEngineMixin:
                 response["resolved_engine"] = "parakeet" if req == "parakeet" else ("whisper" if req == "whisper" else self._select_transcription_engine())
             return response
 
-    def _load_models(self, job_id: int = None, load_transcription_model: bool = False):
+    def _load_models(self, job_id: int = None, load_transcription_model: bool = False, *, embedding_only: bool = False):
         self._release_moss_model("before_diarization_models", job_id=job_id)
         import torch
         import warnings
@@ -2556,14 +2556,14 @@ class TranscriptionEngineMixin:
             torch.set_float32_matmul_precision('high')
 
         pyannote_profile = None
-        if not self.diarization_pipeline or not self.embedding_model or not self.embedding_inference:
+        if (not embedding_only and not self.diarization_pipeline) or not self.embedding_model or not self.embedding_inference:
             pyannote_profile = self._start_component_memory_profile()
 
         diarization_model_ref = "pyannote/speaker-diarization-3.1"
         embedding_model_ref = "pyannote/embedding"
         try:
             with temporary_disabled_blackhole_proxies():
-                resolved_diarization = snapshot_download(diarization_model_ref, local_files_only=True)
+                resolved_diarization = None if embedding_only else snapshot_download(diarization_model_ref, local_files_only=True)
             if resolved_diarization:
                 diarization_model_ref = resolved_diarization
                 log(f"Using cached diarization pipeline from {resolved_diarization}")
@@ -2579,7 +2579,7 @@ class TranscriptionEngineMixin:
         except Exception as e:
             log_verbose(f"Embedding cache probe missed for {embedding_model_ref}: {e}")
 
-        if not self.diarization_pipeline:
+        if not embedding_only and not self.diarization_pipeline:
            log("Loading Diarization pipeline...")
            self._update_job_status_detail(job_id, "Loading diarization pipeline...")
            try:
@@ -2607,7 +2607,7 @@ class TranscriptionEngineMixin:
                self._diarization_load_error = str(e)
                # Continue - we'll show the actual error when diarization is attempted
 
-        if not self.embedding_model:
+        if not self.embedding_model or not self.embedding_inference:
             log("Loading Embedding model...")
             self._update_job_status_detail(job_id, "Loading speaker embedding model...")
             try:
@@ -2635,7 +2635,7 @@ class TranscriptionEngineMixin:
 
         if (
             pyannote_profile is not None
-            and self.diarization_pipeline is not None
+            and (embedding_only or self.diarization_pipeline is not None)
             and self.embedding_model is not None
             and self.embedding_inference is not None
         ):

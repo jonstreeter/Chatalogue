@@ -1,4 +1,4 @@
-# MOSS whole-input checkpoint — task 5 handoff
+# MOSS native identity — task 6 handoff
 
 **Date:** 2026-10-19
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
@@ -6,55 +6,57 @@
 
 ## Status
 
-Task 5 complete; 5/8. Checkpoint subject:
-`feat(moss): persist whole-input native transcription checkpoints`.
+Task 6 complete; 6/8. Checkpoint subject:
+`feat(moss): preserve native speaker identities with clean voice samples`.
 Plan remains In progress. Owner `dd` authorizes continued sequential work.
 
 ## Next step
 
-Obtain task-6 context pack and preflight its paths. Native identity matching
-and overlap-safe samples belong in
-`backend/src/services/ingestion/pipeline_diarize.py`; use normalized endpoints
-and preserve labels through standard save/cleanup.
+Obtain task-7 context pack and preflight its paths, starting with
+`frontend/src/pages/Settings.tsx` MOSS engine controls. Task 7 owns browser
+verification, task 8 actual app-phase runtime and identity verification.
 
 ## Verification state
 
-Packed backend venv SQLite suite:
-`python -m pytest src/test_moss_pipeline.py src/test_moss.py src/test_phonon.py -q`
-→ 116 PASS, 45.34s. Scoped Ruff, SDD validation, whitespace and required commit
-gates recorded in plan. Temporary SQLite/files only; no production DB/settings,
-jobs/media or GPU inference. Actual inference/full regression remains task 8;
-browser controls remain task 7.
+`DB_PROVIDER=sqlite DATABASE_URL=sqlite:// backend/.venv/Scripts/python -m pytest src/test_moss_pipeline.py src/test_speaker_loading_optimization.py src/test_transcript_diarization_rebuild.py src/test_phonon.py -q`
+(from backend) → **59 PASS**, 44.55s. Scoped Ruff, SDD validation and whitespace
+PASS; required hooks recorded by commit. Deterministic embedding fixtures use
+real matcher, temporary SQLite, profile enrollment and standard transcript save.
+Initial run was 58 pass/1 failed because a fixture incorrectly expected the
+existing selector to choose a 1s tail despite its 2s preferred sample. Corrected
+and added direct subtraction assertion. Initial fixture also allowed cached CPU
+embedding load after transcription released sentinels; guards now prohibit model
+load. No production DB/settings/jobs/media changes or GPU inference.
 
 ## Blockers
 
-None. No push, deployment, installer refresh or final archive closeout.
+None. No push/deployment/installer refresh/final archive closeout.
 
 ## Diagnosis worth keeping
 
-MOSS normalizes one complete PCM16 mono 16kHz WAV, checks exact sample dimensions
-and <=5400 seconds before inference, releases competing models, then strictly
-validates runtime output against manager-owned dimensions. Existing raw JSON adds
-`moss_result` (strict moss-result-v1, intact), `moss_runtime` (model/source/runtime
-provenance), `moss_source` (source size/mtime_ns), plus float adapter `segments`.
-Segment objects carry `.speaker` native S labels; words=null. Strict native result
-owns raw decimal tokens, overlaps/order, rational duration and corrections;
-float adapters and legacy RTTM are never their source.
+Only revalidated `moss_result` evidence in the title-based raw checkpoint selects
+native identity; current engine setting and stale RTTM cannot do so. Rebuild
+segment objects from immutable evidence. Construct native annotation tracks,
+stop owned MOSS, and use existing model loader with `embedding_only=True`.
+Subtract every other label from each voice timeline before existing profile
+sample selection. Real matcher and enrollment persist known channel names and
+profiles across changed native labels; native turns bypass single-speaker mapping
+and consolidation, preserving order, endpoints and words=null. Standard text
+cleanup, file save and temp cleanup remain.
 
-Both reuse entry points validate native evidence and restore labels without
-cumulative correction. Source stat mismatch rejects reuse with deliberate
-retranscription guidance. Completed legacy cache retains existing reuse semantics.
-Incomplete inference/cancellation has no partial; retry runs the whole input.
-Other-engine partials/orphan records refuse MOSS unless force was explicit.
-Force bypasses complete cache and removes relevant partials; prior complete raw
-checkpoint survives failed inference/publication and is replaced only after a
-fully validated complete generation. Context exhaustion/malformed output fails.
-
-Task 6 owns native identity, overlap-safe enrollment, persistence and cleanup
-integration. Task 5 does not claim those paths finished.
+No usable clean embedding creates a distinct unresolved local Speaker with
+pickle(None), no SpeakerEmbedding profile, and `moss_identity_warning` job payload.
+Missing identity model raises before prior transcript rows are cleared and leaves
+complete raw checkpoint intact. Task 8 must verify actual cross-recording voice
+identity and owned GPU release; deterministic tests do not establish model quality.
 
 ## Workspace and next worker rules
 
-Same checkout; no new worktree/stash. Preserve unrelated baseline dirt from the
-context pack. Stage explicit phase paths, inspect cached and committed names,
-use required hooks without bypass. Fresh ownership pack before next edits.
+Same checkout; preserve unrelated baseline dirt. Task-6 ownership includes
+pipeline_diarize.py, speaker_identity.py, transcription.py (narrow loader repack),
+test_moss_pipeline.py, plan and baton. Prior task-5 baton preserved unchanged in
+`docs/dev/handoffs/archive/2026-10/2026-10-18-moss-engine-checkpoint.md`.
+Task 7 expected files: Settings.tsx, SetupWizard.tsx, JobQueue.tsx, e2e/moss.spec.ts;
+obtain full fresh pack before editing. Do not reinterpret segment clocks as word
+clocks. Browser acceptance includes option/save/reload, setup/status/unload,
+segment/90-minute notice, failure recovery, queue badge and no-word playback.

@@ -15,6 +15,29 @@ from .runtime import (
 
 
 class SpeakerIdentityMixin:
+    def _native_clean_speaker_segments(self, diarization, label):
+        """Subtract every other native label before existing sample selection."""
+        from pyannote.core import Segment
+
+        clean = []
+        others = [turn for other in diarization.labels() if other != label
+                  for turn in diarization.label_timeline(other)]
+        for turn in diarization.label_timeline(label):
+            spans = [(turn.start, turn.end)]
+            for other in others:
+                remaining = []
+                for start, end in spans:
+                    if other.end <= start or other.start >= end:
+                        remaining.append((start, end))
+                    else:
+                        if start < other.start:
+                            remaining.append((start, other.start))
+                        if other.end < end:
+                            remaining.append((other.end, end))
+                spans = remaining
+            clean.extend(Segment(start, end) for start, end in spans if end > start)
+        return clean
+
     def _invalidate_speaker_match_cache(self, channel_id: int | None):
         if not channel_id:
             return
@@ -214,7 +237,7 @@ class SpeakerIdentityMixin:
         # Extract embedding for a specific segment
         # We need to crop the audio or use the inference with cropping
         # Pyannote Inference with window="whole" expects a file path or waveform.
-        # But we want a segment. 
+        # But we want a segment.
         # Efficient way: Load audio once, crop in memory.
         # For simplicity/speed prototype: rely on Inference to handle cropping if passed Excerpt?
         # Inference usually takes (file, segment)

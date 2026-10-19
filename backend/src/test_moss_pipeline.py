@@ -217,3 +217,146 @@ def test_competing_models_release_before_inference(harness, monkeypatch):
     manager.transcribe = infer
     run(harness)
     assert order[-1] == 'inference'
+
+
+@pytest.fixture
+def identity_harness(harness, monkeypatch):
+    import numpy as np
+    from sqlmodel import Session
+    from src.db.database import Channel, Video
+    from src.services.ingestion import runtime
+
+    service, _, audio, *_ = harness
+    with Session(runtime.engine) as session:
+        session.add(Channel(id=1, url='fixture', name='Fixture'))
+        session.add(Video(id=13, youtube_id='fixture13', channel_id=1, title='native'))
+        session.commit()
+        video = session.get(Video, 13)
+        session.expunge(video)
+    harness = (service, video, *harness[2:])
+    service.device = 'cpu'
+    service.embedding_model = object()
+    service.embedding_inference = object()
+    monkeypatch.setattr(service, '_release_diarization_models', lambda *_, **__: None)
+    monkeypatch.setattr(service, '_load_models', lambda *_, **__: pytest.fail('fixture must not load models'))
+    crops = []
+    def embed(_, segment):
+        crops.append((segment.start, segment.end))
+        vector = np.zeros(16)
+        vector[0 if segment.start < 2 or segment.start >= 3 else 1] = 1
+        return vector
+    monkeypatch.setattr(service, 'get_speaker_embedding', embed)
+    monkeypatch.setattr(service, '_load_audio_for_pyannote', lambda _: object())
+    monkeypatch.setattr(service, '_should_release_parakeet_before_diarize', lambda **_: False)
+    monkeypatch.setattr(service, '_apply_entity_repair_to_segments', lambda *_, **__: {'changed': False})
+    monkeypatch.setattr(service, '_apply_formatting_cleanup_to_segments', lambda *_, **__: {'changed': False})
+    monkeypatch.setattr(service, '_run_diarization_with_adaptive_batch', lambda *_, **__: pytest.fail('native must not cluster'))
+    monkeypatch.setattr(service, '_consolidate_transcript_segments', lambda *_: pytest.fail('native must retain turns'))
+    return harness, crops
+
+
+def test_native_identity_two_recordings_and_channel_isolation(identity_harness):
+    import pickle
+    from sqlmodel import Session, select
+    from src.db.database import Channel, Speaker, SpeakerEmbedding, TranscriptSegment, Video
+    from src.services.ingestion import runtime
+
+    harness, crops = identity_harness
+    service, video, audio, manager, _, native = harness
+    # Both voices have a clean region while their native turns still overlap.
+    native = parse_generation('[0][S0]outer[4][2][S1]inner[3][5][S1]guest[7]',
+                              native['sample_count'], native['sample_rate'], native['completion'])
+    manager.transcribe = lambda _: dict(result=native, runtime={})
+    segments, _ = run(harness)
+    # Fixture embedding keyed to clean span, deliberately independent of label.
+    import numpy as np
+    def embed(_, segment):
+        crops.append((segment.start, segment.end))
+        return np.eye(16)[0 if segment.start < 2 or segment.start == 3 else 1]
+    service.get_speaker_embedding = embed
+    with Session(runtime.engine) as session:
+        session.add(Channel(id=2, name='Other', url='other'))
+        other = Speaker(channel_id=2, name='Wrong channel', embedding_blob=pickle.dumps(np.eye(16)[0]))
+        session.add(other)
+        session.commit()
+        session.add(SpeakerEmbedding(speaker_id=other.id, embedding_blob=other.embedding_blob))
+        session.commit()
+    for recording in range(2):
+        if recording:
+            with Session(runtime.engine) as session:
+                video = Video(id=14, youtube_id='fixture14', channel_id=1, title='second')
+                session.add(video)
+                session.commit()
+                session.refresh(video)
+                session.expunge(video)
+            data = json.loads((audio.parent / 'native_transcript_raw.json').read_text())
+            raw = data['moss_result']['raw_text'].replace('S0', 'S8').replace('S1', 'S9')
+            data['moss_result'] = parse_generation(raw, native['sample_count'], native['sample_rate'], native['completion'])
+            (audio.parent / 'second_transcript_raw.json').write_text(json.dumps(data))
+        service._get_temp_diarization_path(video.id).write_text('legacy RTTM must be ignored')
+        service._process_diarize_phase(video, audio, segments)
+        assert not service._get_temp_diarization_path(video.id).exists()
+        with Session(runtime.engine) as session:
+            rows = session.exec(select(TranscriptSegment).where(TranscriptSegment.video_id == video.id).order_by(TranscriptSegment.id)).all()
+            names = [session.get(Speaker, row.speaker_id).name for row in rows]
+            assert [(r.start_time, r.end_time, r.text, r.words) for r in rows] == [
+                (0, 4, 'outer', None), (2, 3, 'inner', None), (5, 7, 'guest', None)]
+            assert rows[0].speaker_id != rows[1].speaker_id == rows[2].speaker_id
+            assert names == (['Speaker 1', 'Speaker 2', 'Speaker 2'] if not recording else ['Host', 'Guest', 'Guest'])
+            if not recording:
+                session.get(Speaker, rows[0].speaker_id).name = 'Host'
+                session.get(Speaker, rows[1].speaker_id).name = 'Guest'
+                session.commit()
+        assert f'{video.title}.srt' in [p.name for p in audio.parent.iterdir()]
+    # Existing selection prefers >=2 seconds, so the shorter clean tail is
+    # available after subtraction but is not selected for embedding.
+    assert set(crops) == {(0, 2), (5, 7)}
+    from pyannote.core import Annotation, Segment
+    turns = Annotation()
+    turns[Segment(0, 4), 0] = 'outer'
+    turns[Segment(2, 3), 1] = 'inner'
+    assert [(s.start, s.end) for s in service._native_clean_speaker_segments(turns, 'outer')] == [(0, 2), (3, 4)]
+
+
+def test_native_no_clean_sample_retains_distinct_unenrolled_locals(identity_harness, monkeypatch):
+    from sqlmodel import Session, select
+    from src.db.database import SpeakerEmbedding, TranscriptSegment
+    from src.services.ingestion import runtime
+    harness, crops = identity_harness
+    service, video, audio, manager, _, native = harness
+    native = parse_generation('[0][S0]one[4][0][S1]two[4]', native['sample_count'], native['sample_rate'], native['completion'])
+    manager.transcribe = lambda _: dict(result=native, runtime={})
+    segments, _ = run(harness)
+    warnings = []
+    monkeypatch.setattr(service, '_upsert_job_payload_fields', lambda _, fields: warnings.append(fields))
+    service._process_diarize_phase(video, audio, segments)
+    with Session(runtime.engine) as session:
+        rows = session.exec(select(TranscriptSegment)).all()
+        assert len(rows) == 2 and rows[0].speaker_id != rows[1].speaker_id
+        assert all(row.speaker_id and row.matched_profile_id is None for row in rows)
+        assert session.exec(select(SpeakerEmbedding)).all() == []
+    assert not crops and any('moss_identity_warning' in item for item in warnings)
+
+
+def test_missing_identity_model_preserves_complete_native_checkpoint(identity_harness, monkeypatch):
+    from sqlmodel import Session, select
+    from src.db.database import TranscriptSegment, Video
+    from src.services.ingestion import runtime
+    harness, _ = identity_harness
+    service, video, audio, *_ = harness
+    segments, _ = run(harness)
+    raw = audio.parent / 'native_transcript_raw.json'
+    original = raw.read_bytes()
+    service.embedding_model = service.embedding_inference = None
+    order = []
+    monkeypatch.setattr(service, '_release_moss_model', lambda *_, **__: order.append('exit'))
+    def load(_, *, embedding_only):
+        assert embedding_only and order == ['exit']
+        order.append('load')
+    monkeypatch.setattr(service, '_load_models', load)
+    with pytest.raises(RuntimeError, match='voice model is unavailable'):
+        service._process_diarize_phase(video, audio, segments)
+    assert raw.read_bytes() == original and order == ['exit', 'load']
+    with Session(runtime.engine) as session:
+        assert session.exec(select(TranscriptSegment)).all() == []
+        assert session.get(Video, video.id).status != 'completed'

@@ -193,6 +193,15 @@ class DiarizePhaseMixin:
         from pyannote.core import Annotation, Segment
         from bisect import bisect_right
         job_payload = {}
+        # Only immutable native checkpoint evidence selects this route. Settings
+        # and legacy RTTM cannot establish native speaker attribution.
+        raw_path = audio_path.parent / f"{self.sanitize_filename(video.title)}_transcript_raw.json"
+        native_moss = False
+        if raw_path.exists():
+            data = json.loads(raw_path.read_text(encoding="utf-8"))
+            if "moss_result" in data:
+                segments, _ = self._moss_checkpoint_segments(data, audio_path)
+                native_moss = True
 
         # 1. Update Status
         with Session(runtime.engine) as session:
@@ -241,7 +250,13 @@ class DiarizePhaseMixin:
 
         start_diar = time.time()
 
-        if diarization_path.exists():
+        if native_moss:
+            self._release_moss_model("before_native_identity", job_id=job_id)
+            diarization = Annotation()
+            for index, seg in enumerate(segments):
+                diarization[Segment(seg.start, seg.end), index] = seg.speaker
+
+        if not native_moss and diarization_path.exists():
             try:
                 log_verbose(f"Loading existing diarization from {diarization_path}")
                 diarization = Annotation()
@@ -258,7 +273,7 @@ class DiarizePhaseMixin:
                 log_verbose(f"Failed to load RTTM: {e}. Re-running pipeline.")
                 diarization = None
 
-        if not diarization:
+        if not native_moss and not diarization:
             # Ensure models are loaded (in case transcription was skipped)
             if self.diarization_pipeline is None:
                 self._load_models(job_id)
@@ -332,7 +347,10 @@ class DiarizePhaseMixin:
 
         # RTTM caches speaker turns, not the voice model needed to identify them.
         if self.embedding_model is None or self.embedding_inference is None:
-            self._load_models(job_id)
+            if native_moss:
+                self._load_models(job_id, embedding_only=True)
+            else:
+                self._load_models(job_id)
         if self.embedding_model is None or self.embedding_inference is None:
             raise RuntimeError("Speaker voice model is unavailable; refusing to save unidentified speakers. Retry diarization after model loading succeeds.")
 
@@ -463,12 +481,24 @@ class DiarizePhaseMixin:
                     continue
 
                 timeline_segments = list(timeline)
+                if native_moss:
+                    timeline_segments = self._native_clean_speaker_segments(diarization, label)
                 profile_embedding, primary_segment, sample_embeddings = self._build_speaker_embedding_profile(
                     audio_input,
                     timeline_segments,
                 )
                 if primary_segment is None or profile_embedding is None:
                     log_verbose(f"  Warning: Speaker {label} did not produce a usable embedding profile")
+                    if native_moss:
+                        unresolved = Speaker(channel_id=video_attached.channel_id,
+                                             name=f"Unresolved {video_attached.id} {label}",
+                                             embedding_blob=pickle.dumps(None), created_at=datetime.now())
+                        session.add(unresolved)
+                        session.commit()
+                        session.refresh(unresolved)
+                        local_speaker_map[label] = {"speaker": unresolved, "matched_profile_id": None}
+                        self._upsert_job_payload_fields(job_id, {"moss_identity_warning":
+                            "Some native speakers have no clean usable voice sample; retained unresolved local speakers."})
                     continue
 
                 if primary_segment.duration < 0.5:
@@ -677,6 +707,17 @@ class DiarizePhaseMixin:
                     self._update_job_progress(job_id, min(95, 70 + int((processed_segments / total_input_segments) * 25)))
                 words = list(seg.words) if seg.words else []
 
+                if native_moss:
+                    mapping = local_speaker_map.get(seg.speaker)
+                    final_segments.append(TranscriptSegment(
+                        video_id=video_attached.id, start_time=seg.start, end_time=seg.end,
+                        text=seg.text, words=None,
+                        speaker_id=mapping["speaker"].id if mapping else None,
+                        matched_profile_id=mapping.get("matched_profile_id") if mapping else None,
+                    ))
+                    processed_segments += 1
+                    continue
+
                 if not words:
                     # No word-level timestamps â€” fall back to whole-segment overlap
                     best_speaker_label = None
@@ -747,7 +788,8 @@ class DiarizePhaseMixin:
             if job_id:
                 self._update_job_status_detail(job_id, "Consolidating transcript segments...")
                 self._update_job_progress(job_id, 96)
-            consolidation = self._consolidate_transcript_segments(final_segments)
+            consolidation = ({"segments": final_segments, "merged_count": 0, "reassigned_islands": 0}
+                             if native_moss else self._consolidate_transcript_segments(final_segments))
             final_segments = consolidation["segments"]
             if consolidation["merged_count"] > 0 or consolidation["reassigned_islands"] > 0:
                 log(
