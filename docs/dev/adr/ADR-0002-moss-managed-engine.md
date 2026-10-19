@@ -48,9 +48,12 @@ of all audible speech. Whitespace-only complete generation can represent silence
 ## Consequences
 
 Private dependency ownership costs a separate install and process lifecycle.
-Segment timing is explicit; identity matching later reuses channel-scoped profiles
-and avoids enrolling mixed overlap. Initial full input is limited to 5400 seconds;
-worker/pipeline enforcement belongs to later tasks. No DB schema changes.
+Segment timing is explicit; identity matching reuses channel-scoped profiles
+and avoids enrolling mixed overlap. The initial recording limit of 5400 seconds
+is superseded by the owner-directed 2026-10-19 batching amendment in the spec:
+5400 seconds is a worker-request ceiling, not an episode ceiling. Chunk labels
+are namespaced; existing voice embeddings reconcile persistent identities.
+Completed chunks survive retry. No DB schema changes.
 
 ## What would change our mind
 

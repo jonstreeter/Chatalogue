@@ -1,4 +1,4 @@
-# Handoff: MOSS task8 isolated verification complete
+# Handoff: MOSS bounded recording batching
 
 **Date:** 2026-10-19
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
@@ -6,70 +6,51 @@
 
 ## Status
 
-Task8 verified; 8/8 tracker tasks complete. Plan remains In progress and spec
-In Review. PLAN_COMPLETE for conductor local closeout; no push/deploy/archive or
-Shipped claim. Prior active baton retained unchanged at
-archive/2026-10/2026-10-18-moss-engine-add-channel-blocked.md.
-
-Owner-approved test-only Add Channel → YouTube Channel flow asserts the empty
-current URL field without creating/submitting. Actual app proof found FFmpeg
-LIST metadata rejected by strict canonical WAV IPC; conductor repacked only
-pipeline_transcribe.py/test_moss_pipeline.py. Exact validated PCM is reserialized
-with stdlib wave; strict validator, sample clocks and source audio unchanged.
+Initial tasks 1–8 complete; owner-directed batching tasks 9–13 pending, 8/13.
+Plan In progress; spec In Review. Owner reported a production job rejected by
+the single-input guard and directed that model limits be accommodated with
+chunks, rejecting another approval loop for that intent. This supersedes the
+initial recording limit and whole-input retry; it does not authorize production
+reprocessing. Initial proof is archived unchanged at
+`archive/2026-10/2026-10-18-moss-engine-initial-complete.md`.
 
 ## Next step
 
-Conductor local closeout: inspect task8 verification evidence in
-`docs/research/2026-10-18-moss-runtime.md`, then report PLAN_COMPLETE. No new
-implementation phase, push, installer execution or archive is authorized here.
+Execute task 9 with a fresh Super Looper worker: pure bounded frame planner and
+typed resource failures. Run preflight and read updated ADR/spec first. No
+batching product code exists yet; do not claim the reported job is fixed.
 
 ## Verification state
 
-- Scoped frontend ESLint PASS. Full installed-Chrome suite: 19 PASS, 1.3m,
-  no skips/exclusions; e2e-full12.log and unique e2e-results-full12/.
-- MOSS polling diagnostic 3 PASS,28.5s: actual status poll4.680s after ready flag.
-  Earlier total30s timeout did not reproduce; diagnostic logging removed,
-  Settings.tsx/moss.spec.ts unchanged. Installed Chrome env override needed
-  because file-level launchOptions replace config. No timeout increase.
-- Real FFmpeg LIST regression: exact PCM144001samples/16000Hz/duration and
-  canonical44byte IPC accepted. Targeted20 PASS25.18s; root Ruff PASS.
-- Full isolated backend `python -m pytest src -q`:253 PASS,1 warning,136.10s.
-  Prior frontend typecheck/full lint evidence reused; no frontend product change.
-- Actual app14 worker62348 reused9s/10s/120s:6.760/5.370/61.017s; 4/2/31 native
-  segments, words=null.9.01→9 exact EOF correction and overlaps retained.
-  Cached fresh-worker load14.057s; verified unload0.194s/exit0/processfalse.
-- Real GPU embedding/matcher/profile persistence: identity18 actual10→120 named
-  profile1 reused; all11 selected intervals pure against other native labels.
-  identity19 actual120S03 clean24.44–30.48 crop naturally decoded S01 and matched
-  persisted profile9/name Research native S03. Same-service owned MOSS exit0 and
-  OS-dead asserted before voice GPU model load; no fabricated vectors/labels.
-  Reload after voice14.874s, newworker28792 finalexit0.
-- SDD validation, whitespace and required commit hooks: recorded at commit.
-
-## Blockers
-
-None for packed task8 acceptance. Limitations:10/120 inputs share source/opening
-speech, and changed-label crop shares exact prior profile interval; no independent
-recognition accuracy claim. Longest120s does not prove90-minute fit/speed.
-A valid clean9s S02 span5.83–9 was rejected by existing embedding crop boundary
-check (tensor[1,144000]@16000; strict count144000; float repr5.83/9.0), retained
-unresolved without profile. Its cause is not inferred from rounded error text.
-Earlier2.12s seed failed to match120s at unchanged thresholds. No crop/model/time
-or threshold workaround; all failed scratch evidence retained.
+Paired inline architect/planner/simplification/code review passed for updated
+spec and appended plan: namespace local labels, preserve exact sample coverage,
+retain raw per-chunk evidence, atomic durable frontier, legacy compatibility,
+no heuristic text dedup, and measured request sizing. SDD validation and whitespace
+checks pass. Initial backend 253/browser 19 and real CUDA results are historical
+proof for unchanged behavior, not proof of batching.
 
 ## Diagnosis worth keeping
 
-All actual fixtures/SQLite/IPC/evidence are task8-owned. Pre-import sitecustomize
-disables dotenv, redirects runtime/data paths, sets isolated SQLite and denies
-production data/.env. Private MOSS worker strips PYTHONPATH and uses unchanged
-cached task3 manager environment/model. Existing embedding cache revision
-4db4899737a38b2d618bbd74350915aa10293cb2 loaded on CUDA; no ML upgrades/downloads.
-Browser fixture simulates scan/process only; no production backend or external
-operations. Helpers stopped, ports8000/5173/5175 free; models/workers released.
-Baseline9 unrelated paths untouched. Original task1/task3 evidence immutable.
+The app guard combines empty/format/duration checks and rejects the recording
+before inference. The trace alone does not establish its sample count; no
+production file or DB was inspected. The 5400-second request ceiling must not
+be the recording ceiling. Initial chunk ceiling 120s is derived from the longest
+tested CUDA app input. Installed faster-whisper supplies CPU Silero VAD and
+bundled ONNX defaults; VAD suggests cuts only and never deletes source audio.
+Forced contiguous cuts retain every native result without promising perfect
+word recognition at seams. Only typed OOM/context failures bisect uncommitted
+intervals; arbitrary malformed output still fails. Per-call moss-result-v1 stays
+strict; recording-v2/partial changes belong to task 10, identities task 11,
+UI task 12, real seam and >90-minute fixture proof task 13.
 
 ## Next worker prompt
 
-PLAN_COMPLETE. Do not restart task8 or repeat closed checks. Conductor may inspect
-this evidence and scoped commit for local closeout; keep plan In progress/spec
-In Review until the separate approved closeout steps. No push/deploy/archive.
+Fresh task 9 only, resume:no. Write allowlist: moss_chunks.py, moss_worker.py,
+moss_runtime.py, test_moss_chunks.py, test_moss_runtime.py, contracts.json and
+plan/baton/archive artifacts. Read authority ADR-0002 and batching spec section;
+read moss.py unchanged and installed VAD defaults as needed. Verify isolated
+chunk/runtime/parser tests, scoped Ruff, SDD, whitespace and required hooks.
+Do not begin pipeline/identity/UI changes early. No new framework, ML upgrades,
+CPU/remote MOSS fallback or production settings/recordings. Preserve nine unrelated
+dirty paths from session status. One worker at a time, scoped commits, no push,
+deploy or final archive. Owner authorization covers execution of tasks 9–13.

@@ -8,10 +8,12 @@
 
 Add an app-managed optional MOSS engine using Phonon's private-worker pattern.
 Use native MOSS speaker turns and existing named voice-profile matching across
-recordings. Initial behavior is segment-timed, single-input up to the upstream
-90-minute range, with full-input inference retry. No product implementation starts
-before owner plan approval. No product UI integration proceeds before the native
-runtime feasibility gate passes.
+recordings. Tasks 1–8 proved the initial single-input implementation. The owner's
+2026-10-19 correction supersedes recording rejection and whole-input retry:
+tasks 9–13 add bounded, resumable chunks without imposing model call limits on
+recording duration. That direction authorizes this refinement and implementation;
+no repeat approval of the same intent is pending. Native CUDA feasibility remains
+established; new chunk behavior needs its own isolated and real verification.
 
 ## Affected modules
 
@@ -48,7 +50,36 @@ runtime feasibility gate passes.
 | 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: managed UI and five Chromium checks PASS |
 | 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/test_moss_pipeline.py`, `frontend/e2e/channels.spec.ts`, `frontend/e2e/pages/ChannelsPage.ts`, research, plan and spec | M | ✅ done — isolated browser/backend and actual CUDA/identity evidence PASS |
 
+
+| 9 | Add sample-exact bounded chunk planning with existing VAD boundary hints and typed worker OOM/context failure classification; prove coverage and finite split semantics. | ackend/src/services/ingestion/moss_chunks.py, ackend/src/services/ingestion/moss_worker.py, ackend/src/services/ingestion/moss_runtime.py, ackend/src/test_moss_chunks.py, ackend/src/test_moss_runtime.py, docs/dev/contracts.json | M | ☐ todo |
+| 10 | Stream normalized audio through bounded requests; durably commit complete native chunks, exact offsets, source fingerprints and frontier; support adaptive resource split, cancellation/resume and legacy reuse without rejecting long recordings. | ackend/src/services/ingestion/pipeline_transcribe.py, ackend/src/services/ingestion/pipeline.py, ackend/src/test_moss_pipeline.py | L | ☐ todo |
+| 11 | Reconstruct chunk namespaces and reconcile real channel identities without native overlap loss; verify clean enrollment, swapped labels and identity-only retry. | ackend/src/services/ingestion/pipeline_diarize.py, ackend/src/services/ingestion/speaker_identity.py, ackend/src/test_moss_pipeline.py | M | ☐ todo |
+| 12 | Replace recording-limit and whole-input retry UI with automatic batching/resume capability; expose chunk progress and browser-verify controls, persistence and segment playback. | rontend/src/pages/Settings.tsx, rontend/src/components/SetupWizard.tsx, rontend/src/pages/JobQueue.tsx, rontend/e2e/moss.spec.ts | M | ☐ todo |
+| 13 | Verify isolated >90-minute coverage fixtures and real CUDA multi-chunk seams/identity/checkpoint reuse/GPU handoff; run full workflow and record measured limitations/local handoff. | MOSS batching tests and affected MOSS paths as narrowly repacked if needed; docs/research/2026-10-18-moss-runtime.md, spec, plan and handoff | L | ☐ todo |
+
 ## Test plan
+
+### Batching amendment tasks
+
+- Task 9: pure sample-exact contiguous planner, optional VAD gap hints, measured
+  120-second target, final fractional chunk, silence retained, and typed resource
+  failures. Test OOM/context classification without allocating GPU memory and
+  prove malformed output/worker crash never triggers automatic split.
+- Task 10: isolated real normalized WAV longer than 5400 seconds with instrumented
+  inference proves bounded calls and complete frame/PCM coverage; no long-input
+  duration rejection. Exercise failed later chunk, zero ownership, append/fsync/
+  metadata ordering, uncommitted tail, corrupt committed data, source fingerprint
+  mismatch, split frontier/resume, forced processing and legacy complete reuse.
+- Task 11: existing matcher/profile SQLite tests across chunk namespaces and
+  recordings, swapped/reused local labels, absolute native overlap, clean-only
+  sampling, unresolved voices and identity retry without new ASR calls.
+- Task 12: browser option/save/reload, real controls, chunk progress, interrupted
+  resume notice, words=null playback and no false recording limit.
+- Task 13: actual CUDA multi-chunk research speech with a seam and real voice
+  profiles; staged child reuse and verified exit before voice load, measured
+  timing/memory, checkpoint retry and local full workflow. Over-90-minute
+  instrumented coverage is not called a real 90-minute CUDA performance test.
+  Production settings/recordings remain untouched.
 
 - **Unit:** strict complete parser, native labels, finite source-bounded clocks,
   overlapping/nested intervals, invalid/truncated output and context exhaustion.
@@ -125,6 +156,14 @@ policy is derived from the recorded fixture failure, not an upstream precision
 guarantee. No review subagents or product changes for this refinement.
 
 ## Verification log
+
+- 2026-10-19 owner reported a real job rejected by the app's whole-recording
+  guard and directed batching as the correct app responsibility. Revised existing
+  spec/ADR and appended tasks 9–13; original 8/8 evidence stays historical.
+  Paired inline architect/planner/simplification/code review passed: addressed
+  native-label collisions, seam coverage, atomic retry, source fingerprint,
+  measured sizing, typed resource recovery and legacy compatibility. No new
+  product code or production job processing in this planning checkpoint.
 
 - 2026-10-19 task 4 PASS, 4/8 complete. One lazy app MOSS manager, private
   runtime/temp paths, independent shutdown, competing GPU/voice handoff, busy

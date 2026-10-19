@@ -4,7 +4,7 @@
 **Status:** In Review
 **Owner:** Jon / Codex
 **Plan:** `docs/dev/plans/2026-10-18-moss-engine.md`
-**Scope:** Add MOSS-Transcribe-Diarize as an explicitly selected, app-managed local engine with native speaker turns and existing cross-recording voice matching. Initial support uses segment timing and the documented single-input duration range; existing engines remain available.
+**Scope:** App-managed MOSS with native speaker turns, segment timing, channel voice matching and bounded, resumable inference chunks for long recordings. Model request limits are not recording limits; existing engines remain available.
 
 ---
 
@@ -50,6 +50,122 @@ Settings / SetupWizard: moss -> existing settings and test-engine endpoints
   -> segment playback/search/export and queue engine badge
 ```
 
+## Bounded recording batching — owner-directed amendment, 2026-10-19
+
+This amendment is normative and supersedes earlier whole-recording rejection
+and whole-input retry language. The owner reported a real job rejected by the
+90-minute guard and directed the app to accommodate model limits through chunks.
+That direction authorizes this refinement and implementation without another
+approval of the same intent. No production recording is reprocessed by verification.
+
+### Request sizing and audio continuity
+
+- Normalize the recording once to mono PCM16 16 kHz on disk. Stream bounded
+  frame ranges; do not read an entire long recording into a Python bytes object.
+  Separate errors for empty audio, unsupported normalized format and per-request
+  bounds; do not claim every validation failure means a recording is too long.
+- Initial target ceiling is 120 seconds per request, derived from the successful
+  task-8 120-second native CUDA app proof, not a new model limit or speed promise.
+  Each actual request also satisfies the worker's 5400-second ceiling and pinned
+  131072-token context/completion checks. Do not increase the measured target by
+  intuition or expose tuning controls solely for implementation convenience.
+- Prefer the latest detected silence gap within the current bounded window using
+  the already installed faster-whisper Silero VAD and its installed defaults.
+  VAD selects a cut only: it must never remove audio, skip silence, compress time,
+  assign speakers, or manufacture an empty transcript. Record a bounded-cut
+  fallback if that optional boundary hint is unavailable. No new dependency or
+  backend ML upgrade. CPU VAD is preprocessing, not CPU MOSS inference.
+- Chunks own contiguous non-overlapping sample intervals covering every original
+  normalized frame exactly once. When no usable silence boundary exists, cut at
+  the bounded frame limit; record the hard seam. Do not infer word boundaries,
+  trim text, deduplicate by a single-speaker midpoint, or discard a native turn.
+  Continuous-speech seams require real-audio verification and disclosure; there
+  is no claim of lossless ASR recognition at a forced cut.
+- A typed CUDA OOM or typed context-budget exhaustion may bisect only the failed,
+  uncommitted interval and retry the resulting smaller intervals. Preserve prior
+  committed chunks. Use the successful reduced ceiling for the remaining input.
+  Stop when the same failure cannot be reduced to positive smaller frame ranges.
+  Never classify failures by matching diagnostic strings; malformed generation,
+  invalid clocks, worker crashes and unsupported hardware fail visibly without
+  hidden splitting, invented retries, CPU or remote fallback.
+
+### Immutable evidence, checkpoints and retry
+
+- Keep moss-result-v1 unchanged for each request. Introduce a versioned
+  moss-recording-v2 raw artifact containing normalized total sample dimensions,
+  a normalized PCM SHA256, source provenance and ordered chunk records. Each
+  record retains its stable sequence ID, exact start/end frames, original local
+  native result, runtime/source/model provenance, boundary reason and any
+  per-chunk moss-eof-v1 corrections. Validate every local result against the
+  actual supplied frame count before committing it.
+- Global segment clocks are exact local rational clocks plus start_frame/16000.
+  Keep original local clocks/corrections untouched; do not normalize twice or
+  silently reinterpret a local end as the recording EOF. Preserve original native
+  order and overlap within each chunk, text and words=null. Namespace attribution
+  by stable chunk ID plus original local speaker label; retain both components.
+- Use existing partial artifact paths with explicit engine=moss and a versioned
+  chunk format. Append complete chunk evidence, flush/fsync, then atomically
+  publish committed chunk count and contiguous completed frame frontier. Initial
+  zero-chunk ownership must be explicit. Reuse the proven Phonon durability
+  sequence rather than introducing a generic engine framework.
+- On resume, normalize/fingerprint the current source and reject a mismatch.
+  Validate all committed records, sample coverage, dimensions, ordering, model
+  provenance and frontier. Truncate only an uncommitted tail; reject corrupt or
+  missing committed data, gaps and mixed/unknown engine ownership without deletion.
+  Partial split plans need not commit failed output; retry starts at the first
+  uncommitted sample using the persisted reduced ceiling when available.
+- Final raw artifact is atomic and published only when chunks cover the complete
+  normalized source. Completed legacy raw transcripts and legacy single-result
+  MOSS checkpoints keep their reuse semantics and format; do not invalidate them
+  to force batching. Force processing follows explicit user intent, preserves a
+  prior completed raw artifact until a replacement succeeds, and clears only
+  relevant partial artifacts. Identity retry never retranscribes completed chunks.
+
+### Identity and lifecycle
+
+- Local S01 in two chunks is not evidence of the same person. Preserve namespace
+  keys through reconstruction and native diarization, then use existing real
+  channel-scoped embeddings, profiles, thresholds and in-job cache enrollment to
+  match identities across chunks and recordings. Never persist local labels as
+  identity or reset a known person's name merely because a chunk label changes.
+- Compute clean embedding spans against all overlapping native turns in absolute
+  time. Keep unresolved speakers distinct if usable evidence is absent; never
+  enroll mixed voices or force a match to make chunks look consistent. Existing
+  manual corrections, save/revisions and cleanup semantics remain.
+- Reuse one owned MOSS process across successful chunks. Cancellation is checked
+  between requests and retains committed progress. Verified worker exit still
+  precedes voice-model GPU loading; busy unload, crash, shutdown and parent-exit
+  ownership rules remain. Report chunk progress and completed input duration.
+
+### Required proof and paired review
+
+Unit/integration fixtures must cover recordings over 5400 seconds without passing
+an oversized request; exact frame coverage including silence; safe forced seams;
+typed OOM/context split and no split for malformed output; atomic chunk failures,
+crashes, cancellation/resume, corrupt and mixed partials; per-chunk EOF evidence;
+legacy reuse; and real matcher tests where equal local labels denote different
+voices and changed labels denote the same saved voice. UI/browser tests must
+replace the recording-limit/whole-input-retry notice with accurate batching and
+resume behavior. Real CUDA multi-chunk speech checks must exercise at least one
+seam, staged reuse, native overlapping attribution, identity and GPU handoff.
+The over-90-minute coverage fixture may use instrumented inference; it must be
+reported separately from real CUDA proof, with no long-runtime performance claim.
+
+Paired review, 2026-10-19, inline architect/planner/simplification/code-reviewer:
+BLOCKER local-label collision resolved by stable namespace plus existing matcher;
+BLOCKER seam data loss resolved by exact contiguous ownership and no text/turn
+discard; HIGH resume corruption resolved by append/fsync/frontier publication
+and normalized source fingerprint; HIGH invented operating sizes resolved by
+measured 120-second target and typed, frame-bounded reduction; HIGH legacy damage
+resolved by dual-format reuse and atomic replacement. Alternatives reviewed:
+keep rejection (does not meet owner outcome), overlapping windows with heuristic
+text deduplication (risks losing native turns without word clocks), or contiguous
+bounded requests (chosen). Boundary recognition accuracy remains a measured
+limitation, never a fabricated guarantee. No necessary planning finding remains
+open; implementation and real seam proof are still pending.
+
+Remember to follow the MSW deletion rule for all claims — no exceptions.
+
 ## Interface contracts
 
 ### Client → API
@@ -62,7 +178,7 @@ Settings / SetupWizard: moss -> existing settings and test-engine endpoints
   persists only explicit selection. MOSS is multilingual: its explicit route
   must not inherit the English-only engines' non-English reroute to Whisper.
 - Controls match Phonon: setup/load/test, status, unload and actionable errors.
-  Explain segment timing and the initial 90-minute input limit in the MOSS panel.
+  Explain segment timing, automatic bounded chunks and completed-chunk resume in the MOSS panel.
   Unsupported hardware is reported; no silent CPU or remote fallback.
 
 ### Service → worker
@@ -136,15 +252,13 @@ Settings / SetupWizard: moss -> existing settings and test-engine endpoints
   inference and lifecycle operations, reject busy user unload, release competing
   models before MOSS load, and stop MOSS before voice-model GPU loading.
   Verify child exit on shutdown and parent death. No global process-name kills.
-- Initial release processes one complete input up to the documented 90 minutes
-  (5400 seconds). Reject longer input before inference with an instruction to
-  select another engine; no silent truncation or resetting speaker IDs in chunks.
-  OOM fails with actionable guidance, not automatic changes to other engines.
+- The 5400-second limit bounds an individual worker request, never the total
+  recording. The batching amendment below supersedes the initial whole-input
+  restriction and defines chunk sizing, identity, retry and checkpoint behavior.
 - Cancellation is between model operations, with an owned worker termination
   path for app shutdown. Incomplete generation never replaces a complete raw
-  transcript. Resume reuses an atomically completed MOSS raw checkpoint and
-  retries identity/persistence without retranscription. Interrupted generation
-  reruns the full input; do not promise Phonon's chunk-level resume.
+  transcript. Resume preserves completed native chunks and completed raw
+  transcripts; retry only uncommitted audio or identity/persistence as applicable.
 - Add engine/model/source provenance and native speaker labels to the existing
   raw JSON artifact. No new DB tables or columns: TranscriptSegment.words already
   permits null. Keep final identity, revision, cleanup and save paths consistent.
@@ -213,13 +327,15 @@ Remember to follow the MSW deletion rule for all claims — no exceptions.
 ## Out of scope
 
 Defaults change, automatic reprocessing, remote/server deployment, CPU/Mac support
-claims, word alignment, arbitrary-length speaker stitching, DB migration, new
+claims, word alignment, DB migration, new
 cross-channel identity semantics, structured vocal-event features and speed or
 accuracy guarantees. These exclusions do not remove existing engine capabilities.
 
 ## Open questions
 
-Original segment-timing, 90-minute and whole-input-resume tradeoffs are approved.
+Original segment-timing, 90-minute and whole-input-resume tradeoffs were approved
+for the initial implementation; the owner superseded the latter two on 2026-10-19
+by directing automatic batching of recordings to accommodate model limits.
 The owner authorized the tiny EOF-overrun refinement above after task 1's strict
 failure. Exact runtime/model pins and measured GPU behavior are in the research
 report. Task 1 must pass its targeted rerun under this policy before task 2;
