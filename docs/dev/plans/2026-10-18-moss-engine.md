@@ -51,11 +51,12 @@ established; new chunk behavior needs its own isolated and real verification.
 | 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/test_moss_pipeline.py`, `frontend/e2e/channels.spec.ts`, `frontend/e2e/pages/ChannelsPage.ts`, research, plan and spec | M | ✅ done — isolated browser/backend and actual CUDA/identity evidence PASS |
 
 
-| 9 | Add sample-exact bounded chunk planning with existing VAD boundary hints and typed worker OOM/context failure classification; prove coverage and finite split semantics. | ackend/src/services/ingestion/moss_chunks.py, ackend/src/services/ingestion/moss_worker.py, ackend/src/services/ingestion/moss_runtime.py, ackend/src/test_moss_chunks.py, ackend/src/test_moss_runtime.py, docs/dev/contracts.json | M | ✅ done: sample planner and typed resource failures verified |
-| 10 | Stream normalized audio through bounded requests; durably commit complete native chunks, exact offsets, source fingerprints and frontier; support adaptive resource split, cancellation/resume and legacy reuse without rejecting long recordings. | ackend/src/services/ingestion/pipeline_transcribe.py, ackend/src/services/ingestion/pipeline.py, ackend/src/test_moss_pipeline.py | L | ☐ todo |
-| 11 | Reconstruct chunk namespaces and reconcile real channel identities without native overlap loss; verify clean enrollment, swapped labels and identity-only retry. | ackend/src/services/ingestion/pipeline_diarize.py, ackend/src/services/ingestion/speaker_identity.py, ackend/src/test_moss_pipeline.py | M | ☐ todo |
-| 12 | Replace recording-limit and whole-input retry UI with automatic batching/resume capability; expose chunk progress and browser-verify controls, persistence and segment playback. | rontend/src/pages/Settings.tsx, rontend/src/components/SetupWizard.tsx, rontend/src/pages/JobQueue.tsx, rontend/e2e/moss.spec.ts | M | ☐ todo |
-| 13 | Verify isolated >90-minute coverage fixtures and real CUDA multi-chunk seams/identity/checkpoint reuse/GPU handoff; run full workflow and record measured limitations/local handoff. | MOSS batching tests and affected MOSS paths as narrowly repacked if needed; docs/research/2026-10-18-moss-runtime.md, spec, plan and handoff | L | ☐ todo |
+
+| 9 | Add sample-exact bounded chunk planning with existing VAD boundary hints and typed worker OOM/context failure classification; prove coverage and finite split semantics. | `backend/src/services/ingestion/moss_chunks.py`, `backend/src/services/ingestion/moss_worker.py`, `backend/src/services/ingestion/moss_runtime.py`, `backend/src/test_moss_chunks.py`, `backend/src/test_moss_runtime.py`, `docs/dev/contracts.json` | M | ✅ done: sample planner and typed resource failures verified |
+| 10 | Stream normalized audio through bounded requests; durably commit complete native chunks, exact offsets, source fingerprints and frontier; support adaptive resource split, cancellation/resume and legacy reuse without rejecting long recordings. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | L | ✅ done: bounded streaming and durable native chunks verified |
+| 11 | Reconstruct chunk namespaces and reconcile real channel identities without native overlap loss; verify clean enrollment, swapped labels and identity-only retry. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/test_moss_pipeline.py` | M | ☐ todo |
+| 12 | Replace recording-limit and whole-input retry UI with automatic batching/resume capability; expose chunk progress and browser-verify controls, persistence and segment playback. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ☐ todo |
+| 13 | Verify isolated >90-minute coverage fixtures and real CUDA multi-chunk seams/identity/checkpoint reuse/GPU handoff; run full workflow and record measured limitations/local handoff. | `docs/research/2026-10-18-moss-runtime.md`, spec, plan, handoff; affected MOSS tests/paths only through explicit conductor repack | L | ☐ todo |
 
 ## Test plan
 
@@ -433,3 +434,31 @@ guarantee. No review subagents or product changes for this refinement.
   SDD validation and git diff --check PASS. Required commit hooks run at checkpoint.
   Initial test-double close defect corrected; no product workaround. Worker crash,
   malformed JSON/clocks and protocol-ID failures explicitly remain non-resource.
+
+- Task 10 (2026-10-19): bounded disk-normalized PCM fingerprint scanning and
+  canonical WAV requests replace episode-duration rejection. Installed default
+  CPU VAD hints select cuts only; unavailable hints record bounded fallback.
+  Versioned moss-recording-v2 manifests retain source PCM hash/dimensions/stat,
+  pinned per-chunk runtime, immutable native evidence, exact frame offsets and
+  stable speaker namespace components. Initial ownership, append/fsync/atomic
+  frontier, committed validation, tail-only truncation and atomic complete raw
+  replacement preserve resume and prior completed artifacts. Typed resource
+  bisection touches only failed intervals; successful reduced ceiling persists.
+  Complete legacy raw reuse remains supported; v2 identity-only reconstruction
+  does not normalize, infer or apply EOF correction again.
+  Final packed command (backend cwd; DB_PROVIDER=sqlite DATABASE_URL=sqlite://):
+  `.venv/Scripts/python.exe -m pytest src/test_moss_pipeline.py src/test_moss_chunks.py src/test_moss.py src/test_phonon.py -q`
+  **162 PASS**, one existing Transformers cache deprecation warning,101.59s,
+  actual process exit0. Earlier fixture-adaptation run15 failures preceded
+  correcting legacy fixture provenance/format assumptions; adapted159 PASS,
+  then final162 PASS including last three proofs. No product workaround.
+  Generated real5401s+1frame WAV with real FFmpeg normalization/instrumented
+  inference proves46 requests<=120s and exact PCM SHA256/frame coverage including
+  silence. Crash/cancel committed resume, OOM/context split and learned ceiling,
+  metadata tail recovery, corrupt/missing/gapped/mixed/source/model rejection,
+  legacy/force behavior, TinyEOF local evidence/absolute offsets and final atomic
+  recovery verified. This is separate from real CUDA/seam/recognition proof.
+  Scoped Ruff, SDD validate and git diff --check PASS; normal required commit
+  hooks run at checkpoint. Task11 must extend legacy-only native route detection
+  to v2; existing identity regressions explicitly retain legacy coverage here.
+  No production media/settings/DB, real inference, dependencies or UI changes.

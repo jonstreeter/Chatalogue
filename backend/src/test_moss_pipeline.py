@@ -1,4 +1,4 @@
-"""MOSS whole-input checkpoint regressions, using temporary files and SQLite."""
+"""MOSS bounded recording checkpoint regressions, using temporary files and SQLite."""
 import copy
 import io
 import json
@@ -9,6 +9,9 @@ import pytest
 
 from src.test_phonon import isolated_service  # noqa: F401
 from src.services.ingestion.moss import MossValidationError, parse_generation
+from src.services.ingestion.moss_runtime import MODEL_REVISION, SOURCE_REVISION
+
+PROVENANCE = dict(model="MOSS", model_revision=MODEL_REVISION, source_revision=SOURCE_REVISION)
 
 
 @pytest.fixture
@@ -27,16 +30,18 @@ def harness(isolated_service, tmp_path, monkeypatch):  # noqa: F811
     def transcribe(data):
         with wave.open(io.BytesIO(data)) as stream:
             calls.append((stream.getnframes(), stream.getframerate()))
-        return dict(result=copy.deepcopy(native), runtime=dict(model='MOSS', model_revision='pinned', source_revision='pinned'))
+        return dict(result=copy.deepcopy(native), runtime=PROVENANCE.copy())
     manager = SimpleNamespace(transcribe=transcribe)
     monkeypatch.setattr(service, '_get_moss_runtime', lambda: manager)
+    monkeypatch.setattr(service, '_moss_speech_hints', lambda *_: [])
+    monkeypatch.setattr(service, '_update_transcription_stage_progress', lambda *_, **__: None)
     monkeypatch.setattr(service, '_resolve_transcription_route', lambda *_: dict(engine='moss', requested_engine='moss'))
     for method in ('_check_job_not_paused', '_record_job_stage_start', '_update_job_status_detail',
                    '_update_job_progress', '_upsert_job_payload_fields'):
         monkeypatch.setattr(service, method, lambda *_: None)
     def normalize(command, **_):
-        from pathlib import Path
-        Path(command[-1]).write_bytes(audio.read_bytes())
+        import shutil
+        shutil.copyfile(audio, command[-1])
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr('subprocess.run', normalize)
     return service, video, audio, manager, calls, native
@@ -94,8 +99,8 @@ def test_native_roundtrip_identity_retry(harness):
             (s.speaker, s.start, s.end, s.text, s.words) for s in segments]
         assert raw.read_bytes() == original
     reused, _ = service._process_transcribe_phase(video, audio)
-    assert reused[0].speaker == 'S0' and calls == [(144001, 16000)]
-    assert json.loads(original)['moss_result'] == native
+    assert reused[0].speaker == 'chunk-00000000:S0' and calls == [(144001, 16000)]
+    assert json.loads(original)['chunks'][0]['result'] == native
     assert native['corrections'][0]['raw_end'] == '9.0100'
 
 
@@ -109,7 +114,7 @@ def test_atomic_failure_preserves_complete(harness, monkeypatch):
     with pytest.raises(OSError, match='publish failure'):
         run(harness, force=True)
     assert raw.read_bytes() == original
-    assert sorted(p.name for p in raw.parent.iterdir()) == ['audio.wav', raw.name]
+    assert not any(p.is_dir() for p in raw.parent.iterdir())
 
 
 @pytest.mark.parametrize('mutation', ['dimensions', 'completion', 'raw', 'context'])
@@ -124,7 +129,7 @@ def test_invalid_reply_never_publishes(harness, mutation):
         bad['completion']['input_tokens'] = 131072
     else:
         bad['raw_text'] += '[broken'
-    manager.transcribe = lambda _: dict(result=bad, runtime={})
+    manager.transcribe = lambda _: dict(result=bad, runtime=PROVENANCE.copy())
     with pytest.raises(MossValidationError):
         run(harness)
     assert not (audio.parent / 'native_transcript_raw.json').exists()
@@ -139,15 +144,15 @@ def test_failure_cancel_retry_full_input(harness, monkeypatch):
     with pytest.raises(RuntimeError, match='worker interrupted'):
         run(harness)
     manager.transcribe = actual
-    checks = []
-    def pause(*_):
-        checks.append(1)
-        if len(checks) == 3:
-            raise RuntimeError('paused after inference')
-    monkeypatch.setattr(service, '_check_job_not_paused', pause)
+    def paused(data):
+        result = actual(data)
+        monkeypatch.setattr(service, '_check_job_not_paused', lambda *_: (_ for _ in ()).throw(RuntimeError('paused after inference')))
+        return result
+    manager.transcribe = paused
     with pytest.raises(RuntimeError, match='paused'):
         run(harness)
     assert not (audio.parent / 'native_transcript_raw.json').exists()
+    manager.transcribe = actual
     monkeypatch.setattr(service, '_check_job_not_paused', lambda *_: None)
     run(harness)
     assert calls == [(144001, 16000), (144001, 16000)]
@@ -165,18 +170,6 @@ def test_mixed_partials_and_force(harness, records):
     assert not path.exists() and len(calls) == 1
 
 
-def test_limit_before_inference(harness, monkeypatch):
-    fake = SimpleNamespace(getnframes=lambda: 5400 * 16000 + 1, getframerate=lambda: 16000,
-                           getnchannels=lambda: 1, getsampwidth=lambda: 2)
-    class Reader:
-        def __enter__(self):
-            return fake
-        def __exit__(self, *_):
-            pass
-    monkeypatch.setattr(wave, 'open', lambda *_: Reader())
-    with pytest.raises(MossValidationError, match='90 minutes'):
-        run(harness)
-    assert harness[4] == []
 
 
 def test_corrupt_cache_rejected(harness):
@@ -184,7 +177,7 @@ def test_corrupt_cache_rejected(harness):
     run(harness)
     raw = audio.parent / 'native_transcript_raw.json'
     data = json.loads(raw.read_text())
-    data['moss_result']['segments'][0]['end'] = '10'
+    data['chunks'][0]['result']['segments'][0]['end'] = '10'
     raw.write_text(json.dumps(data))
     with pytest.raises(MossValidationError):
         service._process_transcribe_phase(video, audio)
@@ -231,7 +224,7 @@ def test_complete_silence_reuses_without_word_coverage_retry(harness):
     silence = parse_generation('  ', native['sample_count'], native['sample_rate'], native['completion'])
     def transcribe(_):
         calls.append('silence')
-        return dict(result=silence, runtime={})
+        return dict(result=silence, runtime=PROVENANCE.copy())
     manager.transcribe = transcribe
     assert run(harness)[0] == []
     assert service._process_transcribe_phase(video, audio)[0] == []
@@ -252,6 +245,18 @@ def test_competing_models_release_before_inference(harness, monkeypatch):
     manager.transcribe = infer
     run(harness)
     assert order[-1] == 'inference'
+
+
+def legacy_run(harness):
+    _, duration = run(harness)
+    service, _, audio, *_ = harness
+    path = audio.parent / 'native_transcript_raw.json'
+    data = json.loads(path.read_text())
+    source = audio.stat()
+    legacy = dict(transcription_engine_used='moss', moss_result=data['chunks'][0]['result'],
+                  moss_runtime=PROVENANCE.copy(), moss_source=dict(size=source.st_size, mtime_ns=source.st_mtime_ns))
+    path.write_text(json.dumps(legacy))
+    return service._moss_checkpoint_segments(legacy, audio)
 
 
 @pytest.fixture
@@ -301,8 +306,8 @@ def test_native_identity_two_recordings_and_channel_isolation(identity_harness):
     # Both voices have a clean region while their native turns still overlap.
     native = parse_generation('[0][S0]outer[4][2][S1]inner[3][5][S1]guest[7]',
                               native['sample_count'], native['sample_rate'], native['completion'])
-    manager.transcribe = lambda _: dict(result=native, runtime={})
-    segments, _ = run(harness)
+    manager.transcribe = lambda _: dict(result=native, runtime=PROVENANCE.copy())
+    segments, _ = legacy_run(harness)
     # Fixture embedding keyed to clean span, deliberately independent of label.
     import numpy as np
     def embed(_, segment):
@@ -360,8 +365,8 @@ def test_native_no_clean_sample_retains_distinct_unenrolled_locals(identity_harn
     harness, crops = identity_harness
     service, video, audio, manager, _, native = harness
     native = parse_generation('[0][S0]one[4][0][S1]two[4]', native['sample_count'], native['sample_rate'], native['completion'])
-    manager.transcribe = lambda _: dict(result=native, runtime={})
-    segments, _ = run(harness)
+    manager.transcribe = lambda _: dict(result=native, runtime=PROVENANCE.copy())
+    segments, _ = legacy_run(harness)
     warnings = []
     monkeypatch.setattr(service, '_upsert_job_payload_fields', lambda _, fields: warnings.append(fields))
     service._process_diarize_phase(video, audio, segments)
@@ -379,7 +384,7 @@ def test_missing_identity_model_preserves_complete_native_checkpoint(identity_ha
     from src.services.ingestion import runtime
     harness, _ = identity_harness
     service, video, audio, *_ = harness
-    segments, _ = run(harness)
+    segments, _ = legacy_run(harness)
     raw = audio.parent / 'native_transcript_raw.json'
     original = raw.read_bytes()
     service.embedding_model = service.embedding_inference = None
@@ -395,3 +400,248 @@ def test_missing_identity_model_preserves_complete_native_checkpoint(identity_ha
     with Session(runtime.engine) as session:
         assert session.exec(select(TranscriptSegment)).all() == []
         assert session.get(Video, video.id).status != 'completed'
+
+def sized_recording(harness, seconds=250):
+    audio, manager, native = harness[2], harness[3], harness[5]
+    with wave.open(str(audio), 'wb') as stream:
+        stream.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+        for index in range(seconds):
+            stream.writeframesraw((index % 128).to_bytes(2, 'little') * 16000)
+    calls = []
+    def infer(data):
+        with wave.open(io.BytesIO(data)) as stream:
+            count = stream.getnframes()
+            pcm = stream.readframes(count)
+        calls.append((count, pcm[:2]))
+        return dict(result=parse_generation('[0][S0]voice[1]', count, 16000, native['completion']),
+                    runtime=PROVENANCE.copy())
+    manager.transcribe = infer
+    return calls
+
+
+def test_long_real_normalized_wav_has_bounded_exact_coverage(harness, monkeypatch):
+    import hashlib
+    import subprocess
+    service, _, audio, manager, _, native = harness
+    # Real >90 minute PCM WAV; FFmpeg normalization runs for real, inference is instrumented.
+    with wave.open(str(audio), 'wb') as stream:
+        stream.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+        for _ in range(5401):
+            stream.writeframesraw(b'\0\0' * 16000)
+        stream.writeframesraw(b'\1\0')
+    def normalize(command, **_):
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        _, error = process.communicate()
+        assert process.returncode == 0, error
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(subprocess, 'run', normalize)
+    calls, digest = [], hashlib.sha256()
+    def infer(data):
+        assert len(data) <= 44 + 120 * 16000 * 2
+        with wave.open(io.BytesIO(data)) as stream:
+            count = stream.getnframes()
+            digest.update(stream.readframes(count))
+        calls.append(count)
+        return dict(result=parse_generation(' ', count, 16000, native['completion']), runtime=PROVENANCE.copy())
+    manager.transcribe = infer
+    assert run(harness) == ([], (5401 * 16000 + 1) / 16000)
+    raw = json.loads((audio.parent / 'native_transcript_raw.json').read_text())
+    chunks = raw['chunks']
+    assert sum(calls) == raw['frontier'] == 5401 * 16000 + 1
+    assert max(calls) == 120 * 16000 and len(calls) == 46
+    assert raw['moss_source']['pcm_sha256'] == digest.hexdigest()
+    assert [c['start_frame'] for c in chunks] == [0] + [c['end_frame'] for c in chunks[:-1]]
+    assert all(c['result']['raw_text'] == ' ' for c in chunks)
+
+
+@pytest.mark.parametrize('failure', ['crash', 'cancel'])
+def test_later_failure_resume_skips_committed(harness, monkeypatch, failure):
+    service, video, audio, manager, *_ = harness
+    calls = sized_recording(harness)
+    actual = manager.transcribe
+    def interrupted(data):
+        if len(calls) == 1:
+            if failure == 'cancel':
+                monkeypatch.setattr(service, '_check_job_not_paused', lambda *_: (_ for _ in ()).throw(RuntimeError('cancel')))
+                return actual(data)
+            raise RuntimeError('crash')
+        return actual(data)
+    manager.transcribe = interrupted
+    with pytest.raises(RuntimeError, match=failure):
+        run(harness)
+    state = json.loads(service._get_temp_transcript_path(video.id).read_text())
+    assert state['chunk_count'] == 1 and state['frontier'] == 120 * 16000
+    monkeypatch.setattr(service, '_check_job_not_paused', lambda *_: None)
+    manager.transcribe = actual
+    run(harness)
+    assert sum(count for count, _ in calls) == (370 if failure == 'cancel' else 250) * 16000
+    raw = json.loads((audio.parent / 'native_transcript_raw.json').read_text())
+    assert len(raw['chunks']) == 3
+    assert raw['chunks'][1]['start_frame'] == 120 * 16000
+
+
+@pytest.mark.parametrize('error_type', ['oom', 'context'])
+def test_typed_resource_splits_only_failed_interval_and_learns(harness, monkeypatch, error_type):
+    from src.services.ingestion.moss_runtime import MossCudaOOMError, MossContextBudgetError
+    service, video, audio, manager, *_ = harness
+    calls = sized_recording(harness, 370)
+    actual = manager.transcribe
+    attempts = []
+    def infer(data):
+        with wave.open(io.BytesIO(data)) as stream:
+            size = stream.getnframes()
+            first = stream.readframes(1)
+        attempts.append((size, first))
+        if len(attempts) == 2:
+            raise (MossCudaOOMError if error_type == 'oom' else MossContextBudgetError)('resource')
+        if len(calls) == 3:
+            raise RuntimeError('later crash')
+        return actual(data)
+    manager.transcribe = infer
+    with pytest.raises(RuntimeError, match='later crash'):
+        run(harness)
+    state = json.loads(service._get_temp_transcript_path(video.id).read_text())
+    assert state['ceiling'] == 60 * 16000 and state['frontier'] == 240 * 16000
+    assert [size // 16000 for size, _ in attempts[:4]] == [120, 120, 60, 60]
+    manager.transcribe = actual
+    run(harness)
+    assert [count // 16000 for count, _ in calls] == [120, 60, 60, 60, 60, 10]
+    raw = json.loads((audio.parent / 'native_transcript_raw.json').read_text())
+    assert [c['boundary_reason'] for c in raw['chunks']][1:3] == ['resource_split'] * 2
+
+
+def test_metadata_failure_tail_recovered(harness, monkeypatch):
+    service, video, _, manager, *_ = harness
+    calls = sized_recording(harness)
+    publish = service._moss_atomic_json
+    def fail(path, data):
+        if data.get('chunk_count') == 2:
+            raise OSError('metadata')
+        return publish(path, data)
+    monkeypatch.setattr(service, '_moss_atomic_json', fail)
+    with pytest.raises(OSError, match='metadata'):
+        run(harness)
+    assert json.loads(service._get_temp_transcript_path(video.id).read_text())['chunk_count'] == 1
+    monkeypatch.setattr(service, '_moss_atomic_json', publish)
+    run(harness)
+    assert [count // 16000 for count, _ in calls] == [120, 120, 120, 10]
+
+
+@pytest.mark.parametrize('damage', ['missing', 'corrupt', 'gap', 'model', 'frontier', 'source', 'mixed'])
+def test_invalid_committed_partial_never_truncated_or_skipped(harness, damage):
+    service, video, audio, manager, *_ = harness
+    calls = sized_recording(harness)
+    actual = manager.transcribe
+    def fail(data):
+        if calls:
+            raise RuntimeError('stop')
+        return actual(data)
+    manager.transcribe = fail
+    with pytest.raises(RuntimeError):
+        run(harness)
+    meta = service._get_temp_transcript_path(video.id)
+    records = service._get_temp_transcript_jsonl_path(video.id)
+    state = json.loads(meta.read_text())
+    chunk = json.loads(records.read_text())
+    if damage == 'missing':
+        records.unlink()
+    elif damage == 'corrupt':
+        records.write_bytes(b'bad\n')
+    elif damage == 'gap':
+        chunk['start_frame'] = 1
+    elif damage == 'model':
+        chunk['runtime']['model_revision'] = 'wrong'
+    elif damage == 'frontier':
+        state['frontier'] += 1
+    elif damage == 'source':
+        state['moss_source']['pcm_sha256'] = '0' * 64
+    else:
+        state['engine'] = 'phonon'
+    if damage in ('gap', 'model'):
+        records.write_text(json.dumps(chunk) + '\n')
+    meta.write_text(json.dumps(state))
+    before = records.read_bytes() if records.exists() else None
+    manager.transcribe = actual
+    with pytest.raises(MossValidationError):
+        run(harness)
+    assert len(calls) == 1
+    assert (records.read_bytes() if records.exists() else None) == before
+
+
+def test_vad_defaults_local_to_absolute_and_fallback(harness, monkeypatch):
+    import faster_whisper.vad
+    service, _, audio, *_ = harness
+    seen = []
+    def hints(samples):
+        seen.append(len(samples))
+        return [dict(start=0, end=len(samples))]
+    monkeypatch.setattr(faster_whisper.vad, 'get_speech_timestamps', hints)
+    from src.services.ingestion.pipeline_transcribe import TranscribePhaseMixin
+    assert TranscribePhaseMixin._moss_speech_hints(b'\0\0' * 7, 11) == [dict(start=11, end=18)]
+    calls = sized_recording(harness)
+    monkeypatch.setattr(service, '_moss_speech_hints', lambda *_: (_ for _ in ()).throw(ImportError('optional')))
+    run(harness)
+    raw = json.loads((audio.parent / 'native_transcript_raw.json').read_text())
+    assert len(calls) == 3 and raw['chunks'][0]['boundary_reason'] == 'vad_unavailable'
+    assert raw['chunks'][0]['vad_fallback'] == 'ImportError' and seen == [7]
+
+def test_local_eof_corrections_and_exact_offsets(harness):
+    from fractions import Fraction
+    service, _, audio, manager, _, native = harness
+    sized_recording(harness, 240)
+    with wave.open(str(audio), 'rb') as stream:
+        pcm = stream.readframes(stream.getnframes())
+    with wave.open(str(audio), 'wb') as stream:
+        stream.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+        stream.writeframes(pcm + b'\0\0')
+    def infer(data):
+        with wave.open(io.BytesIO(data)) as stream:
+            count = stream.getnframes()
+        text = '[0.10][S0]outer[120.0100][2][S1]inner[3]' if count > 1 else ' '
+        return dict(result=parse_generation(text, count, 16000, native['completion']), runtime=PROVENANCE.copy())
+    manager.transcribe = infer
+    segments, duration = run(harness)
+    assert duration == float(Fraction(3840001, 16000))
+    assert [(s.start, s.end) for s in segments] == [(0.1, 120), (2, 3), (120.1, 240), (122, 123)]
+    assert segments[0].speaker != segments[2].speaker
+    assert segments[0].local_speaker == segments[2].local_speaker == 'S0'
+    raw = json.loads((audio.parent / 'native_transcript_raw.json').read_text())
+    assert raw['chunks'][0]['result'] == raw['chunks'][1]['result']
+    assert raw['chunks'][1]['result']['corrections'][0]['raw_end'] == '120.0100'
+    assert raw['chunks'][1]['result']['corrections'][0]['normalized_end'] == '120'
+
+
+def test_final_atomic_failure_retains_old_raw_and_complete_partial(harness, monkeypatch):
+    service, video, audio, _, calls, _ = harness
+    run(harness)
+    raw = audio.parent / 'native_transcript_raw.json'
+    original = raw.read_bytes()
+    publish = service._moss_atomic_json
+    def fail(path, data):
+        if path == raw:
+            raise OSError('final publish')
+        return publish(path, data)
+    monkeypatch.setattr(service, '_moss_atomic_json', fail)
+    with pytest.raises(OSError, match='final publish'):
+        run(harness, force=True)
+    assert raw.read_bytes() == original
+    assert json.loads(service._get_temp_transcript_path(video.id).read_text())['frontier'] == 144001
+    monkeypatch.setattr(service, '_moss_atomic_json', publish)
+    run(harness)
+    assert len(calls) == 2  # Fully committed partial publishes without inference.
+
+
+def test_one_frame_resource_failure_terminates_without_invented_retry(harness):
+    from src.services.ingestion.moss_runtime import MossCudaOOMError
+    _, _, audio, manager, *_ = harness
+    with wave.open(str(audio), 'wb') as stream:
+        stream.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+        stream.writeframes(b'\0\0')
+    attempts = []
+    def infer(_):
+        attempts.append(True)
+        raise MossCudaOOMError('actual typed failure')
+    manager.transcribe = infer
+    with pytest.raises(ValueError, match='cannot be split'):
+        run(harness)
+    assert attempts == [True]

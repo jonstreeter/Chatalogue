@@ -16,26 +16,35 @@ from . import runtime
 
 
 class TranscribePhaseMixin:
+    @staticmethod
+    def _moss_speech_hints(pcm, start):
+        """Installed CPU VAD defaults suggest seams, never filter samples."""
+        import numpy as np
+        from faster_whisper.vad import get_speech_timestamps
+        hints = get_speech_timestamps(np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768)
+        return [{"start": start + int(hint["start"]), "end": start + int(hint["end"])} for hint in hints]
+
     def _process_moss_phase(self, video, audio_path, job_id, route, force_retranscription=False):
-        """Generate one whole input and atomically commit its complete native evidence."""
+        """Stream contiguous bounded audio; publish only durable complete chunks."""
+        import hashlib
         import subprocess
         import tempfile
         import wave
-        from .moss import MAX_INPUT_SECONDS, MossValidationError, validate_worker_result
+        from .moss import MossValidationError, validate_worker_result
+        from .moss_chunks import next_chunk, split_chunk
+        from .moss_runtime import MossResourceError
 
         self._check_job_not_paused(job_id)
-        partials = [self._get_temp_transcript_path(video.id), self._get_temp_transcript_jsonl_path(video.id)]
+        meta = self._get_temp_transcript_path(video.id)
+        records = self._get_temp_transcript_jsonl_path(video.id)
         if force_retranscription:
-            for path in partials:
+            for path in (meta, records):
                 path.unlink(missing_ok=True)
             self._reset_partial_checkpoint_state(video.id)
-        elif any(path.exists() for path in partials):
-            raise MossValidationError("Partial transcript belongs to another or unknown engine; resume that engine or deliberately re-transcribe.")
         self._record_job_stage_start(job_id, "transcribe")
-        self._update_job_status_detail(job_id, "Preparing whole input for MOSS...")
+        self._update_job_status_detail(job_id, "Preparing bounded audio for MOSS...")
         raw_path = audio_path.parent / f"{self.sanitize_filename(video.title)}_transcript_raw.json"
-        source = audio_path.stat()
-        source_evidence = {"size": source.st_size, "mtime_ns": source.st_mtime_ns}
+        original = audio_path.stat()
         with tempfile.TemporaryDirectory(prefix="moss-", dir=raw_path.parent) as scratch:
             normalized = Path(scratch) / "audio.wav"
             decoded = subprocess.run([
@@ -46,50 +55,96 @@ class TranscribePhaseMixin:
                 raise MossValidationError("MOSS audio normalization failed; check source audio and FFmpeg.")
             with wave.open(str(normalized), "rb") as audio:
                 count, rate = audio.getnframes(), audio.getframerate()
-                if (count <= 0 or rate != 16000 or audio.getnchannels() != 1
-                        or audio.getsampwidth() != 2 or count > MAX_INPUT_SECONDS * rate):
-                    raise MossValidationError("MOSS requires nonempty audio of at most 90 minutes; select another engine for longer audio.")
-                pcm = audio.readframes(count + 1)
-                if len(pcm) != count * 2:
-                    raise MossValidationError("MOSS audio normalization returned incomplete PCM samples.")
-            # FFmpeg may add LIST metadata; IPC accepts only canonical PCM WAV.
-            canonical = io.BytesIO()
-            with wave.open(canonical, "wb") as audio:
-                audio.setparams((1, 2, rate, count, "NONE", "not compressed"))
-                audio.writeframes(pcm)
-            self._check_job_not_paused(job_id)
-            self._update_job_status_detail(job_id, "Transcribing whole input with MOSS...")
-            self._release_phonon_model("before_moss_transcribe", job_id=job_id)
-            self._release_whisper_model("before_moss_transcribe", job_id=job_id)
-            self._release_parakeet_model("before_moss_transcribe", job_id=job_id)
-            self._release_diarization_models("before_moss_transcribe", job_id=job_id)
-            reply = self._get_moss_runtime().transcribe(canonical.getvalue())
-            native = validate_worker_result(reply.get("result"), count, rate)
-            if not isinstance(reply.get("runtime"), dict):
-                raise MossValidationError("MOSS returned no runtime provenance.")
-            self._check_job_not_paused(job_id)
-            raw = {
-                "video_id": video.id, "transcription_engine_used": "moss",
-                "transcription_engine_requested": route.get("requested_engine"),
-                "transcription_engine_routed": "moss", "transcript_language": route.get("language"),
-                "moss_result": native, "moss_source": source_evidence,
-                "moss_runtime": reply["runtime"], "total_duration": count / rate,
-            }
-            segments, duration = self._moss_checkpoint_segments(raw, audio_path)
-            raw["segments"] = [{"start": segment.start, "end": segment.end,
-                                "speaker": segment.speaker, "text": segment.text, "words": None}
-                               for segment in segments]
-            staging = None
-            try:
-                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=raw_path.parent, delete=False) as stream:
-                    staging = Path(stream.name)
-                    json.dump(raw, stream, ensure_ascii=False, allow_nan=False)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(staging, raw_path)
-            finally:
-                if staging is not None:
-                    staging.unlink(missing_ok=True)
+                if rate != 16000 or audio.getnchannels() != 1 or audio.getsampwidth() != 2:
+                    raise MossValidationError("MOSS normalized audio must be mono PCM16 at 16 kHz.")
+                if count <= 0:
+                    raise MossValidationError("MOSS source contains no audio samples.")
+                digest = hashlib.sha256()
+                remaining = count
+                while remaining:
+                    self._check_job_not_paused(job_id)
+                    pcm = audio.readframes(min(remaining, 16000 * 120))
+                    if not pcm or len(pcm) % 2:
+                        raise MossValidationError("MOSS audio normalization returned incomplete PCM samples.")
+                    digest.update(pcm)
+                    remaining -= len(pcm) // 2
+                if audio.readframes(1):
+                    raise MossValidationError("MOSS audio normalization returned unexpected PCM samples.")
+                current = audio_path.stat()
+                if (current.st_size, current.st_mtime_ns) != (original.st_size, original.st_mtime_ns):
+                    raise MossValidationError("MOSS source changed during normalization.")
+                source = dict(size=original.st_size, mtime_ns=original.st_mtime_ns,
+                              sample_count=count, sample_rate=rate, pcm_sha256=digest.hexdigest())
+                state, chunks = self._moss_load_partial(video.id, source)
+                self._release_phonon_model("before_moss_transcribe", job_id=job_id)
+                self._release_whisper_model("before_moss_transcribe", job_id=job_id)
+                self._release_parakeet_model("before_moss_transcribe", job_id=job_id)
+                self._release_diarization_models("before_moss_transcribe", job_id=job_id)
+                manager = self._get_moss_runtime()
+                pending = []
+                while state["frontier"] < count:
+                    self._check_job_not_paused(job_id)
+                    fallback = None
+                    if pending:
+                        chunk = pending.pop(0)
+                    else:
+                        start = state["frontier"]
+                        audio.setpos(start)
+                        pcm = audio.readframes(min(state["ceiling"], count - start))
+                        try:
+                            speech = self._moss_speech_hints(pcm, start)
+                        except Exception as error:
+                            speech = None
+                            fallback = type(error).__name__
+                        chunk = next_chunk(count, start, state["ceiling"], speech)
+                    audio.setpos(chunk.start)
+                    frames = chunk.end - chunk.start
+                    pcm = audio.readframes(frames)
+                    if len(pcm) != frames * 2:
+                        raise MossValidationError("MOSS chunk has incomplete PCM samples.")
+                    # FFmpeg may add LIST metadata; strict IPC accepts canonical WAV only.
+                    canonical = io.BytesIO()
+                    with wave.open(canonical, "wb") as output:
+                        output.setparams((1, 2, rate, frames, "NONE", "not compressed"))
+                        output.writeframes(pcm)
+                    self._update_job_status_detail(job_id, f"Transcribing MOSS chunk {len(chunks) + 1} ({chunk.start / rate:.1f}/{count / rate:.1f}s)...")
+                    try:
+                        reply = manager.transcribe(canonical.getvalue())
+                    except MossResourceError:
+                        # Only verified typed resource failures authorize a smaller retry.
+                        children = split_chunk(chunk)
+                        pending[0:0] = children
+                        continue
+                    native = validate_worker_result(reply.get("result"), frames, rate)
+                    self._check_job_not_paused(job_id)
+                    record = dict(id=f"chunk-{len(chunks):08d}", start_frame=chunk.start,
+                                  end_frame=chunk.end, result=native, runtime=reply.get("runtime"),
+                                  source=source, boundary_reason=chunk.reason, vad_fallback=fallback)
+                    updated = {**state, "chunk_count": len(chunks) + 1, "frontier": chunk.end}
+                    if chunk.reason == "resource_split":
+                        updated["ceiling"] = min(state["ceiling"], frames)
+                    self._moss_validate_recording(updated, [*chunks, record])
+                    with records.open("ab") as stream:
+                        stream.write((json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    self._moss_atomic_json(meta, updated)
+                    state = updated
+                    chunks.append(record)
+                    self._update_transcription_stage_progress(job_id, engine="moss", completed_seconds=chunk.end / rate,
+                        total_seconds=count / rate, segments_completed=sum(len(c["result"]["segments"]) for c in chunks),
+                        chunk_index=len(chunks))
+                raw = {**state, "chunks": chunks, "video_id": video.id, "transcription_engine_used": "moss",
+                       "transcription_engine_requested": route.get("requested_engine"),
+                       "transcription_engine_routed": "moss", "transcript_language": route.get("language"),
+                       "total_duration": count / rate}
+                segments, duration = self._moss_checkpoint_segments(raw, audio_path)
+                raw["segments"] = [{"start": s.start, "end": s.end, "speaker": s.speaker,
+                                    "chunk_id": s.chunk_id, "local_speaker": s.local_speaker,
+                                    "text": s.text, "words": None} for s in segments]
+                self._moss_atomic_json(raw_path, raw)
+        meta.unlink(missing_ok=True)
+        records.unlink(missing_ok=True)
         self._upsert_job_payload_fields(job_id, {"transcription_engine_used": "moss", "transcription_reused_existing": False})
         self._update_job_progress(job_id, 100)
         return segments, duration

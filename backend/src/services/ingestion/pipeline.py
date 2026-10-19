@@ -28,10 +28,122 @@ from .runtime import (
 
 
 class PipelineMixin:
+    @staticmethod
+    def _moss_atomic_json(path, data):
+        """Publish metadata only after the complete replacement is durable."""
+        import tempfile
+        staging = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+                staging = Path(stream.name)
+                json.dump(data, stream, ensure_ascii=False, allow_nan=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(staging, path)
+        finally:
+            if staging is not None:
+                staging.unlink(missing_ok=True)
+
+    @staticmethod
+    def _moss_validate_recording(data, chunks, complete=False):
+        """Validate committed ownership and immutable request evidence together."""
+        from .moss import MossValidationError, validate_worker_result
+        from .moss_chunks import INITIAL_FRAME_CEILING
+        from .moss_runtime import MODEL_REVISION, SOURCE_REVISION
+        try:
+            source = data["moss_source"]
+            total = source["sample_count"]
+            if (data["schema"] != "moss-recording-v2" or data["engine"] != "moss"
+                    or type(total) is not int or total <= 0 or source["sample_rate"] != 16000
+                    or not isinstance(source["pcm_sha256"], str) or len(source["pcm_sha256"]) != 64
+                    or any(c not in "0123456789abcdef" for c in source["pcm_sha256"])
+                    or type(source["size"]) is not int or type(source["mtime_ns"]) is not int
+                    or type(data["ceiling"]) is not int or not 1 <= data["ceiling"] <= INITIAL_FRAME_CEILING
+                    or type(data["chunk_count"]) is not int or data["chunk_count"] != len(chunks)
+                    or type(data["frontier"]) is not int):
+                raise ValueError
+            frontier = 0
+            for index, chunk in enumerate(chunks):
+                start, end = chunk["start_frame"], chunk["end_frame"]
+                if (chunk["id"] != f"chunk-{index:08d}" or type(start) is not int
+                        or type(end) is not int or start != frontier or not start < end <= total
+                        or end - start > INITIAL_FRAME_CEILING or chunk["source"] != source
+                        or chunk["boundary_reason"] not in {"eof", "vad_gap", "hard_cut", "vad_unavailable", "resource_split"}
+                        or chunk["runtime"].get("model_revision") != MODEL_REVISION
+                        or chunk["runtime"].get("source_revision") != SOURCE_REVISION):
+                    raise ValueError
+                validate_worker_result(chunk["result"], end - start, 16000)
+                frontier = end
+            if frontier != data["frontier"] or (complete and frontier != total):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise MossValidationError("MOSS checkpoint is incomplete or invalid; committed audio cannot safely be skipped.") from None
+
+    def _moss_load_partial(self, video_id, source):
+        from .moss import MossValidationError
+        from .moss_chunks import INITIAL_FRAME_CEILING
+        meta = self._get_temp_transcript_path(video_id)
+        records = self._get_temp_transcript_jsonl_path(video_id)
+        if not meta.exists():
+            if records.exists():
+                raise MossValidationError("Partial transcript belongs to another or unknown engine; deliberately re-transcribe.")
+            data = dict(schema="moss-recording-v2", engine="moss", moss_source=source,
+                        chunk_count=0, frontier=0, ceiling=INITIAL_FRAME_CEILING)
+            self._moss_atomic_json(meta, data)  # Explicit ownership before the first request.
+            return data, []
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError
+            if data.get("engine") != "moss" or data.get("schema") != "moss-recording-v2":
+                raise MossValidationError("Partial transcript belongs to another or unknown engine; deliberately re-transcribe.")
+            if data.get("moss_source") != source:
+                raise MossValidationError("MOSS checkpoint source changed; deliberately re-transcribe.")
+            count = data["chunk_count"]
+            if type(count) is not int or count < 0:
+                raise ValueError
+            chunks = []
+            if not records.exists():
+                self._moss_validate_recording(data, chunks)
+                return data, chunks
+            with records.open("rb+") as stream:
+                for _ in range(count):
+                    chunks.append(json.loads(stream.readline()))
+                self._moss_validate_recording(data, chunks)
+                # Validation precedes truncation: corrupt committed evidence stays intact.
+                stream.truncate(stream.tell())
+                stream.flush()
+                os.fsync(stream.fileno())
+            return data, chunks
+        except MossValidationError:
+            raise
+        except (OSError, ValueError, KeyError, TypeError):
+            raise MossValidationError("MOSS partial checkpoint is incomplete or invalid; committed audio cannot safely be skipped.") from None
+
     def _moss_checkpoint_segments(self, data, audio_path):
         """Revalidate native evidence without ever normalizing corrected clocks again."""
         from fractions import Fraction
         from .moss import MAX_INPUT_SECONDS, MossValidationError, validate_worker_result
+
+        if data.get("schema") == "moss-recording-v2":
+            source = audio_path.stat()
+            identity = data.get("moss_source", {})
+            if identity.get("size") != source.st_size or identity.get("mtime_ns") != source.st_mtime_ns:
+                raise MossValidationError("MOSS checkpoint source changed; deliberately re-transcribe.")
+            chunks = data.get("chunks", [])
+            self._moss_validate_recording(data, chunks, complete=True)
+            segments = []
+            for chunk in chunks:
+                offset = Fraction(chunk["start_frame"], 16000)
+                for item in chunk["result"]["segments"]:
+                    segment = self._build_whisper_style_segment(
+                        seg_id=len(segments), start=float(offset + Fraction(item["start"])),
+                        end=float(offset + Fraction(item["end"])), text=item["text"], words=None)
+                    segment.chunk_id = chunk["id"]
+                    segment.local_speaker = item["speaker"]
+                    segment.speaker = chunk["id"] + ":" + item["speaker"]
+                    segments.append(segment)
+            return segments, identity["sample_count"] / 16000
 
         native = data.get("moss_result", {})
         source = audio_path.stat()
