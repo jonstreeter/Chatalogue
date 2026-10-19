@@ -196,6 +196,54 @@ Other workflow issues found, not causes established for this overrun:
   The numerical source-duration path is verified; the exact model prediction's
   causal mechanism remains unresolved. No product workaround was written.
 
+### Upstream training/history follow-up
+
+2026-10-18, owner-triggered read-only investigation; no generation, parameter
+changes or source patch. Checked upstream repository head
+`e3bdd93f8ad58418e04659818efd5fd87a0bc486`, which is still the pinned helper SHA.
+
+- The same `_audio_span_ids` arithmetic is present in the
+  [initial public release](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/blob/8ca7350a8e4148b5aff78b465086703b62744ce2/moss_transcribe_diarize/processing_moss_transcribe_diarize.py)
+  and current pinned source. File history lists only that release and
+  [fine-tuning support](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/commit/53b41928d4c84eee58005c8f0f631bd28b3f163b).
+  The latter renamed `_expand_audio_token` to `expand_audio_token` for the
+  collator; it did not change marker placement. No upstream correction to this
+  arithmetic was found in that file's history.
+- The published [fine-tuning entry point](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/blob/e3bdd93f8ad58418e04659818efd5fd87a0bc486/finetune.py)
+  loads `MossTranscribeDiarizeProcessor.from_pretrained(model_name_or_path)`.
+  Its collator uses that processor for features/placeholder expansion and leaves
+  supplied reference transcript targets unchanged. With this checkpoint it
+  therefore uses its five-second config and the same marker arithmetic.
+  This describes the released fine-tuning recipe, not proof of original
+  pretraining implementation, intended calibration or correctness.
+- The [technical report v7, section 2](https://arxiv.org/pdf/2601.01554v7)
+  describes textual timestamp markers in the input representation, but does not
+  specify exact five-second token placement, rounding or endpoint clipping.
+  Its synthetic-data discussion describes smoothing mixture boundaries; the
+  retained abrupt-cut fixture is not a reproduction of that training recipe.
+- [Upstream issue 51](https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/issues/51)
+  reports much larger timestamp errors on other audio. Its replies contain no
+  marker-code diagnosis, patch or validated alternative config. Treat it as
+  a separate user report, not a reproduction or explanation of our 0.01s result.
+  No matching marker-specific diagnosis was found in the retrieved 61 issue/PR
+  entries or file history. Hugging Face file-history pages could not be fetched,
+  so original model-history/initial-training intent is not fully established.
+
+Conclusion: our integration/probe did not introduce this marker convention.
+Public evidence neither proves it is an intentional trained calibration nor
+establishes a safe correction. Changing `time_marker_every_seconds` or rewriting
+marker positions would alter model input and could reduce accuracy. Preserve
+pinned upstream behavior. The causal explanation for the exact `[9.01]` remains
+unproven; do not equate nominal marker offset with transcript drift.
+
+The useful next controlled check is the retained fixture through the unmodified
+official generation helper versus the custom probe, capturing raw output before
+normalization. Then test the approved EOF rule separately. Reuse the same pinned
+environment/audio; do not regenerate a friendlier fixture, widen tolerance,
+restart downloads or patch the upstream processor. Long-input app verification
+must retain timestamp-quality limitations rather than claiming exact alignment
+from the short feasibility samples.
+
 Run from repository root; private Python must remain separate from backend ML.
 Setup commands used (source checkout pinned before install):
 

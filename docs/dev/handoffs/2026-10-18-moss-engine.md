@@ -28,12 +28,18 @@ failure remains recorded in research report and archived baton.
 
 ## Next step
 
-Report the completed workflow audit first, as the latest owner instruction
-requires. Before treating normalization as the cause-level remedy, investigate
-the pinned upstream marker placement against training intent and controlled
-evidence. Do not silently change marker config, widen tolerance or claim measured
-transcript drift from marker arithmetic. Research report's workflow audit section
-contains verified facts, limitations and reproducible observations.
+Upstream history/training follow-up is complete: marker arithmetic existed at
+initial release and remains unchanged; published fine-tuning uses checkpoint
+processor/config. Original pretraining intent and a safe marker correction are
+not documented in the sources retrieved. Preserve pinned upstream behavior;
+the arithmetic alone does not prove transcript drift or cause of `[9.01]`.
+No inference or model/config change was made during these two investigations.
+
+Next fresh task-1 worker compares unmodified official generation helper with
+the probe on the retained fixture, capturing raw output before normalization.
+Do not alter the fixture to obtain a pass. Then evaluate the approved EOF policy
+separately, retaining the old failure and independent evidence. Do not silently
+change marker config, widen tolerance or present normalization as a causal fix.
 
 After that review, fresh Super Looper task-1 worker: update ignored probe to apply the spec's exact
 EOF policy and record raw correction evidence, check boundary/rejection examples,
@@ -53,12 +59,17 @@ process exit/VRAM evidence before task 2. Do not ask for original plan approval.
 - Input marker alignment discrepancy: confirmed in code/config; effect on model
   predictions unresolved. EOF normalization is an application policy, not a
   demonstrated causal repair. No new runtime inference performed.
+- Upstream history/training review: same arithmetic at initial release and in
+  published fine-tuning path; no documented safe correction found. Original
+  pretraining calibration unknown. Sources/limitations recorded in research.
 
 ## Blockers
 
-The prior policy decision is resolved by the owner's refinement request. Latest
-request pauses rerun for audit findings first. Product work remains gated on the
-new task-1 runtime result and honest resolution/reporting of the marker finding.
+The prior policy decision is resolved by the owner's refinement request. Audit
+and upstream-source findings have been documented. No app-introduced marker
+change or documented upstream fix was found; do not invent one. Product work
+remains gated on the controlled task-1 runtime result and honest reporting of
+timestamp accuracy limitations.
 
 ## Diagnosis worth keeping
 

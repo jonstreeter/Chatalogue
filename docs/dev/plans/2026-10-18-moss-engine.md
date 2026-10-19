@@ -126,6 +126,16 @@ guarantee. No review subagents or product changes for this refinement.
 
 ## Verification log
 
+- 2026-10-18 upstream follow-up: initial release, current pinned source and the
+  fine-tuning-support commit retain the same marker arithmetic. Released
+  fine-tuning collator loads checkpoint processor/config; report v7 describes
+  time markers without exact rounding/calibration. Issue 51 reports other
+  timestamp errors but provides no marker fix. No safe documented correction
+  established; original pretraining intent remains unknown. No inference or
+  parameter changes. Preserve upstream behavior; next targeted check compares
+  official generation helper and probe raw output before applying EOF policy.
+  See research report for primary-source links and access limitations.
+
 - 2026-10-18 owner superseded immediate rerun with a workflow audit first. CPU
   loader/processor audit PASS: exact 144000/16000 duration, PCM-identical fixture
   reconstruction and loaded samples, clean pinned helper and matching cached
