@@ -22,6 +22,26 @@
           "role": "contract"
         }
       ]
+    },
+    {
+      "id": "moss-adapter",
+      "summary": "Optional app-managed native MOSS runtime and validated transcript boundary.",
+      "paths": [
+        "backend/src/services/ingestion/moss.py",
+        "backend/src/services/ingestion/moss_runtime.py",
+        "backend/src/services/ingestion/moss_worker.py",
+        "backend/src/services/ingestion/moss_worker_requirements.txt"
+      ],
+      "authorities": [
+        {
+          "path": "docs/dev/adr/ADR-0002-moss-managed-engine.md",
+          "role": "contract"
+        },
+        {
+          "path": "docs/dev/specs/2026-10-18-moss-engine-design.md",
+          "role": "refines"
+        }
+      ]
     }
   ]
 }
