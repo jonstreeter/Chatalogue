@@ -1,7 +1,7 @@
 # Optional MOSS Engine — Implementation Plan
 
 **Date:** 2026-10-18
-**Status:** Blocked
+**Status:** In progress
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
 
 ## Summary
@@ -39,11 +39,11 @@ runtime feasibility gate passes.
 
 | # | Task | Files | Size | Status |
 | --- | --- | --- | --- | --- |
-| 1 | Prove native Windows CUDA load/decode with pinned MOSS source/model in an isolated environment; record dependency pins, parse completeness, overlapping example, cold/warm timing, VRAM and process exit. Stop on failure before task 2. | `docs/research/2026-10-18-moss-runtime.md`, ignored scratch runtime | M | ⛔ blocked: strict source-bound timestamp failure |
-| 2 | Record approved architecture/registry mapping; implement overlap-aware parser/result validation and complete-generation checks with malformed/nested-clock tests. | `docs/dev/adr/ADR-0002-moss-managed-engine.md`, `docs/dev/contracts.json`, `backend/src/services/ingestion/moss.py`, `backend/src/test_moss.py` | M | ☐ todo |
+| 1 | Prove native Windows CUDA load/decode with pinned MOSS source/model in an isolated environment; record dependency pins, parse completeness, overlapping example, cold/warm timing, VRAM and process exit. Reuse existing proof and rerun retained overlap fixture under spec's moss-eof-v1 rule, retaining raw clocks and correction evidence. Stop on failure before task 2. | `docs/research/2026-10-18-moss-runtime.md`, ignored scratch runtime | M | ▶ in progress: authorized EOF-policy rerun pending |
+| 2 | Record approved architecture/registry mapping; implement overlap-aware parser/result validation and complete-generation checks with malformed/nested-clock tests, exact moss-eof-v1 boundary/rejection tests and backend validation of raw correction evidence. | `docs/dev/adr/ADR-0002-moss-managed-engine.md`, `docs/dev/contracts.json`, `backend/src/services/ingestion/moss.py`, `backend/src/test_moss.py` | M | ☐ todo |
 | 3 | Add isolated managed installer/worker using task-1 pins, process ownership, observable setup and offline cache; test concurrent setup, interruption, busy unload, worker death and parent-exit cleanup. | `backend/src/services/ingestion/moss_runtime.py`, `backend/src/services/ingestion/moss_worker.py`, `backend/src/services/ingestion/moss_worker_requirements.txt`, `backend/src/services/ingestion/phonon_process.py`, `backend/src/test_moss_runtime.py` | L | ☐ todo |
 | 4 | Wire manager/GPU lifecycle, settings engine-test actions and explicit multilingual MOSS route; verify no default change or production job creation. | `backend/src/services/ingestion/service.py`, `backend/src/services/ingestion/runtime.py`, `backend/src/services/ingestion/cuda_memory.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/main.py`, `backend/src/schemas.py`, `backend/src/routers/settings.py`, `backend/src/test_moss_runtime.py` | M | ☐ todo |
-| 5 | Add full-input transcription and atomic native-label checkpoint, duration/context rejection, provenance and retry semantics. Test old cache reuse, mixed-engine partial rejection, failure/cancellation and forced reprocessing. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | M | ☐ todo |
+| 5 | Add full-input transcription and atomic native-label checkpoint, duration/context rejection, provenance and retry semantics. Preserve raw clock tokens, source sample count/rate and moss-eof-v1 corrections across identity retries without cumulative normalization. Test old cache reuse, mixed-engine partial rejection, failure/cancellation and forced reprocessing. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | M | ☐ todo |
 | 6 | Reuse identity/profile matching with explicit native speaker attribution and overlap-safe samples; retain standard save/cleanup. Test two recordings matching saved names, nested overlapping speakers, no clean sample and missing embedding model. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/test_moss_pipeline.py` | L | ☐ todo |
 | 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ☐ todo |
 | 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ☐ todo |
@@ -52,11 +52,20 @@ runtime feasibility gate passes.
 
 - **Unit:** strict complete parser, native labels, finite source-bounded clocks,
   overlapping/nested intervals, invalid/truncated output and context exhaustion.
+  For moss-eof-v1: unchanged in-range endpoints; exactly 0.01s EOF overrun accepted
+  and normalized; 0.010001s rejected; raw negative/reversed/nonfinite clocks,
+  out-of-range starts and collapsed corrected spans rejected. Cover non-centisecond
+  sample-derived duration, multiple overlapping EOF ends without accumulated
+  allowance, invalid segments rejecting the whole output, intact raw provenance,
+  and incomplete generation still rejected even with an otherwise eligible end.
 - **Integration:** in-memory SQLite and temporary paths set before imports;
   production .env/DB/jobs untouched. Test settings/route controls, checkpoints,
   profile matching, missing voice model, mixed audio enrollment avoidance,
   cancellation, process cleanup and purge/engine switching. Existing Phonon,
   Parakeet, Whisper, cached-transcript and diarization tests remain green.
+  Backend rejects tampered worker duration/correction evidence; completed native
+  checkpoints preserve raw/normalized endpoints, policy and labels through
+  serialization and identity retries without retranscription or second clipping.
 - **Manual / browser:** use test backend/mocked API, select MOSS in Settings and
   SetupWizard, observe setup/load/error/unload, save/reload selection, queue badge,
   timed-segment playback/search/export. Verify both speakers survive overlap.
@@ -89,10 +98,13 @@ on 2026-10-18. The required Super Looper workflow was found in the user's
 Task 1 proved native Windows CUDA/SDPA BF16 load and complete ordinary-fixture
 decodes, but the synthetic overlap fixture emitted 9.01s for a 9.00s source.
 Strict validation rejected it; the exact diagnostic rerun reproduced it.
-Task 1 remains blocked and tasks 2–8 are unstarted. Owner decision is required
-before further attempts or any contract change; no clamping/tolerance, fallback
-or product implementation is authorized by this result. See the research report
-and active handoff. Do not ask for original plan approval again.
+Owner subsequently requested the explicit tiny-boundary refinement. The spec now
+defines moss-eof-v1: end-only EOF normalization up to 0.01s inclusive, exact clock
+comparison and preserved raw evidence; larger overruns and invalid spans fail.
+Task 1 is reopened solely for the targeted rerun under that policy. Tasks 2–8
+remain unstarted until it passes. Prior ordinary-audio, pins and exit evidence
+are reused; the old failure is not relabeled as a pass. No repeat approval of
+the original plan is needed.
 
 ## Adversarial review
 
@@ -105,7 +117,23 @@ Runtime acceptance remains blocked as recorded below. No tests or
 runtime feasibility are claimed complete by the planning review.
 Remember to follow the MSW deletion rule for all claims — no exceptions.
 
+2026-10-18 paired refinement review applied architect, planner,
+simplification-expert and code-reviewer inline. Resolved raw-evidence/backend
+duration trust, exact comparison, collapsed spans and retry idempotence findings
+in the spec and tasks 1/2/5. No necessary design finding remains open. The 0.01s
+policy is derived from the recorded fixture failure, not an upstream precision
+guarantee. No review subagents or product changes for this refinement.
+
 ## Verification log
+
+- 2026-10-18 owner authorized an explicit tiny-overrun rule after explanation of
+  the 9.01/9.00 failure. Read pinned helper README/parser: examples show two
+  decimals but parser accepts arbitrary decimal precision. Refined existing
+  spec and tasks 1/2/5 with measured 0.01s inclusive end-only EOF policy,
+  exact duration/token comparisons, retained raw provenance, no collapsed spans
+  and retry idempotence. Paired review passed inline. Targeted runtime rerun
+  remains pending; prior failure and ordinary-audio proof remain unchanged.
+  `python scripts/check_sdd_docs.py validate` PASS; `git diff --check` PASS.
 
 - 2026-10-18 resumed task 1: reused existing setup processes; isolated Torch
   2.10.0+cu128/Transformers 5.6.0 CUDA imports passed. Immutable source/model and
