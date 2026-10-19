@@ -91,7 +91,7 @@ Raw diagnostic output (108 tokens, EOS 151645, budget 4096):
 ```
 
 Native intervals are S01 0–2.35, S02 2.12–4.75, S01 2.98–5.83 and S02
-5.41–9.01. Cross-speaker overlaps exist, including nonmonotonic segment-end ordering;
+5.41–9.01. Cross-speaker overlaps exist; segment ends in this example are increasing;
 the final clock exceeds the source by 0.01s and is rejected. Generation was
 complete, so this failure is neither a token-budget limit nor an unparsed tail.
 Exact failing check, retained in `probe-overlap*.log`:
@@ -114,6 +114,87 @@ allocated/reserved peaks above are the process-local measurements. This proves
 ordinary and failed probe process release, not yet managed app parent-exit IPC.
 
 ## Reproduction
+
+### Workflow timing audit requested before the EOF-policy rerun
+
+2026-10-18: owner asked to re-examine the workflow for a cause of the overrun
+before resuming. No further generation or EOF correction was performed. A
+read-only CPU audit (`backend/runtime/moss/audit_timing.py`, retained scratch)
+exercised the pinned processor and loader and saved `timing-audit.json`.
+CUDA remained uninitialized during that audit.
+
+- Research WAV and 120-second scratch crop are PCM-identical. Reconstructing
+  the synthetic mix from its original sample slices is PCM-identical to the
+  retained fixture. Fixture: mono PCM16, 144000 samples at 16000 Hz, exactly
+  9 seconds. PCM SHA256:
+  `6fa9e0bfb2a432a37680625901b449a429e99c2e4128f407ac69b7474fed7e11`.
+- The actual helper audio loader yields exactly 144000 samples, equal to
+  original PCM / 32768 sample-for-sample. No resampling length change, extra
+  decoded samples, stereo/time-base mismatch or WAV-header discrepancy was found.
+- Raw generation already contains the literal `[9.01]`; the upstream parser
+  returns 9.01 without changing it. Exact excess is 1/100 second (160 samples),
+  not a binary-float comparison artifact. Prompt tensor width and attention
+  length both equal 200, so prompt slicing is consistent for this single input.
+  EOS 151645 followed 108 generated tokens, well below the probe budget.
+- Cached custom processor/model/config hashes equal the pinned snapshot copies;
+  helper checkout is clean at its recorded immutable SHA. Source/model revisions
+  are independently pinned; no evidence of stale dynamic-code cache was found.
+- Native feature extraction pads the mel input to `(1,80,3000)` (30-second
+  Whisper window) but supplies only 113 valid merged audio tokens for this
+  fixture. At 12.5 tokens/second their nominal span is 9.04 seconds. The decoder
+  is not given an exact 9.00-second duration field by this helper. This is
+  upstream feature padding/length quantization, not evidence that 30 seconds of
+  audio was transcribed. Its causal contribution to `[9.01]` is unproven.
+- The synthetic fixture abruptly cuts its second source slice at source 22.00s;
+  the ordinary 120s model output placed that utterance's end at 22.35s. That is
+  model-derived context, not a corrected reference, but the fixture should be
+  described as an overlap/abrupt-boundary stress test rather than a clean
+  completed-utterance accuracy example.
+
+**Upstream marker-placement finding:** the pinned model processor config sets
+`audio_tokens_per_second=12.5` and `time_marker_every_seconds=5`. Its
+`_audio_span_ids` calculates `tokens_per_marker = int(rate * interval)` and
+places the kth marker at `k * tokens_per_marker`. Thus fractional token
+positions are truncated per interval, producing the following input alignment:
+
+| Marker text (s) | Preceding audio tokens | Nominal token time (s) | Difference (s) |
+| ---: | ---: | ---: | ---: |
+| 5 | 62 | 4.96 | 0.04 |
+| 10 | 124 | 9.92 | 0.08 |
+| 30 | 372 | 29.76 | 0.24 |
+| 120 | 1488 | 119.04 | 0.96 |
+
+This arithmetic follows directly from pinned code/config and exact rational
+comparison. It is an input-marker alignment discrepancy, **not a measured
+transcript drift or proof of the cause of the 0.01s prediction**. Training may
+have used the same convention. Do not modify marker placement/config or claim
+an accuracy improvement without checking upstream intent and controlled evidence.
+Do not widen EOF allowance to the token span or marker discrepancy. The approved
+0.01s policy remains an application acceptance rule, not a demonstrated fix for
+the cause of this observation. Pause its runtime rerun while this finding is
+reported to the owner.
+
+Other workflow issues found, not causes established for this overrun:
+
+- Probe `max_new_tokens=4096` was a local, unsubstantiated cap, not the model's
+  configured default (5120) or a product bound. It did not truncate the 108-token
+  overlap result. Product implementation must derive the output budget from
+  available context as the spec requires; do not copy this probe cap. The
+  `len(ids) < budget` check also rejects an EOS exactly at the limit; conservative
+  probe behavior must not become an unsupported general completeness definition.
+- The report previously called these overlap intervals nonmonotonic in end
+  ordering. They actually have increasing ends; cross-speaker overlap was proven,
+  nested/nonmonotonic ordering was not. Task-2 nested-interval tests remain needed.
+- The 32-minute installation delay and the audio-clock overrun are different
+  quantities. Two installer processes targeted one private environment and the
+  first worker lost its tool sessions on usage exhaustion. Active extraction
+  was observed, but its OS bottleneck and installer exit status were not captured.
+  Do not blame CUDA, antivirus or network without evidence. Future managed setup
+  must serialize installs and retain logs/exit status as task 3 already requires.
+- Earlier explanation of the 0.01s error as decimal rounding was too definite.
+  Examples use two decimals, but the parser does not enforce that precision.
+  The numerical source-duration path is verified; the exact model prediction's
+  causal mechanism remains unresolved. No product workaround was written.
 
 Run from repository root; private Python must remain separate from backend ML.
 Setup commands used (source checkout pinned before install):

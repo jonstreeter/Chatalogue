@@ -39,7 +39,7 @@ runtime feasibility gate passes.
 
 | # | Task | Files | Size | Status |
 | --- | --- | --- | --- | --- |
-| 1 | Prove native Windows CUDA load/decode with pinned MOSS source/model in an isolated environment; record dependency pins, parse completeness, overlapping example, cold/warm timing, VRAM and process exit. Reuse existing proof and rerun retained overlap fixture under spec's moss-eof-v1 rule, retaining raw clocks and correction evidence. Stop on failure before task 2. | `docs/research/2026-10-18-moss-runtime.md`, ignored scratch runtime | M | ▶ in progress: authorized EOF-policy rerun pending |
+| 1 | Prove native Windows CUDA load/decode with pinned MOSS source/model in an isolated environment; record dependency pins, parse completeness, overlapping example, cold/warm timing, VRAM and process exit. Reuse existing proof and rerun retained overlap fixture under spec's moss-eof-v1 rule, retaining raw clocks and correction evidence. Stop on failure before task 2. | `docs/research/2026-10-18-moss-runtime.md`, ignored scratch runtime | M | ▶ in progress: timing workflow audit reported before rerun |
 | 2 | Record approved architecture/registry mapping; implement overlap-aware parser/result validation and complete-generation checks with malformed/nested-clock tests, exact moss-eof-v1 boundary/rejection tests and backend validation of raw correction evidence. | `docs/dev/adr/ADR-0002-moss-managed-engine.md`, `docs/dev/contracts.json`, `backend/src/services/ingestion/moss.py`, `backend/src/test_moss.py` | M | ☐ todo |
 | 3 | Add isolated managed installer/worker using task-1 pins, process ownership, observable setup and offline cache; test concurrent setup, interruption, busy unload, worker death and parent-exit cleanup. | `backend/src/services/ingestion/moss_runtime.py`, `backend/src/services/ingestion/moss_worker.py`, `backend/src/services/ingestion/moss_worker_requirements.txt`, `backend/src/services/ingestion/phonon_process.py`, `backend/src/test_moss_runtime.py` | L | ☐ todo |
 | 4 | Wire manager/GPU lifecycle, settings engine-test actions and explicit multilingual MOSS route; verify no default change or production job creation. | `backend/src/services/ingestion/service.py`, `backend/src/services/ingestion/runtime.py`, `backend/src/services/ingestion/cuda_memory.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/main.py`, `backend/src/schemas.py`, `backend/src/routers/settings.py`, `backend/src/test_moss_runtime.py` | M | ☐ todo |
@@ -125,6 +125,17 @@ policy is derived from the recorded fixture failure, not an upstream precision
 guarantee. No review subagents or product changes for this refinement.
 
 ## Verification log
+
+- 2026-10-18 owner superseded immediate rerun with a workflow audit first. CPU
+  loader/processor audit PASS: exact 144000/16000 duration, PCM-identical fixture
+  reconstruction and loaded samples, clean pinned helper and matching cached
+  custom code, raw literal 9.01 before parsing, exact 0.01s excess. Found nominal
+  9.04s feature-token span and upstream marker-position truncation (5s marker at
+  nominal 4.96s, 120s marker at 119.04s); causal effect on generated clocks is
+  unproven. Research report distinguishes facts/inferences and records probe
+  budget, abrupt fixture boundary, previous overlap-order reporting error and
+  incomplete setup diagnostics. No generation, correction or source patch run;
+  report audit before resuming. Product tasks remain unstarted.
 
 - 2026-10-18 owner authorized an explicit tiny-overrun rule after explanation of
   the 9.01/9.00 failure. Read pinned helper README/parser: examples show two

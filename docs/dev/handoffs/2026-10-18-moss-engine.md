@@ -15,14 +15,27 @@ and rejection of collapsed corrections are required. No generic rounding or
 word clocks. The value derives from the measured failure, not an upstream
 precision guarantee. Paired refinement review passed inline with all four lenses.
 
-Task 1 is reopened for a targeted rerun; 0/8 tasks complete. No product code yet.
+Task 1 is reopened; 0/8 tasks complete. Owner subsequently requested a complete
+timing-workflow audit before the rerun. That read-only CPU audit found no sample
+duration/loader/parser discrepancy, but identified an upstream marker alignment
+issue: configured five-second markers are placed every 62 tokens at 12.5 tokens/s
+(nominal 4.96s), accumulating input-marker error. Its causal effect on generated
+timestamps is unproven. Exact samples and raw output are preserved; no generation
+or correction has been run since the prior blocked probe. No product code yet.
 Ordinary CUDA/pinning/timing/exit evidence is retained from checkpoint `62da003e`;
 do not repeat completed setup or ordinary-audio benchmarks. Previous strict
 failure remains recorded in research report and archived baton.
 
 ## Next step
 
-Fresh Super Looper task-1 worker: update ignored probe to apply the spec's exact
+Report the completed workflow audit first, as the latest owner instruction
+requires. Before treating normalization as the cause-level remedy, investigate
+the pinned upstream marker placement against training intent and controlled
+evidence. Do not silently change marker config, widen tolerance or claim measured
+transcript drift from marker arithmetic. Research report's workflow audit section
+contains verified facts, limitations and reproducible observations.
+
+After that review, fresh Super Looper task-1 worker: update ignored probe to apply the spec's exact
 EOF policy and record raw correction evidence, check boundary/rejection examples,
 then rerun retained synthetic overlap WAV on pinned local CUDA runtime. Require
 complete output, native overlap, bounded final clocks, preserved raw evidence and
@@ -35,11 +48,17 @@ process exit/VRAM evidence before task 2. Do not ask for original plan approval.
 - Original strict overlap test: FAIL; preserved, not retroactively passed.
 - New-policy runtime rerun: not yet run.
 - Refinement review: PASS, architect/planner/simplification/code-reviewer inline.
+- CPU timing audit: PASS, exact file/loaded samples, fixture reconstruction,
+  raw-before-parse clocks, matching pinned dynamic-code cache; CUDA uninitialized.
+- Input marker alignment discrepancy: confirmed in code/config; effect on model
+  predictions unresolved. EOF normalization is an application policy, not a
+  demonstrated causal repair. No new runtime inference performed.
 
 ## Blockers
 
-The prior decision is resolved by the owner's refinement request. Product work
-remains gated on the new task-1 runtime result. Stop on a new concrete failure.
+The prior policy decision is resolved by the owner's refinement request. Latest
+request pauses rerun for audit findings first. Product work remains gated on the
+new task-1 runtime result and honest resolution/reporting of the marker finding.
 
 ## Diagnosis worth keeping
 
