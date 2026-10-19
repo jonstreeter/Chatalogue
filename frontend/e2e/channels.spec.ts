@@ -14,8 +14,10 @@ test.describe('Channels List', () => {
   });
 
   test('shows add channel form', async () => {
-    await expect(channelsPage.addChannelInput).toBeVisible();
     await expect(channelsPage.addChannelButton).toBeVisible();
+    await channelsPage.openYouTubeChannelForm();
+    await expect(channelsPage.addChannelInput).toBeVisible();
+    await expect(channelsPage.addChannelInput).toBeEmpty();
   });
 
   test('shows import archive button', async () => {

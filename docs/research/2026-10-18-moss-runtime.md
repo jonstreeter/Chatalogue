@@ -1547,3 +1547,80 @@ already cleaned after suite exit; no further request/retry was made.
   preparation error (3 passes then stopped, not failure); old screenshot lost,
   original logs retained. Owned API63584/40500,Vites46652/29080 stopped; no listeners
   8000/5173/5175. No production backend/data/env or fallback.
+
+## Task8 final isolated verification (2026-10-19)
+
+- 2026-10-19 task8 COMPLETE, **8/8 tasks verified**; plan stays In progress and
+  spec In Review pending local closeout. Owner-approved Add Channel test now opens
+  Add Channel → YouTube Channel and asserts the empty current URL field; no submit.
+  Scoped ESLint PASS. Full installed-Chrome browser suite **19 PASS**, 1.3m,
+  unique task8/e2e-results-full12; no skips/exclusions. Earlier MOSS Ready timeout
+  did not reproduce under timestamped diagnostics: status poll arrived4.680s after
+  readiness flag, scoped3 PASS28.5s. Diagnostic logging removed; no product timing,
+  Settings or MOSS test changes. Required Chrome env override retained in scratch.
+  Actual app-phase uncovered FFmpeg LIST metadata rejected by strict44-byte WAV
+  IPC. Conductor repacked only pipeline_transcribe.py/test_moss_pipeline.py:
+  validated exact PCM is reserialized with stdlib wave; strict worker unchanged.
+  Real FFmpeg LIST regression proves identical PCM144001samples/16000Hz/duration.
+  Targeted20 PASS25.18s; full isolated backend **253 PASS**,1 warning,136.10s;
+  root Ruff PASS. Prior typecheck/full frontend lint evidence reused.
+  Actual app14 CUDA/BF16/SDPA sameworker62348:9s6.760s/4segments,
+  10s5.370s/2segments,120s61.017s/31segments. Raw native overlap/words=null and
+  exact9.01→9 moss-eof-v1 correction retained. Load14.057s end-to-end; verified
+  unload0.194s/exit0/processfalse. Actual120s peakallocated2,506,159,616B,
+  peakreserved2,699,034,624B; global VRAM includes desktop/other allocations.
+  Real GPU embedding + existing channel matcher/profile persistence PASS:
+  identity18 actual10s→120s namedprofile1 reused;11 clean-only crops. Shared
+  source/opening speech disclosed, not accuracy/generalization evidence.
+  identity19 actual clean120s S03 interval24.44–30.48 decoded as S01 in distinct
+  6.04s input, matched persisted profile9/name Research native S03; no relabel or
+  fabricated embedding. Same-service owned MOSS exit0/OS-dead verified before
+  GPU voice load. MOSS reload after voice measured14.874s, finalexit0.
+  Limitation:9s clean S02 interval5.83–9 failed existing embedding boundary check
+  despite tensor[1,144000]@16000 and strictsamplecount144000; retained unresolved,
+  no profile enrolled. Earlier short2.12s seed did not match120s at unchanged
+  threshold. No cause inferred from rounded error; no crop/time/model workaround.
+  All helpers/models cleaned; no production DB/env/settings/media or external
+  scan/download. Longest120s and shared-source fixtures do not prove90-minute fit,
+  general recognition accuracy or speed. Evidence/reproduction in research log.
+
+Reproduction/evidence (all new local fixtures, SQLite and logs under ignored
+backend/runtime/moss/task8; original task1/task3 evidence unchanged):
+
+- Browser: frontend `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` points to installed
+  Chrome; `npm run test:e2e -- --config F:/Projects/PorchtimeIndex/backend/runtime/moss/task8/playwright.config.cjs`.
+  e2e-full12.log, e2e-results-full12/, polling diagnostic e2e-polldiag11.log.
+  Fixture-only8000 and owned Vites5173/5175 verified by process command before
+  requests. Scratch envDir/API isolation; fake scan/process state is not downloader
+  proof. Unique full outputDirs preserve earlier failed-run evidence.
+- Actual inference: app14.py/app14.log/app14/proof.json and per-recording strict
+  raw checkpoints. Invoked backend/.venv/Scripts/python.exe with PYTHONPATH task8;
+  backend before imports, offline HF/Transformers flags. sitecustomize disables
+  dotenv, redirects paths, uses isolated SQLite and denies production data/.env.
+  Manager reuses task3 managed root with task8 IPC; private worker sanitizes env.
+- Real identity: identity18.py/log/identity18/proof.json/identity.sqlite; actual
+  cached pyannote embedding revision4db4899737a38b2d618bbd74350915aa10293cb2,
+  native CUDA model/inference. identity19.py/log/proof.json proves natural local
+  label change and persisted real profile using copied fixture SQLite. Original
+  raw MOSS checkpoints are never relabeled. Identity19 source is the exact clean
+  same-source interval used for prior profile9; this proves persistence and label
+  independence, not independent recognition accuracy. Identity18 distinct10/120
+  inputs share source/opening speech; the120s samples use other clean spans.
+- Every identity18 selected interval was checked against other native labels;
+  returned embeddings are real512D; no mixed overlapping interval enrolled.
+  Identity17 is retained failed short-seed evidence; identity15/16 diagnose the
+  rejected valid-clean EOF sample. identity19 records exact waveform dimensions
+  and float repr; the rounded exception alone does not establish its cause.
+- FFmpeg boundary diagnostic app13/normalization-diagnostic.json: fmt at12,
+  LIST at36(size26), data at70,144000samples16000Hz/mono16bit. app13 original
+  failure and exit evidence preserved. Canonicalization changes only the owned
+  IPC WAV container, retaining every decoded PCM byte and exact sample clock.
+- Checks: pytest-canonical14.log20PASS; pytest-full20.log253PASS136.10s;
+  root-ruff-canonical14.logPASS. Full backend command (backend venv/bootstrap):
+  `python -m pytest src -q`. Warning is existing TRANSFORMERS_CACHE deprecation;
+  runtime also emits existing Lightning/TF32/platform allocator notices.
+
+All owned app proof processes exited and models released; browser helper ports
+8000/5173/5175 are free. No push, deployment, installer rerun or archive completion.
+
+Timing context: initial app13 cached-environment startup/load took129.754s (model3.276s, readiness13.590s); subsequent fresh-worker app14 load14.057s (model2.055s, readiness3.390s). These include variable imports/filesystem cache overhead and are measurements, not guarantees.

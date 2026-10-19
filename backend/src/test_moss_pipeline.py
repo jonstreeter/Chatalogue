@@ -47,6 +47,41 @@ def run(harness, force=False):
     return service._process_moss_phase(video, audio, None, dict(requested_engine='moss'), force)
 
 
+def test_ffmpeg_metadata_wav_uses_canonical_pcm_ipc(harness, tmp_path):
+    import subprocess
+    from src.services.ingestion.moss_worker import validate_wav
+
+    service, _, audio, manager, _, _ = harness
+    with wave.open(str(audio)) as stream:
+        original_pcm = stream.readframes(stream.getnframes())
+    metadata_audio = tmp_path / 'metadata.wav'
+    # Popen remains real while this harness replaces pipeline subprocess.run.
+    process = subprocess.Popen([
+        service._get_ffmpeg_cmd(), '-v', 'error', '-y', '-i', str(audio),
+        '-c:a', 'pcm_s16le', '-metadata', 'title=MOSS IPC regression', str(metadata_audio),
+    ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    _, error = process.communicate()
+    assert process.returncode == 0, error.decode(errors='replace')
+    metadata_bytes = metadata_audio.read_bytes()
+    assert metadata_bytes[36:40] == b'LIST'
+    audio.write_bytes(metadata_bytes)
+    original_transcribe = manager.transcribe
+    accepted = []
+
+    def transcribe(data):
+        pcm, count, rate = validate_wav(data)
+        assert pcm == original_pcm
+        assert (count, rate) == (144001, 16000)
+        assert len(data) == 44 + len(original_pcm)
+        accepted.append(True)
+        return original_transcribe(data)
+
+    manager.transcribe = transcribe
+    _, duration = run(harness)
+    assert accepted == [True]
+    assert duration == 144001 / 16000
+
+
 def test_native_roundtrip_identity_retry(harness):
     service, video, audio, _, calls, native = harness
     segments, duration = run(harness)

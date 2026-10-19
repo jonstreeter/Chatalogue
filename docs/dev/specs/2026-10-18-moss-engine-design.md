@@ -229,10 +229,21 @@ Sources: https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize;
 https://github.com/OpenMOSS/MOSS-Transcribe-Diarize;
 https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/blob/main/pyproject.toml.
 
+### Task8 verified evidence and limits (2026-10-19)
 
-### Task8 verification resume limitation (2026-10-19)
+Full isolated browser19PASS and backend253PASS; actual app-phase9s/10s/120s
+CUDA/BF16/SDPA decode, native overlap/exact EOF correction, staged child reuse,
+verified exit before real GPU embedding, existing channel profiles/named matching
+and sequential reload measured. FFmpeg metadata WAV is canonicalized from exact
+validated PCM at the IPC boundary; strict worker validation remains unchanged.
+Research report records commands, timings, memory and evidence.
 
-Approved exact Open test selectors pass navigation. Full browser rerun stops at
-an existing absent Search-tab expectation:2 pass,1 fail,16 unrun of19 selected.
-Actual app-phase short/long inference, real cross-recording identity and GPU
-staged/sequential proof remain unrun; task8 incomplete. No Shipped claim.
+Real10s/120s fixtures share source/opening speech. An actual6.04s clean crop
+naturally changes native S03 to S01 and matches a persisted real voice profile;
+that crop shares the exact earlier profile interval. These demonstrate pipeline
+persistence/label independence, not independent recognition accuracy. One valid
+clean9s EOF sample was rejected by the existing voice crop boundary check and
+remained unresolved without enrollment; a short2.12s seed did not match120s at
+unchanged thresholds. No model, crop clock or threshold workaround was added.
+Longest actual input120s does not prove90-minute memory fit or speed. Spec stays
+In Review; no Shipped/deployment claim.

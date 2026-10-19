@@ -1,4 +1,4 @@
-# MOSS task8 verification — add-channel test-flow blocker
+# Handoff: MOSS task8 isolated verification complete
 
 **Date:** 2026-10-19
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
@@ -6,45 +6,70 @@
 
 ## Status
 
-Task8 incomplete,7/8 complete. Plan Blocked; spec not Shipped.
-Owner-approved navigation diagnosis and same-root exact Open repair completed.
-Previous baton preserved unchanged at
-archive/2026-10/2026-10-18-moss-engine-navigation-blocked.md.
+Task8 verified; 8/8 tracker tasks complete. Plan remains In progress and spec
+In Review. PLAN_COMPLETE for conductor local closeout; no push/deploy/archive or
+Shipped claim. Prior active baton retained unchanged at
+archive/2026-10/2026-10-18-moss-engine-add-channel-blocked.md.
 
-## Verification
+Owner-approved test-only Add Channel → YouTube Channel flow asserts the empty
+current URL field without creating/submitting. Actual app proof found FFmpeg
+LIST metadata rejected by strict canonical WAV IPC; conductor repacked only
+pipeline_transcribe.py/test_moss_pipeline.py. Exact validated PCM is reserialized
+with stdlib wave; strict validator, sample clocks and source audio unchanged.
 
-Instrumented clean navigation PASS874ms/load/networkidle; Google Fonts denial
-nonblocking. Earlier Vite HTTP timeouts intermittent; product root cause unproven.
-Scratch fixture delete-preview response shape and youtube synthetic source fixed
-under conductor repack; no product changes/external scan. Existing exact Open
-approval extended by conductor to channel-refresh.spec.ts,channels.spec.ts,
-video-sort-order.spec.ts,pages/ChannelsPage.ts: identical ambiguous3-link root,
-only exact:true added, scopedESLint PASS, preflight no mapped contract.
+## Next step
 
-Full frontend command: `npm run test:e2e -- --config F:/Projects/PorchtimeIndex/backend/runtime/moss/task8/playwright.config.cjs`.
-Latest open8:19selected,7PASS/1FAIL/11unrun20.5s,exit1. Navigation/tab/delete/scan
-pass. New blocker channels.spec.ts:17 expects inline https://youtube.com/@...
-input before clicking Add Channel; current Channels.tsx opens a source chooser
-then input. Failure snapshot shows Add Channel button and no URL input.
-No test-flow/product repair made. Evidence task8/e2e-open8.log,e2e-results-open8/.
-Earlier unique diag5/fixture6/fixture7 evidence retained; details in research log.
-Accidental interrupted earlier run reused resume3 outputDir after cwd error:
-3passes then manually stopped, not failure. Old resume3 screenshots overwritten;
-logs retained. Subsequent full runs unique. Owned API63584/40500 and
-Vites46652/29080 stopped; no listeners8000/5173/5175.
+Conductor local closeout: inspect task8 verification evidence in
+`docs/research/2026-10-18-moss-runtime.md`, then report PLAN_COMPLETE. No new
+implementation phase, push, installer execution or archive is authorized here.
 
-Prior closed checks reused: typecheck/rootRuff PASS; frontend lint0errors43warnings;
-isolated backend252PASS124.31s. Actual MOSS app-phase9s/10s/120s, real identity
-across recordings, clean-only enrollment, staged reuse and GPU handoff UNRUN.
-No PLAN_COMPLETE, fallback, throughput or90-minute fit claim.
+## Verification state
+
+- Scoped frontend ESLint PASS. Full installed-Chrome suite: 19 PASS, 1.3m,
+  no skips/exclusions; e2e-full12.log and unique e2e-results-full12/.
+- MOSS polling diagnostic 3 PASS,28.5s: actual status poll4.680s after ready flag.
+  Earlier total30s timeout did not reproduce; diagnostic logging removed,
+  Settings.tsx/moss.spec.ts unchanged. Installed Chrome env override needed
+  because file-level launchOptions replace config. No timeout increase.
+- Real FFmpeg LIST regression: exact PCM144001samples/16000Hz/duration and
+  canonical44byte IPC accepted. Targeted20 PASS25.18s; root Ruff PASS.
+- Full isolated backend `python -m pytest src -q`:253 PASS,1 warning,136.10s.
+  Prior frontend typecheck/full lint evidence reused; no frontend product change.
+- Actual app14 worker62348 reused9s/10s/120s:6.760/5.370/61.017s; 4/2/31 native
+  segments, words=null.9.01→9 exact EOF correction and overlaps retained.
+  Cached fresh-worker load14.057s; verified unload0.194s/exit0/processfalse.
+- Real GPU embedding/matcher/profile persistence: identity18 actual10→120 named
+  profile1 reused; all11 selected intervals pure against other native labels.
+  identity19 actual120S03 clean24.44–30.48 crop naturally decoded S01 and matched
+  persisted profile9/name Research native S03. Same-service owned MOSS exit0 and
+  OS-dead asserted before voice GPU model load; no fabricated vectors/labels.
+  Reload after voice14.874s, newworker28792 finalexit0.
+- SDD validation, whitespace and required commit hooks: recorded at commit.
+
+## Blockers
+
+None for packed task8 acceptance. Limitations:10/120 inputs share source/opening
+speech, and changed-label crop shares exact prior profile interval; no independent
+recognition accuracy claim. Longest120s does not prove90-minute fit/speed.
+A valid clean9s S02 span5.83–9 was rejected by existing embedding crop boundary
+check (tensor[1,144000]@16000; strict count144000; float repr5.83/9.0), retained
+unresolved without profile. Its cause is not inferred from rounded error text.
+Earlier2.12s seed failed to match120s at unchanged thresholds. No crop/model/time
+or threshold workaround; all failed scratch evidence retained.
+
+## Diagnosis worth keeping
+
+All actual fixtures/SQLite/IPC/evidence are task8-owned. Pre-import sitecustomize
+disables dotenv, redirects runtime/data paths, sets isolated SQLite and denies
+production data/.env. Private MOSS worker strips PYTHONPATH and uses unchanged
+cached task3 manager environment/model. Existing embedding cache revision
+4db4899737a38b2d618bbd74350915aa10293cb2 loaded on CUDA; no ML upgrades/downloads.
+Browser fixture simulates scan/process only; no production backend or external
+operations. Helpers stopped, ports8000/5173/5175 free; models/workers released.
+Baseline9 unrelated paths untouched. Original task1/task3 evidence immutable.
 
 ## Next worker prompt
 
-Resume THIS task8 phase,resume:yes. Conductor/owner decision for distinct stale
-add-channel E2E flow at channels.spec.ts:17,ChannelsPage.ts input locator. Proposed
-minimum test-only flow: click Add Channel, choose YouTube Channel, assert https://youtube.com/@channelname
-URL input and wizard controls. Preserve assertions; no product markup workaround.
-After approval/repack run scopedESLint and full19test suite, unique resolved
-outputDir/cwd before launch, stop first genuine blocker. Then remaining actual
-MOSS app-phase/identity/GPU acceptance. Keep task3 model/runtime/proofs immutable;
-bootstrap before backend imports, worker sanitized; no production settings/media.
+PLAN_COMPLETE. Do not restart task8 or repeat closed checks. Conductor may inspect
+this evidence and scoped commit for local closeout; keep plan In progress/spec
+In Review until the separate approved closeout steps. No push/deploy/archive.

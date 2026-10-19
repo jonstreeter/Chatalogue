@@ -11,7 +11,7 @@ export class ChannelsPage extends BasePage {
   constructor(page: Page) {
     super(page);
     this.heading = page.getByRole('heading', { name: 'Channels' });
-    this.addChannelInput = page.getByPlaceholder('https://youtube.com/@...');
+    this.addChannelInput = page.getByPlaceholder('https://youtube.com/@channelname', { exact: true });
     this.addChannelButton = page.getByRole('button', { name: /Add Channel/i });
     this.importButton = page.getByRole('button', { name: /Import Archive/i });
     this.channelCards = page.locator('.glass-panel');
@@ -28,6 +28,11 @@ export class ChannelsPage extends BasePage {
 
   async getChannelCount() {
     return this.channelCards.count();
+  }
+
+  async openYouTubeChannelForm() {
+    await this.addChannelButton.click();
+    await this.page.getByRole('button', { name: /YouTube Channel/ }).click();
   }
 
   async openChannel(name: string) {

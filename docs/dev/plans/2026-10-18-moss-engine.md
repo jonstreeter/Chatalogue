@@ -1,7 +1,7 @@
 # Optional MOSS Engine — Implementation Plan
 
 **Date:** 2026-10-18
-**Status:** Blocked
+**Status:** In progress
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
 
 ## Summary
@@ -46,7 +46,7 @@ runtime feasibility gate passes.
 | 5 | Add full-input transcription and atomic native-label checkpoint, duration/context rejection, provenance and retry semantics. Preserve raw clock tokens, source sample count/rate and moss-eof-v1 corrections across identity retries without cumulative normalization. Test old cache reuse, mixed-engine partial rejection, failure/cancellation and forced reprocessing. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | M | ✅ done |
 | 6 | Reuse identity/profile matching with explicit native speaker attribution and overlap-safe samples; retain standard save/cleanup. Test two recordings matching saved names, nested overlapping speakers, no clean sample and missing embedding model. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/test_moss_pipeline.py` | L | ✅ done |
 | 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: managed UI and five Chromium checks PASS |
-| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ▶ incomplete — add-channel test expects retired inline form |
+| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/test_moss_pipeline.py`, `frontend/e2e/channels.spec.ts`, `frontend/e2e/pages/ChannelsPage.ts`, research, plan and spec | M | ✅ done — isolated browser/backend and actual CUDA/identity evidence PASS |
 
 ## Test plan
 
@@ -348,3 +348,37 @@ guarantee. No review subagents or product changes for this refinement.
   preparation error (3 passes then stopped, not failure); old screenshot lost,
   original logs retained. Owned API63584/40500,Vites46652/29080 stopped; no listeners
   8000/5173/5175. No production backend/data/env or fallback.
+
+- 2026-10-19 task8 COMPLETE, **8/8 tasks verified**; plan stays In progress and
+  spec In Review pending local closeout. Owner-approved Add Channel test now opens
+  Add Channel → YouTube Channel and asserts the empty current URL field; no submit.
+  Scoped ESLint PASS. Full installed-Chrome browser suite **19 PASS**, 1.3m,
+  unique task8/e2e-results-full12; no skips/exclusions. Earlier MOSS Ready timeout
+  did not reproduce under timestamped diagnostics: status poll arrived4.680s after
+  readiness flag, scoped3 PASS28.5s. Diagnostic logging removed; no product timing,
+  Settings or MOSS test changes. Required Chrome env override retained in scratch.
+  Actual app-phase uncovered FFmpeg LIST metadata rejected by strict44-byte WAV
+  IPC. Conductor repacked only pipeline_transcribe.py/test_moss_pipeline.py:
+  validated exact PCM is reserialized with stdlib wave; strict worker unchanged.
+  Real FFmpeg LIST regression proves identical PCM144001samples/16000Hz/duration.
+  Targeted20 PASS25.18s; full isolated backend **253 PASS**,1 warning,136.10s;
+  root Ruff PASS. Prior typecheck/full frontend lint evidence reused.
+  Actual app14 CUDA/BF16/SDPA sameworker62348:9s6.760s/4segments,
+  10s5.370s/2segments,120s61.017s/31segments. Raw native overlap/words=null and
+  exact9.01→9 moss-eof-v1 correction retained. Load14.057s end-to-end; verified
+  unload0.194s/exit0/processfalse. Actual120s peakallocated2,506,159,616B,
+  peakreserved2,699,034,624B; global VRAM includes desktop/other allocations.
+  Real GPU embedding + existing channel matcher/profile persistence PASS:
+  identity18 actual10s→120s namedprofile1 reused;11 clean-only crops. Shared
+  source/opening speech disclosed, not accuracy/generalization evidence.
+  identity19 actual clean120s S03 interval24.44–30.48 decoded as S01 in distinct
+  6.04s input, matched persisted profile9/name Research native S03; no relabel or
+  fabricated embedding. Same-service owned MOSS exit0/OS-dead verified before
+  GPU voice load. MOSS reload after voice measured14.874s, finalexit0.
+  Limitation:9s clean S02 interval5.83–9 failed existing embedding boundary check
+  despite tensor[1,144000]@16000 and strictsamplecount144000; retained unresolved,
+  no profile enrolled. Earlier short2.12s seed did not match120s at unchanged
+  threshold. No cause inferred from rounded error; no crop/time/model workaround.
+  All helpers/models cleaned; no production DB/env/settings/media or external
+  scan/download. Longest120s and shared-source fixtures do not prove90-minute fit,
+  general recognition accuracy or speed. Evidence/reproduction in research log.

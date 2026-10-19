@@ -6,6 +6,7 @@ ingestion.py; see docs/ingestion-service-split.md.
 import os
 import time
 import json
+import io
 from pathlib import Path
 from sqlmodel import Session
 
@@ -48,13 +49,21 @@ class TranscribePhaseMixin:
                 if (count <= 0 or rate != 16000 or audio.getnchannels() != 1
                         or audio.getsampwidth() != 2 or count > MAX_INPUT_SECONDS * rate):
                     raise MossValidationError("MOSS requires nonempty audio of at most 90 minutes; select another engine for longer audio.")
+                pcm = audio.readframes(count + 1)
+                if len(pcm) != count * 2:
+                    raise MossValidationError("MOSS audio normalization returned incomplete PCM samples.")
+            # FFmpeg may add LIST metadata; IPC accepts only canonical PCM WAV.
+            canonical = io.BytesIO()
+            with wave.open(canonical, "wb") as audio:
+                audio.setparams((1, 2, rate, count, "NONE", "not compressed"))
+                audio.writeframes(pcm)
             self._check_job_not_paused(job_id)
             self._update_job_status_detail(job_id, "Transcribing whole input with MOSS...")
             self._release_phonon_model("before_moss_transcribe", job_id=job_id)
             self._release_whisper_model("before_moss_transcribe", job_id=job_id)
             self._release_parakeet_model("before_moss_transcribe", job_id=job_id)
             self._release_diarization_models("before_moss_transcribe", job_id=job_id)
-            reply = self._get_moss_runtime().transcribe(normalized.read_bytes())
+            reply = self._get_moss_runtime().transcribe(canonical.getvalue())
             native = validate_worker_result(reply.get("result"), count, rate)
             if not isinstance(reply.get("runtime"), dict):
                 raise MossValidationError("MOSS returned no runtime provenance.")
