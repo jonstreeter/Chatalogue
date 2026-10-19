@@ -55,7 +55,7 @@ established; new chunk behavior needs its own isolated and real verification.
 | 9 | Add sample-exact bounded chunk planning with existing VAD boundary hints and typed worker OOM/context failure classification; prove coverage and finite split semantics. | `backend/src/services/ingestion/moss_chunks.py`, `backend/src/services/ingestion/moss_worker.py`, `backend/src/services/ingestion/moss_runtime.py`, `backend/src/test_moss_chunks.py`, `backend/src/test_moss_runtime.py`, `docs/dev/contracts.json` | M | ✅ done: sample planner and typed resource failures verified |
 | 10 | Stream normalized audio through bounded requests; durably commit complete native chunks, exact offsets, source fingerprints and frontier; support adaptive resource split, cancellation/resume and legacy reuse without rejecting long recordings. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | L | ✅ done: bounded streaming and durable native chunks verified |
 | 11 | Reconstruct chunk namespaces and reconcile real channel identities without native overlap loss; verify clean enrollment, swapped labels and identity-only retry. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/test_moss_pipeline.py` | M | ✅ done: chunk identity enrollment, persistent names and retry verified |
-| 12 | Replace recording-limit and whole-input retry UI with automatic batching/resume capability; expose chunk progress and browser-verify controls, persistence and segment playback. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ☐ todo |
+| 12 | Replace recording-limit and whole-input retry UI with automatic batching/resume capability; expose chunk progress and browser-verify controls, persistence and segment playback. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: automatic batching/resume notice and isolated Chromium proof |
 | 13 | Verify isolated >90-minute coverage fixtures and real CUDA multi-chunk seams/identity/checkpoint reuse/GPU handoff; run full workflow and record measured limitations/local handoff. | `docs/research/2026-10-18-moss-runtime.md`, spec, plan, handoff; affected MOSS tests/paths only through explicit conductor repack | L | ☐ todo |
 
 ## Test plan
@@ -482,3 +482,24 @@ guarantee. No review subagents or product changes for this refinement.
   PASS; normal required hooks run at checkpoint. Deterministic embeddings prove
   identity routing/persistence, not actual voice recognition; task13 keeps real
   multi-chunk CUDA/seam proof. No production DB/media/settings or GPU inference.
+
+
+- Task 12 (2026-10-19): Settings and setup wizard now explain automatic bounded
+  chunks and retries resuming completed chunks, retaining segment-only timing,
+  local management and readiness-test limits. Removed recording-cap/whole-input
+  retry copy. Existing queue status detail/progress/badge rendering needs no code
+  change; browser fixture starts at resumed chunk3/240 of600s, then reloads at
+  chunk4/360s and verifies existing40%/60% bars. No invented chunk count or ETA.
+  Packed frontend command with installed Chrome executable environment:
+  `npm run test:e2e -- e2e/moss.spec.ts e2e/phonon-settings.spec.ts --workers=1`
+  **5 PASS**,28.8s, actual exit0. Explicit save/reload, setup/status polling,
+  pending/error/retry/unload, wizard test without save, other engine options,
+  MOSS badge and native words=null nested overlap/seek/real PCM playback pass.
+  Final screenshots under ignored `output/playwright/task12-batching-final/`
+  visually inspected (wizard capability notice, queue frontier/progress, native
+  simultaneous highlights/playback). All APIs intercepted before navigation;
+  owned Vite5175 used scratch envDir/polling; no production backend/settings/media.
+  Initial5PASS screenshot exposed missing fixture stage-start timestamp, corrected
+  with real existing field and added bar assertions; no product workaround.
+  Typecheck PASS; lint PASS with43 existing warnings. SDD/whitespace/hooks run
+  at checkpoint. Actual chunk seam/identity/GPU proof remains task13.

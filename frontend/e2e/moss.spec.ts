@@ -19,7 +19,7 @@ function audioFixture() {
 
 async function fixture(page: Page) {
   page.on('pageerror', error => console.error('Browser error:', error.message));
-  const data = { saved: { hf_token: '', transcription_engine: 'auto', setup_wizard_completed: true } as Record<string, unknown>,
+  const data = { chunkIndex: 3, completedSeconds: 240, saved: { hf_token: '', transcription_engine: 'auto', setup_wizard_completed: true } as Record<string, unknown>,
     state: 'absent', failure: '', actions: [] as Record<string, unknown>[], saves: 0, pollReady: false };
   await page.route('**/*', async route => {
     const req = route.request();
@@ -45,9 +45,12 @@ async function fixture(page: Page) {
         downloaded_bytes: 1048576, total_bytes: 2097152, error: data.failure || null,
         requested_engine: 'moss', resolved_engine: 'moss' } });
     }
-    if (path === '/jobs') return route.fulfill({ json: [{ id: 901, video_id: 1, job_type: 'process', status: 'transcribing', progress: 40,
+    if (path === '/jobs') return route.fulfill({ json: [{ id: 901, video_id: 1, job_type: 'process', status: 'transcribing', progress: Math.round(data.completedSeconds / 600 * 100),
+      status_detail: `Transcribing MOSS chunk ${data.chunkIndex} (${data.completedSeconds.toFixed(1)}/600.0s)...`,
       created_at: '2026-10-19T12:00:00', video_title: 'MOSS fixture',
-      payload_json: JSON.stringify({ transcription_engine_requested: 'moss', transcription_engine_used: 'moss' }) }] });
+      payload_json: JSON.stringify({ transcription_engine_requested: 'moss', transcription_engine_used: 'moss',
+        stage_transcribe_started_at: new Date(Date.now() - 1000).toISOString(), stage_transcribe_engine: 'moss', stage_transcribe_progress_seconds: data.completedSeconds,
+        stage_transcribe_progress_total_seconds: 600, stage_transcribe_chunk_index: data.chunkIndex }) }] });
     if (path === '/videos/1') return route.fulfill({ json: { id: 1, title: 'MOSS segment fixture', status: 'completed',
       media_source_type: 'upload', media_kind: 'audio', duration: 15, channel_id: null, upload_date: '2026-10-19T12:00:00' } });
     if (path === '/videos/1/transcript-quality') return route.fulfill({ json: { quality_score: 100, quality_profile: 'fixture', metrics: {}, reasons: [] } });
@@ -76,8 +79,9 @@ test('MOSS capability notice, read-only setup/status, failure retry, unload and 
   const engine = page.getByRole('combobox', { name: 'Transcription Engine', exact: true });
   await engine.selectOption('moss');
   const panel = page.getByRole('region', { name: 'MOSS model', exact: true });
-  await expect(panel.getByText(/segment timing only/)).toContainText('90 minutes');
-  await expect(panel.getByText(/segment timing only/)).toContainText('whole input');
+  await expect(panel.getByText(/segment timing only/)).toContainText('automatically processed in bounded chunks');
+  await expect(panel.getByText(/segment timing only/)).toContainText('Retries resume from completed chunks');
+  await expect(panel).not.toContainText(/90.minute|whole input/i);
   await expect(panel.getByText('Not installed', { exact: true })).toBeVisible();
   expect(data.saves).toBe(0);
   data.failure = 'MOSS download interrupted; reconnect and retry setup';
@@ -99,7 +103,7 @@ test('MOSS capability notice, read-only setup/status, failure retry, unload and 
   await page.reload();
   await expect(engine).toHaveValue('moss');
   await expect(panel.getByText('Ready', { exact: true })).toBeVisible();
-  await page.screenshot({ path: '../output/playwright/moss-settings.png', fullPage: true });
+  await page.screenshot({ path: '../output/playwright/task12-batching-final/moss-settings.png', fullPage: true });
   await panel.getByRole('button', { name: 'Unload MOSS model' }).click();
   await expect(panel.getByText('Unloaded', { exact: true })).toBeVisible();
   expect(data.actions.some(action => action.moss_action === 'unload')).toBe(true);
@@ -115,7 +119,9 @@ test('wizard MOSS setup polls without saving selection', async ({ page }) => {
   await page.getByRole('button', { name: 'Re-run Setup Wizard' }).click();
   await page.getByRole('button', { name: 'Get Started' }).click();
   await page.getByRole('radio', { name: /^MOSS/ }).check();
-  await expect(page.getByText(/MOSS provides segment timing only/)).toContainText('90 minutes');
+  await expect(page.getByText(/MOSS provides segment timing only/)).toContainText('automatically processed in bounded chunks');
+  await expect(page.getByText(/MOSS provides segment timing only/)).toContainText('Retries resume from completed chunks');
+  await expect(page.getByText(/MOSS provides segment timing only/)).not.toContainText(/90.minute|whole input/i);
   await expect(page.getByText('All engines support word-level timestamps.', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: 'Set up and test MOSS' }).click();
   await expect(page.getByRole('status')).toHaveText('Loading MOSS inference');
@@ -123,7 +129,7 @@ test('wizard MOSS setup polls without saving selection', async ({ page }) => {
   data.pollReady = true;
   await expect(page.getByText('Engine ready!', { exact: false })).toBeVisible({ timeout: 10000 });
   expect(data.saves).toBe(0);
-  await page.screenshot({ path: '../output/playwright/moss-wizard.png', fullPage: true });
+  await page.screenshot({ path: '../output/playwright/task12-batching-final/moss-wizard.png', fullPage: true });
   await page.getByRole('button', { name: 'Next', exact: true }).click();
   await page.getByRole('button', { name: 'Skip', exact: true }).click();
   await page.getByRole('button', { name: 'Skip', exact: true }).click();
@@ -132,10 +138,16 @@ test('wizard MOSS setup polls without saving selection', async ({ page }) => {
 });
 
 test('queue provenance and overlapping native segment seek/playback without word clocks', async ({ page }) => {
-  await fixture(page);
+  const data = await fixture(page);
   await page.goto(`${origin}/jobs`);
   await expect(page.getByText('MOSS', { exact: true }).first()).toBeVisible();
-  await page.screenshot({ path: '../output/playwright/moss-queue.png', fullPage: true });
+  await expect(page.locator('[style="width: 40%;"]').first()).toBeVisible();
+  await expect(page.getByText('Transcribing MOSS chunk 3 (240.0/600.0s)...', { exact: true }).first()).toBeVisible();
+  await page.screenshot({ path: '../output/playwright/task12-batching-final/moss-queue-resumed.png', fullPage: true });
+  data.chunkIndex = 4; data.completedSeconds = 360;
+  await page.reload();
+  await expect(page.locator('[style="width: 60%;"]').first()).toBeVisible();
+  await expect(page.getByText('Transcribing MOSS chunk 4 (360.0/600.0s)...', { exact: true }).first()).toBeVisible();
   await page.goto(`${origin}/video/1`);
   const first = page.locator('#seg-11'); const nested = page.locator('#seg-12');
   await expect(first.getByText('Alice', { exact: true })).toBeVisible();
@@ -152,7 +164,7 @@ test('queue provenance and overlapping native segment seek/playback without word
   await expect.poll(() => media.evaluate((el: HTMLAudioElement) => el.paused)).toBe(false);
   await expect(first).toHaveClass(/bg-blue-50/);
   await expect(nested).toHaveClass(/bg-blue-50/);
-  await page.screenshot({ path: '../output/playwright/moss-segment-playback.png', fullPage: true });
+  await page.screenshot({ path: '../output/playwright/task12-batching-final/moss-segment-playback.png', fullPage: true });
   await first.locator('p').click();
   await expect.poll(() => media.evaluate((el: HTMLAudioElement) => el.currentTime)).toBeLessThan(5);
 });

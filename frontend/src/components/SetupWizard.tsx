@@ -678,7 +678,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                   { value: 'auto' as const, label: 'Auto (Recommended)', desc: 'Automatically picks the best available engine' },
                   { value: 'whisper' as const, label: 'Whisper', desc: 'OpenAI Whisper — reliable, well-tested, supports many languages' },
                   { value: 'parakeet' as const, label: 'Parakeet', desc: 'NVIDIA NeMo — significantly faster transcription, English-focused' },
-                  { value: 'moss' as const, label: 'MOSS', desc: 'Multilingual — segment timing only, initial 90-minute input limit' },
+                  { value: 'moss' as const, label: 'MOSS', desc: 'Multilingual — segment timing, automatic batching' },
                   { value: 'phonon' as const, label: 'Phonon-2', desc: 'English transcription — app-managed setup, Windows NVIDIA GPU with BF16 support' },
                 ]).map(opt => (
                   <label
@@ -744,7 +744,7 @@ export function SetupWizard({ onClose, onComplete }: Props) {
                 </div>
               )}
 
-              {engine === 'moss' && <p className="mb-4 text-sm text-slate-600">MOSS provides segment timing only, without word highlighting. Initial input limit: 90 minutes; retries restart the whole input. Setup checks inference readiness, not transcription accuracy. Model unloading is available in Settings. Only saving the wizard persists your selection.</p>}
+              {engine === 'moss' && <p className="mb-4 text-sm text-slate-600">MOSS provides segment timing only, without word highlighting. Long recordings are automatically processed in bounded chunks. Retries resume from completed chunks. Setup checks inference readiness, not transcription accuracy. Model unloading is available in Settings. Only saving the wizard persists your selection.</p>}
               {engine === 'phonon' && (
                 <p className="mb-4 text-sm text-slate-600">
                   Chatalogue installs and loads Phonon automatically. Initial setup downloads a private runtime

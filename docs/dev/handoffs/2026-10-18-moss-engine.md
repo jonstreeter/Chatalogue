@@ -1,4 +1,4 @@
-# Handoff: MOSS chunk identity reconciliation complete
+# Handoff: MOSS batching UI complete
 
 **Date:** 2026-10-19
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
@@ -6,57 +6,45 @@
 
 ## Status
 
-Tasks 1–11 complete; plan remains In progress, spec In Review. Task 11 checkpoint
-subject: `fix(moss): reconcile chunk speakers through persistent voice profiles`.
-Prior task-10 baton is unchanged at
-`archive/2026-10/2026-10-18-moss-engine-chunk-checkpoints.md`.
+Tasks 1–12 complete. Plan remains In progress; spec In Review. Prior task11
+baton preserved unchanged at `archive/2026-10/2026-10-18-moss-engine-chunk-identity.md`.
 
 ## Next step
 
-Task 12: update the MOSS UI capability copy and browser verification to describe
-automatic bounded chunks and completed-chunk resume. Repack its frontend paths.
-Task 13 retains real multi-chunk CUDA/seam/recognition and full verification.
+Task13 only: repack isolated real CUDA multi-chunk seam, identity, checkpoint reuse
+and GPU handoff proof plus full verification. Read plan task13 and research report.
 
 ## Verification state
 
-Final packed command (backend cwd; DB_PROVIDER=sqlite DATABASE_URL=sqlite:// set
-before imports): `.venv/Scripts/python.exe -m pytest src/test_moss_pipeline.py src/test_speaker_loading_optimization.py src/test_transcript_diarization_rebuild.py src/test_phonon.py -q`.
-Final result and scoped Ruff/SDD/whitespace/hooks are recorded in the plan.
-Temporary SQLite/filesystem and deterministic embedding vectors exercise the
-real channel matcher, enrollment, profile persistence and transcript saves.
-No production media, settings, database or GPU inference.
+- Frontend `npx tsc -b` → PASS.
+- Frontend `npm run lint` → PASS,43 existing warnings.
+- Frontend `npm run test:e2e -- e2e/moss.spec.ts e2e/phonon-settings.spec.ts --workers=1`
+  →5PASS in28.8s, actual exit0. Installed Chrome path supplied through
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH; all API requests intercepted before navigation.
+- Final ignored screenshots: `output/playwright/task12-batching-final/`; inspected
+  queue chunk3/240s frontier40%, wizard batching/resume notice, segment overlap and
+  real PCM playback. Reload at chunk4/360s verifies60% bar. Existing queue reused.
+- SDD validate, whitespace and required commit hooks run at checkpoint.
 
 ## Blockers
 
-None for task 11. Actual multi-chunk CUDA and seam recognition remain task 13;
-these deterministic vectors do not establish recognition or embedding accuracy.
+None. Browser fixtures demonstrate UI behavior, not real chunk/seam recognition.
+Task13 retains actual CUDA evidence and full suite.
 
 ## Diagnosis worth keeping
 
-Native route detection now accepts validated moss-recording-v2 evidence as well
-as legacy moss_result. `_moss_checkpoint_segments` remains the validation and
-namespace authority; settings and stale RTTM never select native attribution.
-No reconstruction, clustering, midpoint mapping or consolidation was added.
-
-The existing in-job channel cache rejected its first enrollment because its
-empty dimension was zero. Empty cache initialization now precedes dimension
-comparison; populated caches still reject mismatched dimensions. Newly enrolled
-voices can therefore match later chunks without a DB/cache rebuild. Matching
-thresholds, channel isolation and saved names remain unchanged.
-
-Three-chunk integration coverage uses equal S01 labels for different voices,
-S01/S08 changes for one voice, swapped labels in a second recording and manual
-Host/Guest names. Native nesting/overlap, absolute clocks including final EOF,
-words=None and real transcript/file save/cleanup remain intact. Only clean spans
-enroll; fully overlapping locals stay distinct without profiles. Missing voice
-models fail before transcript replacement and preserve raw bytes in both legacy
-and v2. Identity retry calls no normalization/VAD/ASR and preserves raw local
-results/corrections byte-for-byte. Existing crop failures remain unresolved;
-no boundary/model/threshold workaround was introduced.
+Settings/wizard still carried obsolete90-minute recording cap and whole-input
+retry copy. Both now describe automatic bounded chunks and completed-chunk resume;
+segment-only timing/no word highlighting and readiness-test scope remain visible.
+Setup/status/pending/error/retry/unload and explicit persistence remain unchanged.
+Wizard testing saves nothing until completion. Existing queue progress/status and
+MOSS badge already satisfy rendering. Fixture uses real existing stage-start and
+progress fields without invented totals/ETA. Native words=null nested segments
+still seek/play with simultaneous highlights. No production settings/media/DB,
+external inference, dependencies or backend changes. Owned Vite helper cleaned up.
 
 ## Next worker prompt
 
-Task 12 only, resume:no. Repack UI files and browser checks. Owner already
-authorized tasks 9–13; no repeated intent approval is pending. Keep unrelated
-dirty baseline paths untouched. Do not start task 13, process production media,
-change dependencies, push/deploy or archive the plan.
+Task13 only, resume:no. Owner authorized tasks9–13; repack proof paths. Keep dirty
+baseline untouched. Do not push/deploy, process production recordings or claim a
+90-minute CUDA speed/accuracy guarantee. Do not mark Shipped before real proof.
