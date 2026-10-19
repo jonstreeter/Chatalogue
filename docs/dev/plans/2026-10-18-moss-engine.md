@@ -46,7 +46,7 @@ runtime feasibility gate passes.
 | 5 | Add full-input transcription and atomic native-label checkpoint, duration/context rejection, provenance and retry semantics. Preserve raw clock tokens, source sample count/rate and moss-eof-v1 corrections across identity retries without cumulative normalization. Test old cache reuse, mixed-engine partial rejection, failure/cancellation and forced reprocessing. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | M | ✅ done |
 | 6 | Reuse identity/profile matching with explicit native speaker attribution and overlap-safe samples; retain standard save/cleanup. Test two recordings matching saved names, nested overlapping speakers, no clean sample and missing embedding model. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/test_moss_pipeline.py` | L | ✅ done |
 | 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: managed UI and five Chromium checks PASS |
-| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ▶ incomplete — blocked by stale Search tab browser expectation |
+| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ▶ incomplete — browser navigation timeout before tab assertions |
 
 ## Test plan
 
@@ -313,3 +313,17 @@ guarantee. No review subagents or product changes for this refinement.
   by reused Playwright outputDir; original e2e.log survives, new failure screenshot
   and context retained. Owned API/Vites stopped and no listeners remain on
   8000/5173/5175. WIP checkpoint subject: docs(moss): checkpoint next browser blocker.
+
+- 2026-10-19 task8 resumed with owner-approved tab-list repair only:
+  channel-detail.spec.ts now visits Videos, Transcripts, Speakers, Chats, Clips.
+  Scoped ESLint PASS. Full browser command selected all19; **1 PASS/1 FAIL/17
+  unrun**,51.0s. First channel-detail test timed out navigating / before any tab
+  assertion: page.goto net::ERR_ABORTED, BasePage.ts:11,30s load timeout.
+  Root cause remains undiagnosed; no timeout/product workaround or rerun.
+  First genuine new verification blocker stops task8; real inference/identity/
+  staged reuse/GPU handoff remain unrun. Prior closed checks unchanged.
+  Evidence task8/e2e-resume3.log and unique e2e-results-resume3 preserve earlier
+  logs/assets. Fixture8000 PID67356 verified as child of owned venv launcher67052
+  before HTTP requests; Vites58848/66484 returned200. All owned services stopped;
+  netstat confirms no listeners8000/5173/5175. No production backend/data/env.
+  WIP checkpoint subject: test(moss): checkpoint approved tab repair verification.

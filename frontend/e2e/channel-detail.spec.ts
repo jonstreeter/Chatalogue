@@ -35,7 +35,7 @@ test.describe('Channel Detail', () => {
     const detail = new ChannelDetailPage(page);
 
     // Click through tabs
-    for (const tab of ['Transcripts', 'Speakers', 'Search', 'Videos']) {
+    for (const tab of ['Videos', 'Transcripts', 'Speakers', 'Chats', 'Clips']) {
       await detail.switchTab(tab);
       await page.waitForLoadState('networkidle');
     }

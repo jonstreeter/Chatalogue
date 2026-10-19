@@ -1505,3 +1505,24 @@ this phase after explicit ownership/approval of the unrelated verification fix.
 
 Exact browser command (frontend): `npm run test:e2e -- --config F:/Projects/PorchtimeIndex/backend/runtime/moss/task8/playwright.config.cjs`.
 Logs: backend/runtime/moss/task8/e2e-resume-1.log (infrastructure), e2e-resume-2.log (genuine Search-tab failure). Fixture API: `backend/.venv/Scripts/python.exe backend/runtime/moss/task8/fixture_api.py`, owned PID60876, observed loopback8000 LISTENING before rerun. Existing scratch Vite config/env retained. Synthetic fixture requests recorded in fixture-api.jsonl; no production backend started. Failed run does not prove the remaining16 browser tests or any actual MOSS app-phase requirement. No accuracy, long-input throughput or90-minute fit claim.
+
+- 2026-10-19 task8 resumed with owner-approved tab-list repair only:
+  channel-detail.spec.ts now visits Videos, Transcripts, Speakers, Chats, Clips.
+  Scoped ESLint PASS. Full browser command selected all19; **1 PASS/1 FAIL/17
+  unrun**,51.0s. First channel-detail test timed out navigating / before any tab
+  assertion: page.goto net::ERR_ABORTED, BasePage.ts:11,30s load timeout.
+  Root cause remains undiagnosed; no timeout/product workaround or rerun.
+  First genuine new verification blocker stops task8; real inference/identity/
+  staged reuse/GPU handoff remain unrun. Prior closed checks unchanged.
+  Evidence task8/e2e-resume3.log and unique e2e-results-resume3 preserve earlier
+  logs/assets. Fixture8000 PID67356 verified as child of owned venv launcher67052
+  before HTTP requests; Vites58848/66484 returned200. All owned services stopped;
+  netstat confirms no listeners8000/5173/5175. No production backend/data/env.
+  WIP checkpoint subject: test(moss): checkpoint approved tab repair verification.
+
+Read-only infrastructure review after stopped run: both Vite logs report readiness
+(2161ms/2149ms), only Node deprecation/Browserslist warnings, no EBUSY, compilation
+or crash error. API stderr/stdout empty; request log ends at audio test with no
+channel navigation requests. No evidence establishes fixture fault or product root
+cause; the failure remains an unresolved navigation timeout. Owned services were
+already cleaned after suite exit; no further request/retry was made.
