@@ -288,8 +288,9 @@ def test_failed_worker_can_be_explicitly_reloaded(owned_runtime, mode, reason):
     manager, behavior = owned_runtime
     manager.load()
     behavior.write_text(mode)
-    with pytest.raises(runtime.MossRuntimeError, match=reason):
+    with pytest.raises(runtime.MossRuntimeError, match=reason) as caught:
         manager.transcribe(_silence())
+    assert not isinstance(caught.value, runtime.MossResourceError)
     assert manager.status()["state"] == "error"
     assert not manager.status()["process_running"]
     assert not list(manager.temp_root.iterdir())
@@ -429,6 +430,124 @@ def test_output_budget_uses_remaining_context():
     result = completion_for([1, 151645], 200, 131072)
     assert result["max_new_tokens"] == 130872
     assert result["output_tokens"] == 2
+
+
+@pytest.mark.parametrize("ids,prompt", [([1], 131072), ([1, 2], 131070)])
+def test_context_exhaustion_is_typed(ids, prompt):
+    from src.services.ingestion.moss_worker import completion_for, ContextBudgetError
+    with pytest.raises(ContextBudgetError):
+        completion_for(ids, prompt, 131072)
+
+
+@pytest.mark.parametrize("ids", [[], [1], [151645, 1]])
+def test_incomplete_eos_is_not_resource_exhaustion(ids):
+    from src.services.ingestion.moss_worker import completion_for, ContextBudgetError
+    with pytest.raises(ValueError) as caught:
+        completion_for(ids, 200, 131072)
+    assert not isinstance(caught.value, ContextBudgetError)
+
+
+@pytest.mark.parametrize("ids", [[151645, 1], [1, 2, 3]])
+def test_malformed_output_does_not_hide_behind_budget(ids):
+    from src.services.ingestion.moss_worker import completion_for, ContextBudgetError
+    with pytest.raises(ValueError) as caught:
+        completion_for(ids, 131070, 131072)
+    assert not isinstance(caught.value, ContextBudgetError)
+
+
+@pytest.mark.parametrize("is_oom", [True, False])
+def test_decoder_classifies_actual_oom_class_only(monkeypatch, is_oom):
+    import torch
+    from src.services.ingestion.moss_worker import Decoder, CudaMemoryError
+    decoder = Decoder.__new__(Decoder)
+    error = (torch.cuda.OutOfMemoryError("private") if is_oom
+             else RuntimeError("CUDA out of memory context exhausted"))
+    def fail(_):
+        raise error
+    monkeypatch.setattr(decoder, "_generate", fail)
+    with pytest.raises(CudaMemoryError if is_oom else RuntimeError) as caught:
+        decoder.generate(b"")
+    assert isinstance(caught.value, CudaMemoryError) == is_oom
+
+
+@pytest.mark.parametrize("code,kind", [("cuda_oom", runtime.MossCudaOOMError),
+                                      ("context_exhausted", runtime.MossContextBudgetError),
+                                      ("decode_failed", runtime.MossRuntimeError),
+                                      ("load_failed", runtime.MossRuntimeError)])
+def test_typed_worker_reply_preserves_cleanup(owned_runtime, monkeypatch, code, kind):
+    manager, _ = owned_runtime
+    manager.load()
+    original = manager._owned.process.stdin
+    class ReplyInput:
+        def write(self, line):
+            message = json.loads(line)
+            manager._replies.put({"protocol": 1, "id": message["id"], "error": code})
+        def flush(self):
+            pass
+        def close(self):
+            original.close()
+    manager._owned.process.stdin = ReplyInput()
+    try:
+        with pytest.raises(kind) as caught:
+            manager.transcribe(_silence())
+        assert type(caught.value) is kind
+        assert not manager.status()["process_running"]
+        assert not list(manager.temp_root.iterdir())
+    finally:
+        original.close()
+
+
+def test_worker_resource_codes_are_private_to_transcription(tmp_path):
+    from types import SimpleNamespace
+    import queue
+    manager = runtime.MossRuntime(tmp_path, tmp_path / "audio")
+    manager._replies = queue.Queue()
+    class Input:
+        def write(self, line):
+            m = json.loads(line)
+            manager._replies.put({"protocol": 1, "id": m["id"], "error": "cuda_oom"})
+        def flush(self):
+            pass
+    manager._owned = SimpleNamespace(process=SimpleNamespace(stdin=Input()))
+    with pytest.raises(runtime.MossRuntimeError) as caught:
+        manager._exchange("load")
+    assert not isinstance(caught.value, runtime.MossResourceError)
+
+
+@pytest.mark.parametrize("failure,code", [("oom", "cuda_oom"),
+                                         ("context", "context_exhausted"),
+                                         ("malformed", "decode_failed"),
+                                         ("diagnostic", "decode_failed")])
+def test_worker_emits_only_typed_resource_codes(monkeypatch, tmp_path, failure, code):
+    import io
+    import torch
+    from src.services.ingestion import moss, moss_worker as worker
+    decoder = worker.Decoder.__new__(worker.Decoder)
+    decoder.metadata = {}
+    def generate(_):
+        if failure == "oom":
+            raise torch.cuda.OutOfMemoryError("private model details")
+        if failure == "context":
+            worker.completion_for([1, 2], 131070, 131072)
+        if failure == "diagnostic":
+            raise RuntimeError("CUDA out of memory context exhausted")
+        return "malformed output", worker.completion_for([1, 151645], 10, 131072)
+    monkeypatch.setattr(decoder, "_generate", generate)
+    monkeypatch.setattr(worker, "Decoder", lambda *args: decoder)
+    monkeypatch.setattr(worker, "read_pcm", lambda *args: b"\0\0")
+    monkeypatch.setitem(sys.modules, "moss", moss)
+    messages = [{"protocol": 1, "id": "load", "operation": "load"},
+                {"protocol": 1, "id": "decode", "operation": "transcribe",
+                 "audio": "owned.wav", "sample_count": 1, "sample_rate": 16000}]
+    output = io.StringIO()
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n".join(map(json.dumps, messages))))
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(sys, "argv", ["worker", "--model-dir", str(tmp_path),
+                                     "--source-dir", str(tmp_path), "--temp-root", str(tmp_path)])
+    worker.main()
+    reply = json.loads(output.getvalue().splitlines()[-1])
+    assert reply == {"protocol": 1, "id": "decode", "error": code}
+    assert "private" not in output.getvalue()
 
 
 @pytest.mark.parametrize("bad", [b"", b"bad", None])

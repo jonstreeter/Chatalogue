@@ -79,6 +79,18 @@ class MossBusyError(MossRuntimeError):
     """A model-control request must wait without stopping a healthy worker."""
 
 
+class MossResourceError(MossRuntimeError):
+    """Only this failure family permits splitting an uncommitted request."""
+
+
+class MossCudaOOMError(MossResourceError):
+    """The decoder raised a typed CUDA out-of-memory failure."""
+
+
+class MossContextBudgetError(MossResourceError):
+    """The decoder exhausted its pinned output context budget."""
+
+
 @dataclass(frozen=True)
 class InstalledMoss:
     directory: Path
@@ -430,6 +442,11 @@ class MossRuntime:
                 or reply.get("protocol") != 1 or reply.get("id") != request_id):
             raise MossRuntimeError("Moss returned an invalid worker response; retry the complete input")
         if reply.get("error"):
+            if operation == "transcribe":
+                if reply["error"] == "cuda_oom":
+                    raise MossCudaOOMError("MOSS CUDA memory exhausted for this request")
+                if reply["error"] == "context_exhausted":
+                    raise MossContextBudgetError("MOSS output context exhausted for this request")
             if reply["error"] == "invalid_input":
                 raise MossRuntimeError("Moss input must be a valid bounded 16 kHz mono PCM16 WAV")
             reason = "could not load its model" if reply["error"] == "load_failed" else "could not decode the input"
@@ -537,7 +554,7 @@ class MossRuntime:
             return MossRuntimeError(safe)
         safe = str(error) if isinstance(error, MossRuntimeError) else "Moss worker failed; check the local worker log and retry Load/Test"
         self._publish("error", safe)
-        return MossRuntimeError(safe)
+        return type(error)(safe) if isinstance(error, MossResourceError) else MossRuntimeError(safe)
 
     def load(self, *, test_existing=False, before_load=None):
         with self._operation:

@@ -48,11 +48,26 @@ def read_pcm(path, sample_count, sample_rate, temp_root):
     return pcm
 
 
+class ContextBudgetError(ValueError):
+    """The pinned context has no room left for a complete output."""
+
+
+class CudaMemoryError(RuntimeError):
+    """A decoder operation raised the actual CUDA OOM exception class."""
+
+
 def completion_for(ids, prompt, context):
     budget = context - prompt
-    if (context != 131072 or budget <= 0 or not ids or len(ids) >= budget
-            or ids[-1] != 151645 or 151645 in ids[:-1]):
-        raise ValueError("MOSS generation incomplete or context exhausted")
+    if context != 131072 or type(prompt) is not int or prompt <= 0:
+        raise ValueError("Invalid MOSS context metadata")
+    if budget <= 0:
+        raise ContextBudgetError("MOSS output context exhausted")
+    if len(ids) > budget or 151645 in ids[:-1]:
+        raise ValueError("Invalid MOSS generation")
+    if len(ids) == budget:
+        raise ContextBudgetError("MOSS output context exhausted")
+    if not ids or ids[-1] != 151645:
+        raise ValueError("MOSS generation incomplete")
     return {"complete": True, "reason": "eos", "eos_token_id": 151645,
             "terminal_token_id": ids[-1], "input_tokens": prompt,
             "output_tokens": len(ids), "max_new_tokens": budget, "context_limit": context}
@@ -85,6 +100,13 @@ class Decoder:
                          "gpu": torch.cuda.get_device_name(), "load_seconds": time.perf_counter() - started}
 
     def generate(self, pcm):
+        import torch
+        try:
+            return self._generate(pcm)
+        except torch.cuda.OutOfMemoryError:
+            raise CudaMemoryError("MOSS CUDA memory exhausted") from None
+
+    def _generate(self, pcm):
         import numpy as np
         import torch
         started = time.perf_counter()
@@ -101,7 +123,7 @@ class Decoder:
         prompt = inputs["input_ids"].shape[1]
         budget = context - prompt
         if budget <= 0:
-            raise ValueError("MOSS has no remaining output context; select another engine")
+            raise ContextBudgetError("MOSS has no remaining output context")
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             output = self.model.generate(**inputs, max_new_tokens=budget, do_sample=False)
         torch.cuda.synchronize()
@@ -161,7 +183,12 @@ def main():
             runtime = {"pid": os.getpid(), "model_loaded": model is not None, "request_count": requests,
                        **(model.metadata if model else {})}
             encoded = json.dumps({"protocol": 1, "id": request_id, "runtime": runtime, "result": result}, allow_nan=False)
-        except Exception:
+        except Exception as error:
+            if error_code == "decode_failed":
+                if isinstance(error, CudaMemoryError):
+                    error_code = "cuda_oom"
+                elif isinstance(error, ContextBudgetError):
+                    error_code = "context_exhausted"
             traceback.print_exc(file=sys.stderr)
             encoded = json.dumps({"protocol": 1, "id": request_id, "error": error_code})
         output.write(encoded + "\n")

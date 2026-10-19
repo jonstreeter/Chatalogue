@@ -51,7 +51,7 @@ established; new chunk behavior needs its own isolated and real verification.
 | 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/test_moss_pipeline.py`, `frontend/e2e/channels.spec.ts`, `frontend/e2e/pages/ChannelsPage.ts`, research, plan and spec | M | ✅ done — isolated browser/backend and actual CUDA/identity evidence PASS |
 
 
-| 9 | Add sample-exact bounded chunk planning with existing VAD boundary hints and typed worker OOM/context failure classification; prove coverage and finite split semantics. | ackend/src/services/ingestion/moss_chunks.py, ackend/src/services/ingestion/moss_worker.py, ackend/src/services/ingestion/moss_runtime.py, ackend/src/test_moss_chunks.py, ackend/src/test_moss_runtime.py, docs/dev/contracts.json | M | ☐ todo |
+| 9 | Add sample-exact bounded chunk planning with existing VAD boundary hints and typed worker OOM/context failure classification; prove coverage and finite split semantics. | ackend/src/services/ingestion/moss_chunks.py, ackend/src/services/ingestion/moss_worker.py, ackend/src/services/ingestion/moss_runtime.py, ackend/src/test_moss_chunks.py, ackend/src/test_moss_runtime.py, docs/dev/contracts.json | M | ✅ done: sample planner and typed resource failures verified |
 | 10 | Stream normalized audio through bounded requests; durably commit complete native chunks, exact offsets, source fingerprints and frontier; support adaptive resource split, cancellation/resume and legacy reuse without rejecting long recordings. | ackend/src/services/ingestion/pipeline_transcribe.py, ackend/src/services/ingestion/pipeline.py, ackend/src/test_moss_pipeline.py | L | ☐ todo |
 | 11 | Reconstruct chunk namespaces and reconcile real channel identities without native overlap loss; verify clean enrollment, swapped labels and identity-only retry. | ackend/src/services/ingestion/pipeline_diarize.py, ackend/src/services/ingestion/speaker_identity.py, ackend/src/test_moss_pipeline.py | M | ☐ todo |
 | 12 | Replace recording-limit and whole-input retry UI with automatic batching/resume capability; expose chunk progress and browser-verify controls, persistence and segment playback. | rontend/src/pages/Settings.tsx, rontend/src/components/SetupWizard.tsx, rontend/src/pages/JobQueue.tsx, rontend/e2e/moss.spec.ts | M | ☐ todo |
@@ -421,3 +421,15 @@ guarantee. No review subagents or product changes for this refinement.
   All helpers/models cleaned; no production DB/env/settings/media or external
   scan/download. Longest120s and shared-source fixtures do not prove90-minute fit,
   general recognition accuracy or speed. Evidence/reproduction in research log.
+
+- Task 9 (2026-10-19): pure next_chunk/split_chunk planner preserves exact contiguous
+  normalized frames including silence and final fractional samples for >5400s totals.
+  Initial ceiling120s comes from task8 proof; optional installed VAD sample hints
+  choose latest gaps, explicit bounded fallback otherwise. VAD invocation remains
+  task10. Only actual CUDA OOM / exhausted output budgets produce typed private
+  resource errors; malformed output, early EOS, process errors remain ordinary
+  failures. Cleanup/ID validation and strict moss-result-v1 remain intact.
+  Packed backend suite: 163 PASS (final rerun recorded in checkpoint); scoped Ruff,
+  SDD validation and git diff --check PASS. Required commit hooks run at checkpoint.
+  Initial test-double close defect corrected; no product workaround. Worker crash,
+  malformed JSON/clocks and protocol-ID failures explicitly remain non-resource.

@@ -28,6 +28,7 @@
       "summary": "Optional app-managed native MOSS runtime and validated transcript boundary.",
       "paths": [
         "backend/src/services/ingestion/moss.py",
+        "backend/src/services/ingestion/moss_chunks.py",
         "backend/src/services/ingestion/moss_runtime.py",
         "backend/src/services/ingestion/moss_worker.py",
         "backend/src/services/ingestion/moss_worker_requirements.txt"
