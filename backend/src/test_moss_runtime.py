@@ -654,3 +654,168 @@ os._exit(0)
             kernel.CloseHandle(handle)
         for stream in (process.stdin, process.stdout, process.stderr):
             stream.close()
+
+
+@pytest.fixture
+def app_moss(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from src.services.ingestion.service import IngestionService
+    from src.services.ingestion import runtime as app_runtime
+
+    service = IngestionService.__new__(IngestionService)
+    service._moss_runtime = None
+    service._moss_runtime_guard = threading.Lock()
+    calls = []
+    state = {"state": "absent", "model_loaded": False, "process_running": False}
+    def load(before_load):
+        before_load()
+        calls.append("load")
+        state.update(state="ready", model_loaded=True, process_running=True)
+    def unload(**kwargs):
+        calls.append("unload")
+        state.update(state="absent", model_loaded=False, process_running=False)
+    manager = SimpleNamespace(status=lambda: dict(state), request_load=load,
+                              unload=unload, shutdown=lambda: calls.append("shutdown"))
+    def factory(root, temp):
+        assert root == tmp_path / "runtime"
+        assert temp == tmp_path / "temp" / "moss-ipc"
+        calls.append("manager")
+        return manager
+    monkeypatch.setattr(runtime, "MossRuntime", factory)
+    monkeypatch.setattr(app_runtime, "MOSS_RUNTIME_DIR", tmp_path / "runtime")
+    monkeypatch.setattr(app_runtime, "TEMP_DIR", tmp_path / "temp")
+    monkeypatch.setattr(service, "_has_active_pipeline_gpu_work", lambda: False)
+    for name in ("phonon", "whisper", "parakeet", "diarization"):
+        monkeypatch.setattr(service, "_release_" + name + ("_models" if name == "diarization" else "_model"),
+                            lambda *a, component=name, **kw: calls.append(component))
+    return service, manager, state, calls
+
+
+def test_app_manager_is_lazy_once_status_read_only_and_load_order(app_moss, monkeypatch):
+    service, manager, state, calls = app_moss
+    monkeypatch.setenv("TRANSCRIPTION_ENGINE", "auto")
+    assert calls == []
+    assert service.test_moss_engine("status")["status"] == "idle"
+    assert calls == ["manager"]
+    response = service.test_moss_engine("load")
+    assert calls == ["manager", "phonon", "whisper", "parakeet", "diarization", "load"]
+    assert response["status"] == "ok"
+    assert "generation completed" in response["detail"]
+    assert os.environ["TRANSCRIPTION_ENGINE"] == "auto"
+    service.test_moss_engine("unload")
+    assert not state["process_running"]
+    service.shutdown_moss()
+    assert calls[-1] == "shutdown"
+
+
+@pytest.mark.parametrize("action", ["load", "unload"])
+def test_app_busy_controls_preserve_worker(app_moss, monkeypatch, action):
+    service, manager, state, calls = app_moss
+    monkeypatch.setattr(service, "_has_active_pipeline_gpu_work", lambda: True)
+    assert service.test_moss_engine(action)["status"] == "error"
+    assert calls == ["manager"]
+    with pytest.raises(runtime.MossBusyError, match="Pipeline work"):
+        service.purge_loaded_models()
+    assert calls == ["manager"]
+
+
+def test_app_error_and_release_wait_for_owned_exit(app_moss):
+    service, manager, state, calls = app_moss
+    state.update(state="error", detail="Actionable failure")
+    assert service.test_moss_engine("status")["error"] == "Actionable failure"
+    state.update(state="ready", model_loaded=True, process_running=True)
+    def unload(*, wait):
+        assert wait
+        state["process_running"] = False
+    manager.unload = unload
+    assert service._release_moss_model("before_voice")
+    assert not state["process_running"]
+
+
+def test_explicit_moss_route_never_probes_or_falls_back(app_moss, monkeypatch):
+    service, _, _, _ = app_moss
+    monkeypatch.setenv("TRANSCRIPTION_ENGINE", "moss")
+    monkeypatch.setattr(service, "_ensure_device", lambda: pytest.fail("explicit engine must not initialize host CUDA"))
+    monkeypatch.setattr(service, "_infer_language_from_text_hints", lambda _: pytest.fail("Moss does not need Whisper routing"))
+    route = service._resolve_transcription_route(object(), Path("spanish.wav"))
+    assert route["engine"] == route["requested_engine"] == "moss"
+    assert not route["multilingual_route_applied"]
+
+
+def test_settings_moss_actions_and_save_are_isolated(app_moss, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from src.routers import settings
+    from src.schemas import Settings, TranscriptionEngineTestRequest
+    service, _, _, calls = app_moss
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.setenv("TRANSCRIPTION_ENGINE", "auto")
+    monkeypatch.setattr(settings, "ENV_PATH", tmp_path / ".env")
+    monkeypatch.setattr(settings, "get_ingestion_service", lambda: service)
+    monkeypatch.setattr(settings, "_main", lambda: SimpleNamespace(configure_logging=lambda: None))
+    purges = []
+    monkeypatch.setattr(settings, "_purge_runtime_models", lambda **kw: purges.append(kw))
+    request = TranscriptionEngineTestRequest(engine="moss", moss_action="status")
+    assert settings.test_transcription_engine(request)["status"] == "idle"
+    assert not (tmp_path / ".env").exists()
+    assert os.environ["TRANSCRIPTION_ENGINE"] == "auto"
+    assert calls == ["manager"]
+    settings.update_settings(Settings(hf_token="", transcription_engine="moss"), session=None)
+    assert "TRANSCRIPTION_ENGINE='moss'" in (tmp_path / ".env").read_text()
+    assert settings.get_settings().transcription_engine == "moss"
+    assert purges == [{"reason": "settings_updated"}]
+
+
+
+def test_voice_loading_stops_moss_before_ml_initialization(app_moss, monkeypatch):
+    service, _, _, _ = app_moss
+    class ExitNotConfirmed(RuntimeError):
+        pass
+    def refuse(*args, **kwargs):
+        raise ExitNotConfirmed()
+    monkeypatch.setattr(service, "_release_moss_model", refuse)
+    with pytest.raises(ExitNotConfirmed):
+        service._load_models()
+
+
+def test_app_shutdown_moss_runs_after_phonon_failure(monkeypatch, tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    from src import main
+    calls = []
+    def phonon():
+        calls.append("phonon")
+        raise RuntimeError("simulated shutdown failure")
+    fake = SimpleNamespace(shutdown_phonon=phonon, shutdown_moss=lambda: calls.append("moss"))
+    for name in ("cleanup_orphaned_active_jobs", "cleanup_orphaned_active_videos",
+                 "cleanup_orphaned_channel_syncs", "process_queue", "process_diarize_queue",
+                 "process_funny_queue", "process_youtube_queue", "process_clip_queue",
+                 "prefetch_queue_audio", "monitor_channels_loop"):
+        setattr(fake, name, lambda *args: None)
+    monkeypatch.setattr(main, "IngestionService", lambda: fake)
+    monkeypatch.setattr(main, "create_db_and_tables", lambda: None)
+    monkeypatch.setattr(main, "BACKEND_INSTANCE_LOCK_PATH", tmp_path / "app.lock")
+    monkeypatch.setattr(main, "BACKEND_INSTANCE_INFO_PATH", tmp_path / "app.json")
+    monkeypatch.setattr(main.atexit, "register", lambda fn: None)
+    monkeypatch.setattr(main, "ingestion_service", None)
+    monkeypatch.setattr(main, "worker_threads", {})
+    monkeypatch.setattr(main, "prefetch_thread", None)
+    monkeypatch.setattr(main, "backend_instance_lock", None)
+    async def run():
+        async with main.lifespan(main.app):
+            pass
+    asyncio.run(run())
+    assert calls == ["phonon", "moss"]
+    assert not (tmp_path / "app.json").exists()
+
+
+
+def test_retained_moss_is_not_evicted_for_its_own_vram(app_moss, monkeypatch):
+    service, manager, state, _ = app_moss
+    service._moss_runtime = manager
+    state.update(state="ready", model_loaded=True, process_running=True)
+    service.device = "cuda"
+    monkeypatch.setattr(service, "_cuda_memory_snapshot", lambda: {
+        "free": 4 * 1024**3, "total": 32 * 1024**3, "reserved": 0, "allocated": 0})
+    monkeypatch.setattr(service, "_upsert_job_payload_fields", lambda *a: None)
+    monkeypatch.setattr(service, "purge_loaded_models", lambda **kw: pytest.fail("resident child is intentional"))
+    service._maybe_recover_cuda_headroom(8 * 1024**3)

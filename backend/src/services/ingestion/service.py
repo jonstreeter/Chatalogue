@@ -81,6 +81,8 @@ class IngestionService(
         self.device = None
         self.whisper_model = None
         self.parakeet_model = None
+        self._moss_runtime = None
+        self._moss_runtime_guard = threading.Lock()
         self._phonon_runtime = None
         self._phonon_runtime_guard = threading.Lock()
         self.diarization_pipeline = None
@@ -178,6 +180,7 @@ class IngestionService(
         # Recheck after a potentially long first install, before releasing host models.
         if self._has_active_pipeline_gpu_work():
             raise PhononBusyError("Pipeline work is active; test Phonon when it finishes")
+        self._release_moss_model("before_phonon_test")
         self._release_whisper_model("before_phonon_test")
         self._release_parakeet_model("before_phonon_test")
         self._release_diarization_models("before_phonon_test")
@@ -202,6 +205,68 @@ class IngestionService(
             status = "error"
             error = error or state.get("detail")
         return {**state, "status": status, "requested_engine": "phonon", "resolved_engine": "phonon",
+                "device": runtime_info.get("device"), "error": error}
+
+    def _get_moss_runtime(self):
+        from . import runtime
+        from .moss_runtime import MossRuntime
+        with self._moss_runtime_guard:
+            if self._moss_runtime is None:
+                self._moss_runtime = MossRuntime(runtime.MOSS_RUNTIME_DIR, runtime.TEMP_DIR / "moss-ipc")
+            return self._moss_runtime
+
+    def _release_moss_model(self, reason: str = "", job_id: int = None, *, wait=True):
+        manager = getattr(self, "_moss_runtime", None)
+        if manager is None:
+            return False
+        state = manager.status()
+        if wait and state.get("state") == "installing" and not state.get("process_running"):
+            return False  # CPU-only setup must not block existing GPU engines.
+        loaded = state["model_loaded"]
+        manager.unload(wait=wait)
+        if loaded:
+            log(f"Released Moss worker from GPU memory ({reason}).")
+        return loaded
+
+    def shutdown_moss(self):
+        manager = getattr(self, "_moss_runtime", None)
+        if manager is not None:
+            manager.shutdown()
+
+    def _prepare_moss_test(self):
+        from .moss_runtime import MossBusyError
+        # Recheck after a potentially long first install, before releasing host models.
+        if self._has_active_pipeline_gpu_work():
+            raise MossBusyError("Pipeline work is active; test Moss when it finishes")
+        self._release_phonon_model("before_moss_test")
+        self._release_whisper_model("before_moss_test")
+        self._release_parakeet_model("before_moss_test")
+        self._release_diarization_models("before_moss_test")
+
+    def test_moss_engine(self, action="load"):
+        from .moss_runtime import MossRuntimeError
+        manager = self._get_moss_runtime()
+        error = None
+        try:
+            if action == "load":
+                if self._has_active_pipeline_gpu_work():
+                    raise MossRuntimeError("Pipeline work is active; test Moss when it finishes")
+                manager.request_load(before_load=self._prepare_moss_test)
+            elif action == "unload":
+                if self._has_active_pipeline_gpu_work():
+                    raise MossRuntimeError("Pipeline work is active; unload Moss when it finishes")
+                manager.unload()
+        except MossRuntimeError as problem:
+            error = str(problem)
+        state = manager.status()
+        runtime_info = state.get("runtime") or {}
+        status = "ok" if state["state"] == "ready" else "loading" if state["state"] in {"installing", "loading", "busy"} else "idle"
+        if error or state["state"] == "error":
+            status = "error"
+            error = error or state.get("detail")
+        if state["state"] == "ready" and not error:
+            state["detail"] = "Moss inference is ready; generation completed. Readiness does not establish silence transcription accuracy."
+        return {**state, "status": status, "requested_engine": "moss", "resolved_engine": "moss",
                 "device": runtime_info.get("device"), "error": error}
 
     def get_pipeline_focus_mode(self) -> Literal["transcribe", "diarize"]:

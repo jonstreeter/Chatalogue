@@ -1,82 +1,69 @@
-# MOSS managed worker — task 3 handoff
+# MOSS app lifecycle — task 4 handoff
 
 **Date:** 2026-10-19
-**Plan:** `docs/dev/plans/2026-10-18-moss-engine.md`
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
-**State:** Task 3 complete; 3/8. Plan remains In progress; task 4 awaits owner Do next.
+**Plan:** `docs/dev/plans/2026-10-18-moss-engine.md`
 
-## Completed
+## Status
 
-Added `moss_runtime.py`, standalone `moss_worker.py`, exact tested dependency
-wheel lock and isolated runtime tests. Private immutable model/helper/license
-snapshots, verified wheel/model caches, interprocess setup serialization,
-staged manifest publication and interrupted-install recovery. Setup and model
-workers use unchanged `OwnedPhononProcess`; the actual interpreter handshakes
-its PID before setup commands, with verified owned exit on cancellation.
-No generic engine framework or shared Phonon edits.
+Task 4 complete; 4/8. Checkpoint commit subject:
+`feat(moss): wire app lifecycle and explicit engine controls`.
+Plan remains In progress; task 5 awaits owner Do next.
 
-One serialized versioned JSONL worker; async observable load, read-only status,
-busy unload refusal, shutdown/setup race prevention, parent-exit cleanup,
-sample-exact canonical WAV validation and 5400-second rejection. CUDA BF16 SDPA,
-remaining-context generation budget, real completion metadata and independent
-strict result validation. `transcribe(audio_bytes)` returns sibling `result`
-and `runtime` objects: provenance stays outside `moss-result-v1`.
+One lazy manager per service under backend/runtime/moss and app temp/moss-ipc.
+Settings supports explicit moss selection and status/load/unload actions. Status
+never sets up/downloads/loads; Test does not save selection or enqueue media.
+Ready describes complete-generation inference readiness, never silence accuracy.
+Existing auto/default behavior is preserved. Explicit multilingual MOSS bypasses
+Whisper language probing and rerouting. Full-input processing is task 5.
 
-## Verification and evidence
+MOSS load releases Phonon/Whisper/Parakeet/voice models; voice-model load stops
+MOSS before ML initialization and waits for owned exit. Other GPU loaders also
+release MOSS. Busy user load/unload/manual purge refuses pipeline work; resident
+MOSS is exempt from global free-VRAM-drop recovery. App shutdown independently
+attempts MOSS cleanup even if Phonon cleanup fails.
 
-- Post-pin SQLite-isolated `python -m pytest src/test_moss_runtime.py src/test_moss.py -q`
-  from backend: **110 PASS** (25.66s). Includes real Windows venv child/parent
-  exit and setup cancellation with fake model workers; no production data/jobs.
-- Scoped Ruff PASS; SDD validation and diff whitespace checked at checkpoint.
-- Actual managed installer and real GPU load/decode/unload PASS. Published
-  version `214ed56931e0623b6d49672627c2336d0db877566235622c1b45a5e1d5f984ff`.
-  Worker19972 / launcher48444, RTX5090, Torch2.10.0+cu128, CUDA12.8, BF16 SDPA.
-  Retained 144000-sample fixture: four segments/three overlaps, 200/108 tokens,
-  EOS151645, budget130872, exact index3 raw9.01→9 correction; independent
-  backend validation PASS. Load3.575s / fixture decode6.922s.
-- Actual interpreter exit verified; launcher0, handles cleared, temp audio empty.
-  Global VRAM3659→6059→3647MiB has unrelated-desktop caveat. Local peak
-  allocated/reserved1,874,400,256/1,952,448,512 bytes.
-- Offline verified installed-file/67-wheel reuse PASS (5.115s), zero downloader
-  or subprocess calls, no model load. This is cached reuse, not a second reinstall.
-- Initial universal SoundFile wheel failed the native gate before publishing any
-  manifest. Corrected same-version Windows wheel passed normal staged setup.
-  Failed/corrected measured runs2009.542/1075.370s exclude preparatory cache copies.
+## Next step
 
-Full task-3 evidence and commands: `docs/research/2026-10-18-moss-runtime.md`.
-Ignored evidence/scripts remain under `backend/runtime/moss/task3/`, including
-`managed-proof-final.json`, `prove-final.py`, `offline-proof.json`, setup/worker
-logs and measured installer I/O snapshots. Original task-1 environment/model/source
-were read only. Model/source caches were seeded from individually verified bytes;
-Torch was actually downloaded. No accuracy claim or production integration.
+Obtain the task-5 context pack and preflight its paths. Open
+`backend/src/services/ingestion/pipeline_transcribe.py` for full-input routing and
+atomic native-label checkpoint/retry work; do not begin task 6 identity or task 7 UI.
 
-## Important next-phase boundaries
+## Verification state
 
-Readiness is a real **complete-generation smoke probe**, not validated silence
-transcription. Actual one-second silence produced a 23-token hallucinated apology
-without a terminal clock. `runtime.readiness_probe` retains the raw output and
-completion; future Load/Test API/UI must describe inference readiness and must
-not claim a valid silence transcript. Real transcription still rejects malformed
-output strictly. Preserve raw token/clock/correction evidence for task 5.
+Packed SQLite suite, scoped Ruff, SDD validation, whitespace and commit gates
+are recorded in the task-4 plan verification log. All controls/settings tests use
+fake managers, temporary .env and fixture environment/DB; shutdown uses a scratch
+backend lock and no-op workers. No production settings/jobs/media or GPU benchmark
+was used. Actual app-phase CUDA handoff remains task 8; browser controls task 7.
 
-Task 4 is next: app manager/GPU lifecycle, settings actions and explicit multilingual
-routing. No task-4 app/settings/pipeline/UI changes have started. Existing defaults,
-engines, DB schema, voice identities and production media/jobs remain unchanged.
-No push, deploy, installation refresh or archive closeout was performed.
+## Blockers
 
-## Workspace
+None. No push, deployment, installer refresh or final archive closeout performed.
 
-Same main checkout; no new worktree or stashes. Phase commit contains only the
-task-3 allowlist plus this baton and archived parser baton. Unrelated existing
-dirty docs/tooling remain untouched: `docs/dev/README.md`, `.kilo/`,
-`docs/CONSTITUTION.md`, `docs/dev/audits/`, the ASR handoff, semantic-search
-plan/spec, tech-debt workflow and `docs/templates/`. Do not stage or revert them.
+## Diagnosis worth keeping
 
-## Next worker prompt
+Task-3 readiness remains complete-generation smoke only: one-second silence
+produced a malformed 23-token hallucinated apology. Raw evidence remains under
+runtime.readiness_probe; actual transcription strictly validates moss-result-v1.
+MossRuntime.transcribe returns sibling result and runtime/provenance objects.
+Preserve raw decimal tokens, exact rational source duration and moss-eof-v1
+correction evidence; never cumulatively renormalize on checkpoint retries.
 
-Resume the MOSS plan at task 4 only after owner Do next. Run session status and
-contract preflight for that phase; read its authorities. Reuse the verified
-managed runtime and evidence above. Keep raw strict result separate from runtime
-provenance; readiness smoke semantics and segment-only/90-minute capability
-notices are explicit. Do not re-run the closed feasibility/timing benchmarks or
-change pinned ML dependencies. Obtain a fresh task-4 context pack and allowlist.
+Task 5 must add whole-input (<=5400s) transcription and atomic completed raw
+checkpoint, reject mixed-engine partials, preserve old complete-cache reuse,
+provenance and native speaker labels, and honor forced retranscription. Task 6
+owns identity matching/overlap-safe samples and standard save/cleanup. No DB schema
+change, generic engine framework, default change, pin/dependency change or benchmark
+rerun. Existing task-3 GPU/process proof is archived in the managed-worker baton;
+source evidence remains docs/research/2026-10-18-moss-runtime.md and ignored runtime.
+
+## Workspace and next worker rules
+
+Same main checkout; no new worktree or stash. Preserve unrelated dirt:
+docs/dev/README.md, .kilo/, docs/CONSTITUTION.md, docs/dev/audits/, ASR handoff,
+semantic-search plan/spec, tech-debt workflow and docs/templates/. Stage explicit
+phase paths only, inspect cached names and committed names, use required hooks;
+no bypass, push or deployment. Get a fresh phase allowlist before edits. Run
+session status and preflight; read returned contracts/refinements in order.
+Next worker resumes task 5 only after owner Do next; no task-5 product edits exist.

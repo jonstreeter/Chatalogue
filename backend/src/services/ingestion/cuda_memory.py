@@ -884,6 +884,10 @@ class CudaMemoryMixin:
         and allow Parakeet retries without needing a full machine reboot.
         """
         # Check the owned worker first: a busy purge must not alter competing models.
+        if reason in {"manual", "manual_restart", "system_restart", "system_update", "settings_updated"} and self._has_active_pipeline_gpu_work():
+            from .moss_runtime import MossBusyError
+            raise MossBusyError("Pipeline work is active; purge models when it finishes")
+        had_moss = self._release_moss_model(reason, wait=False)
         had_phonon = self._release_phonon_model(reason, wait=False)
         had_whisper = self.whisper_model is not None
         had_parakeet = self.parakeet_model is not None
@@ -916,6 +920,7 @@ class CudaMemoryMixin:
         self._record_cuda_health_event(f"purge_loaded_models:{reason}")
 
         return {
+            "purged_moss": had_moss,
             "purged_phonon": had_phonon,
             "purged_whisper": had_whisper,
             "purged_parakeet": had_parakeet,
@@ -947,7 +952,9 @@ class CudaMemoryMixin:
         recover = False
         reason_bits = []
         phonon = getattr(self, "_phonon_runtime", None)
-        retained_worker = bool(phonon and phonon.status().get("model_loaded"))
+        moss = getattr(self, "_moss_runtime", None)
+        retained_worker = bool((phonon and phonon.status().get("model_loaded"))
+                               or (moss and moss.status().get("model_loaded")))
         # A known resident child owns its weights/graphs independently of the host
         # allocator. Global free-memory drop alone must not evict it after each job.
         # Host reserved/allocated checks below still apply without altered thresholds.

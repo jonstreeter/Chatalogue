@@ -1146,7 +1146,7 @@ class PipelineFocusUpdate(BaseModel):
 
 class Settings(BaseModel):
     hf_token: str
-    transcription_engine: str = "auto"  # auto | whisper | parakeet | phonon
+    transcription_engine: str = "auto"  # auto | whisper | parakeet | phonon | moss
     phonon_url: str = Field(default="http://127.0.0.1:8010", deprecated=True, description="Compatibility only; ignored by the app-owned engine")
     phonon_api_key: str = Field(default="", deprecated=True, description="Compatibility only; ignored and never returned")
     phonon_request_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
@@ -1224,6 +1224,7 @@ class TranscriptionEngineTestRequest(BaseModel):
     phonon_url: Optional[str] = Field(default=None, deprecated=True, description="Ignored; Phonon is managed locally")
     phonon_api_key: Optional[str] = Field(default=None, deprecated=True, description="Ignored; Phonon is managed locally")
     phonon_action: Literal["status", "load", "unload"] = "load"
+    moss_action: Literal["status", "load", "unload"] = "load"
 
 
 class YouTubeDataApiTestRequest(BaseModel):

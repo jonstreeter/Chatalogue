@@ -211,7 +211,7 @@ def get_settings():
 def update_settings(settings: Settings, session: Session = Depends(get_session)):
     """Update settings and reload models"""
     normalized_transcription_engine = (getattr(settings, "transcription_engine", "auto") or "auto").strip().lower()
-    if normalized_transcription_engine not in {"auto", "whisper", "parakeet", "phonon"}:
+    if normalized_transcription_engine not in {"auto", "whisper", "parakeet", "phonon", "moss"}:
         normalized_transcription_engine = "auto"
     normalized_whisper_backend = (getattr(settings, "whisper_backend", "faster_whisper") or "faster_whisper").strip().lower().replace("-", "_")
     if normalized_whisper_backend not in {"faster_whisper", "insanely_fast_whisper"}:
@@ -389,6 +389,10 @@ def update_settings(settings: Settings, session: Session = Depends(get_session))
 @router.post("/settings/test-transcription-engine")
 def test_transcription_engine(request: TranscriptionEngineTestRequest):
     engine = (request.engine or os.getenv("TRANSCRIPTION_ENGINE") or "auto").strip().lower()
+    if engine == "moss":
+        if not get_ingestion_service():
+            raise HTTPException(status_code=503, detail="Ingestion service unavailable")
+        return get_ingestion_service().test_moss_engine(request.moss_action)
     if engine == "phonon":
         if not get_ingestion_service():
             raise HTTPException(status_code=503, detail="Ingestion service unavailable")

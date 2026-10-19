@@ -668,6 +668,7 @@ class TranscriptionEngineMixin:
 
         self._ensure_device()
         if self.device == "cuda":
+            self._release_moss_model("before_whisper", job_id=job_id)
             self._release_phonon_model("before_whisper", job_id=job_id)
         model_size = str(model_size_override or os.getenv("TRANSCRIPTION_MODEL", "tiny")).strip() or "tiny"
         backend_info = self._resolve_whisper_backend(backend_override)
@@ -889,6 +890,7 @@ class TranscriptionEngineMixin:
     def _load_parakeet_model(self, job_id: int = None):
         self._ensure_device()
         if self.device == "cuda":
+            self._release_moss_model("before_parakeet", job_id=job_id)
             self._release_phonon_model("before_parakeet", job_id=job_id)
         if self.device == "cuda":
             self._record_cuda_health_event("pre_parakeet_load", job_id=job_id)
@@ -2080,8 +2082,9 @@ class TranscriptionEngineMixin:
                     pass
 
     def _select_transcription_engine(self):
-        if (os.getenv("TRANSCRIPTION_ENGINE") or "").strip().lower() == "phonon":
-            return "phonon"
+        explicit = (os.getenv("TRANSCRIPTION_ENGINE") or "").strip().lower()
+        if explicit in {"phonon", "moss"}:
+            return explicit
         self._ensure_device()
         pref = (os.getenv("TRANSCRIPTION_ENGINE") or "auto").strip().lower()
         if pref not in {"auto", "whisper", "parakeet"}:
@@ -2341,6 +2344,8 @@ class TranscriptionEngineMixin:
             "operational_route_applied": False,
             "operational_route_reason": None,
         }
+        if requested_engine == "moss":
+            return route
         text_hint = self._infer_language_from_text_hints(video)
         detected_language = self._normalize_language_code(text_hint.get("language"))
         detected_confidence = float(text_hint.get("confidence") or 0.0)
@@ -2406,6 +2411,8 @@ class TranscriptionEngineMixin:
         return route
 
     def test_transcription_engine(self, requested_engine: str = "auto", whisper_backend_override: str | None = None) -> dict:
+        if (requested_engine or "").strip().lower() == "moss":
+            return self.test_moss_engine()
         if (requested_engine or "").strip().lower() == "phonon":
             return self.test_phonon_engine()
         self._ensure_device()
@@ -2523,6 +2530,7 @@ class TranscriptionEngineMixin:
             return response
 
     def _load_models(self, job_id: int = None, load_transcription_model: bool = False):
+        self._release_moss_model("before_diarization_models", job_id=job_id)
         import torch
         import warnings
         from huggingface_hub import snapshot_download

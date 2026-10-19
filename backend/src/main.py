@@ -158,6 +158,11 @@ async def lifespan(app: FastAPI):
         except Exception:
             logging.getLogger(__name__).exception("Could not confirm Phonon shutdown")
         try:
+            if ingestion_service is not None:
+                ingestion_service.shutdown_moss()
+        except Exception:
+            logging.getLogger(__name__).exception("Could not confirm Moss shutdown")
+        try:
             if monitor_stop_event is not None:
                 monitor_stop_event.set()
         except Exception:

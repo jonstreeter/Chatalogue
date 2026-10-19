@@ -42,7 +42,7 @@ runtime feasibility gate passes.
 | 1 | Prove native Windows CUDA load/decode with pinned MOSS source/model in an isolated environment; record dependency pins, parse completeness, overlapping example, cold/warm timing, VRAM and process exit. Reuse existing proof and rerun retained overlap fixture under spec's moss-eof-v1 rule, retaining raw clocks and correction evidence. Stop on failure before task 2. | `docs/research/2026-10-18-moss-runtime.md`, ignored scratch runtime | M | ✅ done: separate moss-eof-v1 proof PASS; retained runtime evidence complete |
 | 2 | Record approved architecture/registry mapping; implement overlap-aware parser/result validation and complete-generation checks with malformed/nested-clock tests, exact moss-eof-v1 boundary/rejection tests and backend validation of raw correction evidence. | `docs/dev/adr/ADR-0002-moss-managed-engine.md`, `docs/dev/contracts.json`, `backend/src/services/ingestion/moss.py`, `backend/src/test_moss.py` | M | ✅ done: strict pure parser/backend evidence boundary; 63 tests PASS |
 | 3 | Add isolated managed installer/worker using task-1 pins, process ownership, observable setup and offline cache; test concurrent setup, interruption, busy unload, worker death and parent-exit cleanup. | `backend/src/services/ingestion/moss_runtime.py`, `backend/src/services/ingestion/moss_worker.py`, `backend/src/services/ingestion/moss_worker_requirements.txt`, `backend/src/services/ingestion/phonon_process.py`, `backend/src/test_moss_runtime.py` | L | ✅ done: managed installation/worker, 110 isolated tests and real inference/exit proof PASS |
-| 4 | Wire manager/GPU lifecycle, settings engine-test actions and explicit multilingual MOSS route; verify no default change or production job creation. | `backend/src/services/ingestion/service.py`, `backend/src/services/ingestion/runtime.py`, `backend/src/services/ingestion/cuda_memory.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/main.py`, `backend/src/schemas.py`, `backend/src/routers/settings.py`, `backend/src/test_moss_runtime.py` | M | ☐ todo |
+| 4 | Wire manager/GPU lifecycle, settings engine-test actions and explicit multilingual MOSS route; verify no default change or production job creation. | `backend/src/services/ingestion/service.py`, `backend/src/services/ingestion/runtime.py`, `backend/src/services/ingestion/cuda_memory.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/main.py`, `backend/src/schemas.py`, `backend/src/routers/settings.py`, `backend/src/test_moss_runtime.py` | M | ✅ done: app lifecycle/settings/routing; 193 isolated tests PASS |
 | 5 | Add full-input transcription and atomic native-label checkpoint, duration/context rejection, provenance and retry semantics. Preserve raw clock tokens, source sample count/rate and moss-eof-v1 corrections across identity retries without cumulative normalization. Test old cache reuse, mixed-engine partial rejection, failure/cancellation and forced reprocessing. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | M | ☐ todo |
 | 6 | Reuse identity/profile matching with explicit native speaker attribution and overlap-safe samples; retain standard save/cleanup. Test two recordings matching saved names, nested overlapping speakers, no clean sample and missing embedding model. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/test_moss_pipeline.py` | L | ☐ todo |
 | 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ☐ todo |
@@ -125,6 +125,16 @@ policy is derived from the recorded fixture failure, not an upstream precision
 guarantee. No review subagents or product changes for this refinement.
 
 ## Verification log
+
+- 2026-10-19 task 4 PASS, 4/8 complete. One lazy app MOSS manager, private
+  runtime/temp paths, independent shutdown, competing GPU/voice handoff, busy
+  controls/manual purge and retained-worker allocator recovery. Explicit MOSS
+  settings/actions and multilingual route preserve defaults and avoid Whisper
+  probing. Ready describes inference smoke completion, never silence accuracy.
+  Packed SQLite suite (backend venv, five named test files): **193 PASS**, one
+  existing pyannote warning, 115.79s; no production settings/jobs/media or actual
+  GPU models. Scoped Ruff, SDD validation and diff whitespace PASS. Actual
+  app-phase GPU evidence remains task 8; browser controls remain task 7.
 
 - 2026-10-19 task 3 PASS, 3/8 complete. Separate hash-pinned private installer,
   source/model snapshots, Windows native SoundFile wheel, staged publication,
