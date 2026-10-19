@@ -30,6 +30,14 @@ authorized by this phase.
   exact240s coverage, durable committed interruption/resume, strict native
   completion/offset/EOF evidence. New output65 turns has no native overlap;
   retained actual9s overlap proof and v2 fixture regressions cover overlap separately.
+- Required continuous-speech fallback seam follow-up → PASS. Explicit optional
+  VAD-unavailable fault injection on rotated cached speech; actual CUDA requests
+  120s/5s in child 61544, exact frames 0–1920000–2000000, 30 native turns, strict
+  EOS/context and final 5.01→5 EOF correction. Boundary source samples are intact
+  inside an observed speech turn. Adjacent text shows changed continuation
+  wording; recognition/timing accuracy remains unproven. No obvious whole-turn
+  replay, text deduplication or relaxed validation. Worker exit0/OS absence
+  verified. Evidence task13/forced1/, forced1.log/.exit; no suite/identity reruns.
 - Real CUDA identity →65 saved rows/19 profiles;22 clean-only crops.
   Equal local labels route to different people; changed local labels reuse the
   same real profile. OS worker absence verified before voice-model GPU load.
@@ -59,6 +67,13 @@ cuts are labeled vad_gap/vad_gap/eof, with no fallback. No forced continuous-spe
 cut accuracy, lossless recognition, independent voice accuracy,90-minute CUDA
 throughput or memory guarantee follows. Over90-minute coverage is instrumented
 inference with real normalization, not a90-minute real model run.
+
+Conductor review after 622e7f437 correctly identified that the initial 240s proof
+used VAD gaps only. The separate forced-speech fallback proof above closes the
+spec's remaining real seam verification requirement. It uses a 125s rotated source
+whose 120s boundary maps to original 27s inside speech, with byte-identical source
+PCM across the seam. Explicit VAD-unavailable injection affects only the optional
+hint function; all ASR and native validation remain real and unchanged.
 
 Initial scratch `proof.py` used raw.sample_count instead of moss_source.sample_count
 after successful final publication. Original script/log retained; corrected

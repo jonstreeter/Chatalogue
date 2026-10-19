@@ -531,3 +531,20 @@ guarantee. No review subagents or product changes for this refinement.
   in research; no dependencies/threshold changes. SDD/whitespace and normal commit
   hooks run at checkpoint. Plan remains In progress/spec In Review for local
   closeout; no push/deploy/installer rerun or feature archive performed.
+
+- Task 13 required proof follow-up (2026-10-19): conductor review found that
+  initial real cuts were all VAD gaps, leaving the spec's continuous-speech seam
+  proof open. Closed with a 125s rotated cached-speech fixture: original second 27
+  lies inside retained real speech 24.44–30.48, and PCM across the forced boundary
+  is byte-identical to the original. Explicit optional-VAD-unavailable fault
+  injection exercises the existing fallback, not synthetic VAD predictions.
+  Two actual CUDA calls in child 61544 own 0–1920000–2000000 frames, 120s/5s,
+  reasons vad_unavailable/eof. Strict EOS/context, 30 native turns, raw local
+  clocks/namespaces/absolute offsets/words=None and final 5.01→5 correction PASS.
+  Adjacent text splits a sentence and changes continuation wording; no obvious
+  whole-turn replay. Recognition/timing accuracy remains unproven and no text
+  deduplication or validation relaxation occurred. Model calls 51.884/3.830s,
+  actual worker exit0/OS absence confirmed. Evidence task13/forced1/ and
+  forced1.log/.exit. No product/identity changes; prior 316 backend/19 browser
+  passes remain closed. SDD/whitespace/normal hooks run for the separate evidence
+  commit; 622e7f437 is not amended. Task 13 and all 13 tasks are now fully verified.

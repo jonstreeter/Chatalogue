@@ -1754,3 +1754,59 @@ before terminating only68076/41328/63900/47488. No listeners remain on fixture
 ports8000/5173/5175. No production DB/env/settings/media, external processing,
 push, deployment, installer rerun or feature archive. Plan remains In progress
 and spec In Review pending user-directed local closeout.
+
+### Required continuous-speech fallback seam — follow-up proof
+
+Conductor review identified a required proof gap in the initial Task 13 evidence:
+both real 240s cuts were VAD gaps. The spec also requires real-audio verification
+and disclosure for a cut during continuous speech. The following closes that
+specific gap; previously passed regression and identity checks were not repeated.
+
+`task13/forced_seam.py` uses the same pre-import isolation and cached private
+manager, with new evidence under `task13/forced1/` and `forced1.log`/`.exit`.
+It rotates the cached 120s PCM at original second 27, then appends original
+seconds 27–32, yielding 125s / 2,000,000 frames at 16 kHz. The forced boundary at
+new second 120 is therefore original second 27, inside the retained real native
+S03 speech turn 24.44–30.48. The two-second neighborhood across that boundary is
+byte-identical to original seconds 26–28: the request seam introduces no source
+sample discontinuity. Neighborhood PCM SHA256:
+`5eda717022052f8a75c013ee732262844f91fa4ec3614ffb1066f0eddbfcfe5e`.
+New normalized PCM SHA256:
+`db1666f2d5cda9d5a2953b8a711af89393360d402a08a2d942a5cbb107e93dda`;
+new WAV SHA256:
+`b83d1650d70c7fb4acf8cb2e463c84e56a0eed7c59d4e0600ad7d50ddc078ffc`.
+
+**Explicit fault injection:** only the optional VAD hint call raises
+ModuleNotFoundError to exercise its authorized unavailable fallback. No synthetic
+VAD prediction, ASR result, voice embedding, threshold or clock was substituted.
+The actual planner retains its existing 120s ceiling. Real CUDA requests own
+[0,1920000) and [1920000,2000000), reasons `vad_unavailable` / `eof`, each with
+recorded `vad_fallback=ModuleNotFoundError`. Final source PCM fingerprint matches;
+every frame is owned exactly once. Both successful calls used child PID 61544.
+
+The actual model outputs passed strict EOS 151645/context 131072 checks:
+input/output tokens 1638/924 and 150/65, output budgets 129434 and 130922.
+The 30 native turns retain exact local raw clocks, chunk/local namespaces,
+absolute rational offsets and words=null. There are zero cross-label overlapping
+intervals in this fixture. First request has no corrections; final local 5.01
+is clipped to 5 by the existing moss-eof-v1 rule, with immutable raw evidence.
+`forced1/rotated125_transcript_raw.json` retains the complete recording artifact.
+
+Adjacent text inspection: the first request ends at local 119.97 with
+“Well, and, and like Food Network before.” The next begins at local 0 with
+“Or Food Network, like the idea of like learning about new foods.” The retained
+uncut 120s reference instead renders that source turn as “before Food Network”.
+Thus a sentence is split and continuation wording changes at the forced cut;
+this is not evidence of lossless word recognition or accurate timing. The repeated
+“Food Network” phrase occurs in the reference too; no obvious whole-turn replay
+was observed. No text was trimmed, deduplicated, relabeled or accepted through
+relaxed validation. Exact source coverage is proved; semantic completeness and
+independent recognition accuracy remain unproven.
+
+Measured setup/load was 12.631s end to end (worker model 2.157s, readiness decode
+2.493s). Request manager/decode times were 51.884/51.758s and 3.830/3.810s.
+Peak allocated bytes were 2,506,171,904 / 1,870,037,504; peak reserved bytes
+2,648,702,976 / 2,661,285,888. These are observations, not performance promises.
+Both calls and coverage checks passed, process exit0. Owned launcher exit0 and
+OS absence of worker 61544 were verified after unload. No identity reruns,
+backend/browser reruns, product edits or dependency changes were required.

@@ -191,6 +191,19 @@ instrumented inference, not90-minute CUDA inference. No long-runtime speed or
 memory-fit guarantee follows. Detailed measurements and immutable raw evidence
 locations are in `docs/research/2026-10-18-moss-runtime.md`.
 
+The required continuous-speech fallback seam was subsequently exercised on a
+125s rotated-source fixture. New second 120 maps to original second 27 inside a
+retained real speech turn; source samples across the cut match the original
+byte for byte. Explicit scratch injection of optional VAD unavailability caused
+the existing 120s fallback, without substituting predictions or model output.
+Two real CUDA requests in one child owned 0–1920000–2000000 frames, retained 30
+native turns/strict EOS/context/offsets/words=null, and used only the existing
+final 5.01→5 EOF correction. Adjacent output splits a sentence and changes its
+continuation wording compared with the retained uncut reference; no obvious
+whole-turn replay was observed. This proves fallback mechanics and discloses
+recognition variation; it does not establish lossless recognition or timing
+accuracy. Exact raw evidence and measurements are in the research follow-up.
+
 ### Client → API
 
 - Extend transcription_engine with `moss`. Extend existing engine-test request
