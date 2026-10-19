@@ -1,4 +1,4 @@
-# MOSS app lifecycle — task 4 handoff
+# MOSS whole-input checkpoint — task 5 handoff
 
 **Date:** 2026-10-19
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
@@ -6,64 +6,55 @@
 
 ## Status
 
-Task 4 complete; 4/8. Checkpoint commit subject:
-`feat(moss): wire app lifecycle and explicit engine controls`.
-Plan remains In progress; task 5 awaits owner Do next.
-
-One lazy manager per service under backend/runtime/moss and app temp/moss-ipc.
-Settings supports explicit moss selection and status/load/unload actions. Status
-never sets up/downloads/loads; Test does not save selection or enqueue media.
-Ready describes complete-generation inference readiness, never silence accuracy.
-Existing auto/default behavior is preserved. Explicit multilingual MOSS bypasses
-Whisper language probing and rerouting. Full-input processing is task 5.
-
-MOSS load releases Phonon/Whisper/Parakeet/voice models; voice-model load stops
-MOSS before ML initialization and waits for owned exit. Other GPU loaders also
-release MOSS. Busy user load/unload/manual purge refuses pipeline work; resident
-MOSS is exempt from global free-VRAM-drop recovery. App shutdown independently
-attempts MOSS cleanup even if Phonon cleanup fails.
+Task 5 complete; 5/8. Checkpoint subject:
+`feat(moss): persist whole-input native transcription checkpoints`.
+Plan remains In progress. Owner `dd` authorizes continued sequential work.
 
 ## Next step
 
-Obtain the task-5 context pack and preflight its paths. Open
-`backend/src/services/ingestion/pipeline_transcribe.py` for full-input routing and
-atomic native-label checkpoint/retry work; do not begin task 6 identity or task 7 UI.
+Obtain task-6 context pack and preflight its paths. Native identity matching
+and overlap-safe samples belong in
+`backend/src/services/ingestion/pipeline_diarize.py`; use normalized endpoints
+and preserve labels through standard save/cleanup.
 
 ## Verification state
 
-Packed SQLite suite, scoped Ruff, SDD validation, whitespace and commit gates
-are recorded in the task-4 plan verification log. All controls/settings tests use
-fake managers, temporary .env and fixture environment/DB; shutdown uses a scratch
-backend lock and no-op workers. No production settings/jobs/media or GPU benchmark
-was used. Actual app-phase CUDA handoff remains task 8; browser controls task 7.
+Packed backend venv SQLite suite:
+`python -m pytest src/test_moss_pipeline.py src/test_moss.py src/test_phonon.py -q`
+→ 116 PASS, 45.34s. Scoped Ruff, SDD validation, whitespace and required commit
+gates recorded in plan. Temporary SQLite/files only; no production DB/settings,
+jobs/media or GPU inference. Actual inference/full regression remains task 8;
+browser controls remain task 7.
 
 ## Blockers
 
-None. No push, deployment, installer refresh or final archive closeout performed.
+None. No push, deployment, installer refresh or final archive closeout.
 
 ## Diagnosis worth keeping
 
-Task-3 readiness remains complete-generation smoke only: one-second silence
-produced a malformed 23-token hallucinated apology. Raw evidence remains under
-runtime.readiness_probe; actual transcription strictly validates moss-result-v1.
-MossRuntime.transcribe returns sibling result and runtime/provenance objects.
-Preserve raw decimal tokens, exact rational source duration and moss-eof-v1
-correction evidence; never cumulatively renormalize on checkpoint retries.
+MOSS normalizes one complete PCM16 mono 16kHz WAV, checks exact sample dimensions
+and <=5400 seconds before inference, releases competing models, then strictly
+validates runtime output against manager-owned dimensions. Existing raw JSON adds
+`moss_result` (strict moss-result-v1, intact), `moss_runtime` (model/source/runtime
+provenance), `moss_source` (source size/mtime_ns), plus float adapter `segments`.
+Segment objects carry `.speaker` native S labels; words=null. Strict native result
+owns raw decimal tokens, overlaps/order, rational duration and corrections;
+float adapters and legacy RTTM are never their source.
 
-Task 5 must add whole-input (<=5400s) transcription and atomic completed raw
-checkpoint, reject mixed-engine partials, preserve old complete-cache reuse,
-provenance and native speaker labels, and honor forced retranscription. Task 6
-owns identity matching/overlap-safe samples and standard save/cleanup. No DB schema
-change, generic engine framework, default change, pin/dependency change or benchmark
-rerun. Existing task-3 GPU/process proof is archived in the managed-worker baton;
-source evidence remains docs/research/2026-10-18-moss-runtime.md and ignored runtime.
+Both reuse entry points validate native evidence and restore labels without
+cumulative correction. Source stat mismatch rejects reuse with deliberate
+retranscription guidance. Completed legacy cache retains existing reuse semantics.
+Incomplete inference/cancellation has no partial; retry runs the whole input.
+Other-engine partials/orphan records refuse MOSS unless force was explicit.
+Force bypasses complete cache and removes relevant partials; prior complete raw
+checkpoint survives failed inference/publication and is replaced only after a
+fully validated complete generation. Context exhaustion/malformed output fails.
+
+Task 6 owns native identity, overlap-safe enrollment, persistence and cleanup
+integration. Task 5 does not claim those paths finished.
 
 ## Workspace and next worker rules
 
-Same main checkout; no new worktree or stash. Preserve unrelated dirt:
-docs/dev/README.md, .kilo/, docs/CONSTITUTION.md, docs/dev/audits/, ASR handoff,
-semantic-search plan/spec, tech-debt workflow and docs/templates/. Stage explicit
-phase paths only, inspect cached names and committed names, use required hooks;
-no bypass, push or deployment. Get a fresh phase allowlist before edits. Run
-session status and preflight; read returned contracts/refinements in order.
-Next worker resumes task 5 only after owner Do next; no task-5 product edits exist.
+Same checkout; no new worktree/stash. Preserve unrelated baseline dirt from the
+context pack. Stage explicit phase paths, inspect cached and committed names,
+use required hooks without bypass. Fresh ownership pack before next edits.

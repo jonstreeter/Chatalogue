@@ -28,6 +28,31 @@ from .runtime import (
 
 
 class PipelineMixin:
+    def _moss_checkpoint_segments(self, data, audio_path):
+        """Revalidate native evidence without ever normalizing corrected clocks again."""
+        from fractions import Fraction
+        from .moss import MAX_INPUT_SECONDS, MossValidationError, validate_worker_result
+
+        native = data.get("moss_result", {})
+        source = audio_path.stat()
+        if data.get("moss_source") != {"size": source.st_size, "mtime_ns": source.st_mtime_ns}:
+            raise MossValidationError("MOSS checkpoint source changed; deliberately re-transcribe.")
+        native = validate_worker_result(native, native.get("sample_count"), native.get("sample_rate"))
+        duration = Fraction(native["duration"])
+        if native["sample_rate"] != 16000 or duration > MAX_INPUT_SECONDS:
+            raise MossValidationError("Invalid MOSS checkpoint source dimensions.")
+        if not isinstance(data.get("moss_runtime"), dict):
+            raise MossValidationError("MOSS checkpoint runtime provenance is missing.")
+        segments = []
+        for index, item in enumerate(native["segments"]):
+            segment = self._build_whisper_style_segment(
+                seg_id=index, start=float(Fraction(item["start"])),
+                end=float(Fraction(item["end"])), text=item["text"], words=None,
+            )
+            segment.speaker = item["speaker"]
+            segments.append(segment)
+        return segments, float(duration)
+
     def _load_phonon_partial(self, video_id):
         """Recover only committed JSONL records; discard interrupted append tails."""
         import math
@@ -192,6 +217,13 @@ class PipelineMixin:
 
         with open(raw_transcript_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        if data.get("transcription_engine_used") == "moss":
+            segments, duration = self._moss_checkpoint_segments(data, audio_path)
+            self._upsert_job_payload_fields(job_id, {
+                "transcription_reused_existing": True, "transcription_engine_used": "moss",
+            })
+            return segments, duration, "moss"
 
         segments = []
         for s in data.get("segments", []):

@@ -15,6 +15,76 @@ from . import runtime
 
 
 class TranscribePhaseMixin:
+    def _process_moss_phase(self, video, audio_path, job_id, route, force_retranscription=False):
+        """Generate one whole input and atomically commit its complete native evidence."""
+        import subprocess
+        import tempfile
+        import wave
+        from .moss import MAX_INPUT_SECONDS, MossValidationError, validate_worker_result
+
+        self._check_job_not_paused(job_id)
+        partials = [self._get_temp_transcript_path(video.id), self._get_temp_transcript_jsonl_path(video.id)]
+        if force_retranscription:
+            for path in partials:
+                path.unlink(missing_ok=True)
+            self._reset_partial_checkpoint_state(video.id)
+        elif any(path.exists() for path in partials):
+            raise MossValidationError("Partial transcript belongs to another or unknown engine; resume that engine or deliberately re-transcribe.")
+        self._record_job_stage_start(job_id, "transcribe")
+        self._update_job_status_detail(job_id, "Preparing whole input for MOSS...")
+        raw_path = audio_path.parent / f"{self.sanitize_filename(video.title)}_transcript_raw.json"
+        source = audio_path.stat()
+        source_evidence = {"size": source.st_size, "mtime_ns": source.st_mtime_ns}
+        with tempfile.TemporaryDirectory(prefix="moss-", dir=raw_path.parent) as scratch:
+            normalized = Path(scratch) / "audio.wav"
+            decoded = subprocess.run([
+                self._get_ffmpeg_cmd(), "-v", "error", "-y", "-i", str(audio_path),
+                "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(normalized),
+            ], capture_output=True, check=False)
+            if decoded.returncode:
+                raise MossValidationError("MOSS audio normalization failed; check source audio and FFmpeg.")
+            with wave.open(str(normalized), "rb") as audio:
+                count, rate = audio.getnframes(), audio.getframerate()
+                if (count <= 0 or rate != 16000 or audio.getnchannels() != 1
+                        or audio.getsampwidth() != 2 or count > MAX_INPUT_SECONDS * rate):
+                    raise MossValidationError("MOSS requires nonempty audio of at most 90 minutes; select another engine for longer audio.")
+            self._check_job_not_paused(job_id)
+            self._update_job_status_detail(job_id, "Transcribing whole input with MOSS...")
+            self._release_phonon_model("before_moss_transcribe", job_id=job_id)
+            self._release_whisper_model("before_moss_transcribe", job_id=job_id)
+            self._release_parakeet_model("before_moss_transcribe", job_id=job_id)
+            self._release_diarization_models("before_moss_transcribe", job_id=job_id)
+            reply = self._get_moss_runtime().transcribe(normalized.read_bytes())
+            native = validate_worker_result(reply.get("result"), count, rate)
+            if not isinstance(reply.get("runtime"), dict):
+                raise MossValidationError("MOSS returned no runtime provenance.")
+            self._check_job_not_paused(job_id)
+            raw = {
+                "video_id": video.id, "transcription_engine_used": "moss",
+                "transcription_engine_requested": route.get("requested_engine"),
+                "transcription_engine_routed": "moss", "transcript_language": route.get("language"),
+                "moss_result": native, "moss_source": source_evidence,
+                "moss_runtime": reply["runtime"], "total_duration": count / rate,
+            }
+            segments, duration = self._moss_checkpoint_segments(raw, audio_path)
+            raw["segments"] = [{"start": segment.start, "end": segment.end,
+                                "speaker": segment.speaker, "text": segment.text, "words": None}
+                               for segment in segments]
+            staging = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=raw_path.parent, delete=False) as stream:
+                    staging = Path(stream.name)
+                    json.dump(raw, stream, ensure_ascii=False, allow_nan=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(staging, raw_path)
+            finally:
+                if staging is not None:
+                    staging.unlink(missing_ok=True)
+        self._upsert_job_payload_fields(job_id, {"transcription_engine_used": "moss", "transcription_reused_existing": False})
+        self._update_job_progress(job_id, 100)
+        return segments, duration
+
     def _process_phonon_phase(self, video, audio_path, job_id, route, force_retranscription=False):
         """Decode bounded PCM windows in the app-owned worker, committing each seam."""
         import math
@@ -260,6 +330,14 @@ class TranscribePhaseMixin:
                 with open(raw_transcript_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
+                if data.get("transcription_engine_used") == "moss":
+                    segments, duration = self._moss_checkpoint_segments(data, audio_path)
+                    self._upsert_job_payload_fields(job_id, {
+                        "transcription_reused_existing": True, "transcription_engine_used": "moss",
+                    })
+                    self._update_job_progress(job_id, 100)
+                    return segments, duration
+
                 # Reconstruct segments
                 for s in data.get("segments", []):
                      words = _deserialize_words(s.get("words"), seg_start=s.get("start"), seg_end=s.get("end"))
@@ -329,10 +407,15 @@ class TranscribePhaseMixin:
                     return existing_segments, total_duration
 
             except Exception as e:
+                if selected_engine == "moss" or (isinstance(locals().get("data"), dict) and data.get("transcription_engine_used") == "moss"):
+                    raise
                 log(f"Failed to load existing raw transcript: {e}. Will re-transcribe.")
                 existing_segments = []
         elif raw_transcript_path.exists() and force_retranscription:
             log(f"Ignoring existing raw transcript at {raw_transcript_path} because force_retranscription is enabled.")
+
+        if selected_engine == "moss":
+            return self._process_moss_phase(video, audio_path, job_id, route, force_retranscription)
 
         if selected_engine == "phonon":
             return self._process_phonon_phase(video, audio_path, job_id, route, force_retranscription)
