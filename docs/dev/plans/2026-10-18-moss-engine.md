@@ -46,7 +46,7 @@ runtime feasibility gate passes.
 | 5 | Add full-input transcription and atomic native-label checkpoint, duration/context rejection, provenance and retry semantics. Preserve raw clock tokens, source sample count/rate and moss-eof-v1 corrections across identity retries without cumulative normalization. Test old cache reuse, mixed-engine partial rejection, failure/cancellation and forced reprocessing. | `backend/src/services/ingestion/pipeline_transcribe.py`, `backend/src/services/ingestion/pipeline.py`, `backend/src/test_moss_pipeline.py` | M | ✅ done |
 | 6 | Reuse identity/profile matching with explicit native speaker attribution and overlap-safe samples; retain standard save/cleanup. Test two recordings matching saved names, nested overlapping speakers, no clean sample and missing embedding model. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/services/ingestion/transcription.py`, `backend/src/test_moss_pipeline.py` | L | ✅ done |
 | 7 | Add engine option, setup/status/unload controls, segment/90-minute notice and queue badge; browser-verify save/reload, failure recovery and segment playback without word clocks. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: managed UI and five Chromium checks PASS |
-| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ▶ incomplete — blocked by existing channel browser selector |
+| 8 | Run isolated real app-phase short/long audio, identity across recordings, sequential GPU release/staged reuse; run workflow checks, record evidence and prepare local closeout. | `docs/research/2026-10-18-moss-runtime.md`, this plan and spec | M | ⏸ blocked — approved Open repair passes; Search tab mismatch stops full browser suite |
 
 ## Test plan
 
@@ -298,3 +298,18 @@ guarantee. No review subagents or product changes for this refinement.
   this phase ownership. No product/test edit or rerun. Actual MOSS app-phase,
   real voice identity, staged reuse and GPU handoff remain unrun. Evidence and
   commands in research Task8 checkpoint; resume:yes handoff records blocker.
+
+
+- 2026-10-19 task8 resume: owner explicitly approved only test-only exact:true
+  Open selectors in frontend/e2e/channel-detail.spec.ts; all four occurrences
+  repaired. Scoped `npx eslint e2e/channel-detail.spec.ts` PASS. Backend Python3.11
+  fixture bind succeeds after system Python3.14 WinError10013. Initial browser
+  attempt failed infrastructure (HTML instead of JSON), not a selector regression.
+  Full fixture-backed rerun:19 selected,2 PASS/1 FAIL/16 unrun,39.0s; first channel
+  navigation now passes. Next test waits for absent Search tab at
+  e2e/pages/ChannelDetailPage.ts:30; snapshot shows Videos/Transcripts/Speakers/
+  Chats/Clips. Stop at first genuine failure; no further repair or real inference.
+  Task8 remains incomplete. Earlier ignored screenshots were inadvertently removed
+  by reused Playwright outputDir; original e2e.log survives, new failure screenshot
+  and context retained. Owned API/Vites stopped and no listeners remain on
+  8000/5173/5175. WIP checkpoint subject: docs(moss): checkpoint next browser blocker.

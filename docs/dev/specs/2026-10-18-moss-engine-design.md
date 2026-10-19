@@ -228,3 +228,11 @@ another failure stops the build. No further original-plan approval is pending.
 Sources: https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize;
 https://github.com/OpenMOSS/MOSS-Transcribe-Diarize;
 https://github.com/OpenMOSS/MOSS-Transcribe-Diarize/blob/main/pyproject.toml.
+
+
+### Task8 verification resume limitation (2026-10-19)
+
+Approved exact Open test selectors pass navigation. Full browser rerun stops at
+an existing absent Search-tab expectation:2 pass,1 fail,16 unrun of19 selected.
+Actual app-phase short/long inference, real cross-recording identity and GPU
+staged/sequential proof remain unrun; task8 incomplete. No Shipped claim.

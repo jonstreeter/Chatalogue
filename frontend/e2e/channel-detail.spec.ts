@@ -15,7 +15,7 @@ test.describe('Channel Detail', () => {
     const count = await channelsPage.getChannelCount();
     test.skip(count === 0, 'No channels available to test');
 
-    await page.locator('.glass-panel').first().getByRole('link', { name: 'Open' }).click();
+    await page.locator('.glass-panel').first().getByRole('link', { name: 'Open', exact: true }).click();
     await page.waitForLoadState('networkidle');
 
     const detail = new ChannelDetailPage(page);
@@ -29,7 +29,7 @@ test.describe('Channel Detail', () => {
     const count = await channelsPage.getChannelCount();
     test.skip(count === 0, 'No channels available to test');
 
-    await page.locator('.glass-panel').first().getByRole('link', { name: 'Open' }).click();
+    await page.locator('.glass-panel').first().getByRole('link', { name: 'Open', exact: true }).click();
     await page.waitForLoadState('networkidle');
 
     const detail = new ChannelDetailPage(page);
@@ -48,7 +48,7 @@ test.describe('Channel Detail', () => {
     const count = await channelsPage.getChannelCount();
     test.skip(count === 0, 'No channels available to test');
 
-    await page.locator('.glass-panel').first().getByRole('link', { name: 'Open' }).click();
+    await page.locator('.glass-panel').first().getByRole('link', { name: 'Open', exact: true }).click();
     await page.waitForLoadState('networkidle');
 
     const detail = new ChannelDetailPage(page);
@@ -74,7 +74,7 @@ test.describe('Channel Detail', () => {
     const count = await channelsPage.getChannelCount();
     test.skip(count === 0, 'No channels available to test');
 
-    await page.locator('.glass-panel').first().getByRole('link', { name: 'Open' }).click();
+    await page.locator('.glass-panel').first().getByRole('link', { name: 'Open', exact: true }).click();
     await page.waitForLoadState('networkidle');
 
     const detail = new ChannelDetailPage(page);

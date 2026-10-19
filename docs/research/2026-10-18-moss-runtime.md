@@ -1484,3 +1484,24 @@ sequential reload measurement was performed. Prior task1/3 evidence remains
 unchanged; it does not satisfy these remaining app-phase requirements. Do not
 claim 120-second app-phase or 90-minute performance/memory coverage. Resume
 this phase after explicit ownership/approval of the unrelated verification fix.
+
+
+## Task8 approved selector repair resume — blocked
+
+
+- 2026-10-19 task8 resume: owner explicitly approved only test-only exact:true
+  Open selectors in frontend/e2e/channel-detail.spec.ts; all four occurrences
+  repaired. Scoped `npx eslint e2e/channel-detail.spec.ts` PASS. Backend Python3.11
+  fixture bind succeeds after system Python3.14 WinError10013. Initial browser
+  attempt failed infrastructure (HTML instead of JSON), not a selector regression.
+  Full fixture-backed rerun:19 selected,2 PASS/1 FAIL/16 unrun,39.0s; first channel
+  navigation now passes. Next test waits for absent Search tab at
+  e2e/pages/ChannelDetailPage.ts:30; snapshot shows Videos/Transcripts/Speakers/
+  Chats/Clips. Stop at first genuine failure; no further repair or real inference.
+  Task8 remains incomplete. Earlier ignored screenshots were inadvertently removed
+  by reused Playwright outputDir; original e2e.log survives, new failure screenshot
+  and context retained. Owned API/Vites stopped and no listeners remain on
+  8000/5173/5175. WIP checkpoint subject: docs(moss): checkpoint next browser blocker.
+
+Exact browser command (frontend): `npm run test:e2e -- --config F:/Projects/PorchtimeIndex/backend/runtime/moss/task8/playwright.config.cjs`.
+Logs: backend/runtime/moss/task8/e2e-resume-1.log (infrastructure), e2e-resume-2.log (genuine Search-tab failure). Fixture API: `backend/.venv/Scripts/python.exe backend/runtime/moss/task8/fixture_api.py`, owned PID60876, observed loopback8000 LISTENING before rerun. Existing scratch Vite config/env retained. Synthetic fixture requests recorded in fixture-api.jsonl; no production backend started. Failed run does not prove the remaining16 browser tests or any actual MOSS app-phase requirement. No accuracy, long-input throughput or90-minute fit claim.

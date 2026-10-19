@@ -1,4 +1,4 @@
-# MOSS task8 verification — blocked checkpoint
+# MOSS task8 verification — next browser blocker
 
 **Date:** 2026-10-19
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
@@ -6,72 +6,58 @@
 
 ## Status
 
-Task8 incomplete;7/8 complete. Plan Blocked, spec not Shipped. No product or
-test changes. Static checks and full backend tests passed; full browser run
-stopped on first existing channel selector failure. No real task8 inference
-was started. Prior task7 baton archived unchanged as
-`archive/2026-10/2026-10-18-moss-engine-ui.md`.
+Task8 incomplete;7/8 complete. Plan Blocked, spec not Shipped. Owner explicitly
+approved four test-only exact:true Open selector repairs in channel-detail.spec.ts.
+First channel navigation now passes. WIP checkpoint subject:
+`docs(moss): checkpoint next browser blocker`. Previous active baton preserved
+unchanged in archive/2026-10/2026-10-18-moss-engine-verification-blocked.md.
 
 ## Next step
 
-Conductor must obtain explicit ownership/approval for the unrelated test-only
-selector repair at frontend/e2e/channel-detail.spec.ts:18. Proposed change:
-`getByRole('link', { name: 'Open', exact: true })`. Do not silently broaden MOSS
-scope. Root belongs to channel UI/test subsystem; options are spec+plan,
-labeled stopgap, or patch anyway with an explicitly narrow repack. After that,
-resume task8 verification; do not restart implementation tasks1–7.
+Obtain narrow ownership/decision for frontend/e2e/channel-detail.spec.ts:39
+Search-tab expectation via pages/ChannelDetailPage.ts:30. No additional test or
+product change authorized. Options: spec+plan / labeled stopgap / patch anyway.
+Root is existing channel test/UI mismatch in another subsystem; stop before
+workaround. Resume task8 only after conductor repack; tasks1–7 stay complete.
 
 ## Verification state
 
-- frontend `npx tsc -b` PASS.
-- root `backend/.venv/Scripts/python.exe -m ruff check .` PASS.
-- frontend `npm run lint` PASS,0 errors/43 existing warnings.
-- backend `.venv/Scripts/python.exe -m pytest src -q --basetemp=runtime/moss/task8/pytest-tmp`
-  PASS252,1 warning,124.31s. Before imports PYTHONPATH includes task8 bootstrap
-  and backend; DB_PROVIDER=sqlite,DATABASE_URL=sqlite://. Scratch sitecustomize
-  disables dotenv, redirects runtime/data/env paths and denies production
-  backend/data or .env access. See research Task8 checkpoint for exact command
-  and hashes. No tests skipped/assertions changed.
-- frontend `npm run test:e2e -- --config F:/Projects/PorchtimeIndex/backend/runtime/moss/task8/playwright.config.cjs`
-  FAIL:19 selected,1 pass,1 fail,17 not run,10.7s. Installed Chrome,workers1,
-  maxFailures1 stops at first failure; no test excluded. Port8000 bind free
-  before owned fixture API; owned Vites5173/5175 polling/scratch envDir.
-  Synthetic API process/scan transitions create no jobs and make no external
-  calls. Audio-download PASS is mock browser evidence, not downloader proof.
-- SDD validation and whitespace checked at checkpoint; required commit hooks
-  apply. No push/deploy/archive completion.
+- Prior closed checks reused: typecheck/root Ruff PASS; frontend lint0 errors/
+  43 warnings; isolated backend252 PASS124.31s.
+- `npx eslint e2e/channel-detail.spec.ts` PASS after approved four exact selectors.
+- Full `npm run test:e2e -- --config F:/Projects/PorchtimeIndex/backend/runtime/moss/task8/playwright.config.cjs`
+  FAIL:19 selected,2 PASS,1 FAIL,16 unrun,39.0s. First genuine failure stops run.
+  Installed Chrome/workers1/maxFailures1 retained; no exclusions.
+- Actual task8 MOSS inference/real embeddings/identity/staged reuse/GPU handoff
+  not run. Keep task3 managed runtime immutable; no downloads/upgrades/fallback.
 
 ## Blockers
 
-frontend/e2e/channel-detail.spec.ts:18 partial accessible-name Open matches
-three links: two aria-label Open Chatalogue fixture and exact Open. Strict
-locator violation before channel navigation. This is a concrete existing
-regression outside MOSS edit ownership. Do not rerun unchanged failing phase
-or workaround product markup. No further full-check success is claimed.
+Tab-navigation test waits for Search link. Failure snapshot exposes only Videos,
+Transcripts, Speakers, Chats, Clips. No test assertion or product workaround made.
+Evidence: ignored task8/e2e-resume-2.log and e2e-results/
+channel-detail-Channel-Detail-tab-navigation-works-chromium/ screenshot/context.
 
 ## Diagnosis worth keeping
 
-Backend import defaults read .env/create backend/data directories; setting
-SQLite alone does not isolate files. Read-only safety expansion included
-src.paths,src.env_utils,services.logger,services.external_share,routers.system/
-avatars and exact frontend channel/speaker/API consumers. Bootstrap source
-rewrites only directory/env constants in memory; product files unchanged.
+System Python3.14 fixture bind8000 failed WinError10013, including escalation.
+Initial browser attempt infrastructure-failed on HTML instead of fixture JSON;
+log e2e-resume-1.log preserved. Backend venv Python3.11 successfully ran fixture
+API (owned60876; loopback8000 LISTENING verified); rerun requests logged in
+fixture-api.jsonl. Owned Vites5173/5175 use scratch envDir, polling and fixture
+VITE_API_URL; API/Vites all stopped, netstat confirms no listeners on these ports.
+No production backend started. Synthetic process/scan is not downloader proof.
 
-Ignored evidence in backend/runtime/moss/task8/: sitecustomize.py,pytest.log,
-e2e.log,fixture_api.py,fixture-api.jsonl,vite.config.mjs,playwright.config.cjs,
-and e2e-results/channel-detail-Channel-Det-90ab1-s-export-and-delete-buttons-chromium/
-(test-failed-1.png,error-context.md). API/Vite processes stopped via owned
-sessions; no global process-name kill. No production settings/media/DB reads.
-Warnings: TRANSFORMERS_CACHE deprecation,post-exit swigvarlink warning,Node
-module.register deprecation,NO_COLOR/FORCE_COLOR notice,old Browserslist data.
+Evidence preservation mistake: reused Playwright outputDir removed prior ignored
+screenshots/context. Prior e2e.log survives; new failure screenshot/context retained.
+Do not claim the old screenshots remain available or rerun merely to recreate them.
 
-Next worker prompt: task8 only, resume:yes. Keep task3 manager environment and
-original evidence immutable. After approved selector fix and full checks,
-prove actual isolated MOSS short9s/ordinary10s/long120s app phases, real GPU
-voice embedding/matcher named profiles across two fixture recordings with
-changed labels, native overlap/clean enrollment preservation, same staged
-MOSS child reuse, exit-before-voice barrier,sequential reload timing and app
-shutdown. None is yet task8 evidence. Never use production recordings/.env,
-spoof embeddings,claim accuracy or extrapolate120s to90min. Preserve baseline
-unrelated dirty paths. PLAN_COMPLETE only when full acceptance actually passes;
-plan must not become Done/spec Shipped in this phase.
+Next worker prompt: THIS task8 phase, resume:yes. After authorized browser fix,
+full suite must pass before actual isolated app-phase short9s/ordinary10s/long120s,
+strict EOS/native overlap/raw correction, same resident child staged transcribes,
+exit-before-real GPU voice embeddings, saved named profiles across two recordings,
+no-clean sample/job warning, sequential reload timing/memory/exit proof. Never
+spoof embeddings, use production data/.env, or extrapolate120s to90min. Bootstrap
+sitecustomize.py remains required before imports; reuse task3 manager with task8
+temp root. Preserve unrelated dirty paths. PLAN_COMPLETE only if all acceptance
+passes. No push/deploy/archive completion. Required hooks and SDD checks apply.
