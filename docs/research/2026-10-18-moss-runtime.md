@@ -1299,3 +1299,122 @@ Task-1 gate conclusion: PASS from the new exact EOF/overlap proof together with
 the retained pinned Windows CUDA environment, ordinary complete decodes,
 cold/warm timings and exit/release evidence. No full app suites apply to this
 research-only phase. SDD validation and git whitespace checks PASS.
+
+
+## Task 3 — managed installer and worker (2026-10-19)
+
+The managed implementation uses a separate versioned environment under
+`backend/runtime/moss`, exact task-1 dependency versions, immutable source/model
+file sizes and SHA256s, a hash-checked private wheelhouse, staged publication and
+an interprocess installation lock. Source LICENSE/model README notices are retained.
+The worker directly reuses `OwnedPhononProcess`; Phonon implementation is unchanged.
+Setup subprocesses handshake their actual interpreter PID before running, so
+shutdown verifies interpreter exit as well as the Windows venv launcher.
+Status does not import ML, download or initialize CUDA. Lifecycle/input tests use
+isolated temporary directories and SQLite configured before application imports.
+
+The scoped runtime/parser suite passed **110 tests**; scoped Ruff, SDD validation
+and whitespace checks passed. Tests cover separate-process setup serialization,
+interrupted/corrupt installs and manifests, previous-version preservation,
+cancellable installation-lock waits, owned setup cancellation, Python environment
+isolation, worker reuse/death/malformed/wrong/duplicate replies, busy unload,
+shutdown during setup/decode and actual Windows parent `os._exit` cleanup. The
+parent-exit test runs a real backend-venv interpreter with a fake model worker;
+it is process-ownership evidence, not GPU inference evidence. Actual interpreter
+PID differs from the venv launcher and membership is checked before loading.
+
+Initial real setup correctly **failed before publishing its manifest**: the
+first lock admitted SoundFile 0.14.0's universal wheel, which lacked its Windows
+libsndfile DLL. Pip installation and `pip check` passed, but the native
+Transformers/SoundFile import gate failed with error 0x7e. The corrected lock pins
+`soundfile-0.14.0-py2.py3-none-win_amd64.whl`, SHA256
+`299491d3499460fb1b74bb4bd78b57ffc2d243a5fafa7b6ec1b264875c78453e`,
+from official PyPI metadata. No system DLL/backend dependency was changed.
+The failed stage was cleaned; retry reused 66 individually SHA-matching wheels
+and downloaded only the corrected native wheel through the normal installer.
+
+Task-1 research environment/model/source were read only. Verified snapshot bytes
+were copied into the separate task-3 download cache; this is a cache-seeded real
+installer run, not proof of re-downloading model weights. Hardlinks were
+unsupported by this filesystem, so copies were used. The 2,867 MB Torch wheel
+was actually downloaded. A narrow read-only check of relevant large pip-cache
+bodies found no matching substitute; no pip-cache bytes were changed.
+The initial failed run and corrected run retain separate proof/log files under
+`backend/runtime/moss/task3/`; the shared setup log records both version paths.
+
+Worker transcription validates canonical PCM16 mono 16 kHz WAV bytes and exact
+frame dimensions, rejects input above 5400 seconds before inference, uses the
+pinned processor/time markers and BF16 SDPA on asserted NVIDIA CUDA, budgets
+from actual remaining 131072-token context, and independently validates the
+strict native result at the manager boundary. Runtime provenance is outside
+`moss-result-v1`. Readiness is a real complete silence generation probe: it
+retains its actual raw output/completion and does not invent an empty transcript
+or treat a silence hallucination as a validated transcription.
+
+### Corrected managed run — PASS
+
+The normal staged installer published version
+`214ed56931e0623b6d49672627c2336d0db877566235622c1b45a5e1d5f984ff`
+after hash checks, private wheel installation, `pip check` and native
+Transformers/SoundFile/Torch CUDA imports. Corrected recorded run: 1075.370s;
+manifest write was 902.359s after recorded start. These costs exclude the
+preceding cache-seeding copies. The initial failed run cost 2009.542s including
+its large download, failed native gate and staging cleanup; it remains a failure.
+No inference was run with that invalid installation. The active offline pip
+process showed measured CPU/I/O increases while installing; monitoring snapshots
+are retained, without attributing slow setup to an unmeasured cause.
+
+Real managed worker PID **19972**, Windows venv launcher **48444**, private
+interpreter under the published version's `venv/Scripts/python.exe`. Model/source
+revisions match task 1. RTX 5090, Torch 2.10.0+cu128, CUDA 12.8, BF16 and SDPA
+were reported by the real worker. Worker model-load metric: **3.575s**; real
+one-second-silence readiness generation: **13.618s**, 99 input / 23 output tokens,
+EOS 151645, remaining-context budget 130973. Its actual output was a hallucinated
+apology with a start marker but no terminal clock. This is a complete-generation
+smoke probe, **not a valid silence transcription**. The manager exposes its
+completion/raw evidence as `runtime.readiness_probe`; future Load/Test API/UI
+must describe inference readiness and must not claim validated silence output.
+
+Retained 144000-sample / 16000 Hz overlap fixture decoded in **6.922s**: 200 prompt
+and 108 generated tokens, EOS 151645, budget **130872** (actual remaining context),
+four native segments and all three overlap pairs (0,1), (1,2), (2,3). Backend
+independent validation passed; final raw end `9.01` became exact `9` under
+moss-eof-v1 at segment index 3, with full raw text/token IDs and correction
+evidence retained. Words remain null. Process-local allocated/reserved bytes
+after decode: 1,827,989,504 / 1,952,448,512; peaks: 1,874,400,256 / 1,952,448,512.
+No accuracy or complete audible-word-coverage claim follows from EOS.
+
+Unload verified the actual interpreter's tracked process handle signaled exit;
+launcher exit code **0**, owned handles cleared, model/process flags false,
+runtime metadata empty and temporary audio directory empty. Global GPU usage was
+3659 → 6059 → 3647 MiB before load / before unload / after exit; the desktop and
+unrelated processes can change these numbers. Actual owned interpreter exit,
+rather than global memory alone, is the release evidence.
+
+A separate offline proof then verified the complete installed files and all
+**67 cached wheels** in **5.115s**, with downloader and subprocess entry points
+set to fail: zero network/subprocess calls and no model load. This proves
+verified cached reuse, not a second offline reinstall. Post-pin isolated suite:
+**110 PASS** in 25.66s; scoped Ruff PASS. No Phonon shared code was changed.
+
+Reproduce from repository root (SQLite environment is set before imports by the
+proof scripts; tests set it explicitly):
+
+```powershell
+backend/.venv/Scripts/python.exe backend/runtime/moss/task3/prove-final.py
+backend/.venv/Scripts/python.exe backend/runtime/moss/task3/offline-proof.py
+$env:DB_PROVIDER='sqlite'; $env:DATABASE_URL='sqlite://'
+cd backend
+./.venv/Scripts/python.exe -m pytest src/test_moss_runtime.py src/test_moss.py -q
+```
+
+Proof scripts deliberately refuse to overwrite their JSON evidence; for a new
+measurement use new task-scoped output filenames. Retained ignored artifacts:
+`task3/managed-proof-final.json`, `prove-final.py`, `prove-final.log`,
+`offline-proof.json`, `offline-proof.py`, `offline-proof.log`,
+`installer-monitor-first.json`, `installer-monitor-second.json`,
+`managed/setup.log` and `managed/worker.log`, all under `backend/runtime/moss/`.
+Final managed-proof SHA256:
+`dc13089a006f7d9d8e4316ffae8540b326fac21f90ccb63e51019f68eecc5eee`.
+The strict result is `MossRuntime.transcribe(audio_bytes)["result"]`; runtime
+provenance is its sibling `runtime`, outside the strict result object.
