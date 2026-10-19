@@ -645,3 +645,116 @@ def test_one_frame_resource_failure_terminates_without_invented_retry(harness):
     with pytest.raises(ValueError, match='cannot be split'):
         run(harness)
     assert attempts == [True]
+
+@pytest.mark.parametrize('checkpoint_run', [legacy_run, run])
+def test_identity_unresolved_both_formats(identity_harness, monkeypatch, checkpoint_run):
+    from sqlmodel import Session, select
+    from src.db.database import SpeakerEmbedding, TranscriptSegment
+    from src.services.ingestion import runtime
+    harness, crops = identity_harness
+    service, video, audio, manager, _, native = harness
+    result = parse_generation('[0][S01]one[4][0][S08]two[4]', native['sample_count'], 16000, native['completion'])
+    manager.transcribe = lambda _: dict(result=result, runtime=PROVENANCE.copy())
+    segments, _ = checkpoint_run(harness)
+    raw = audio.parent / 'native_transcript_raw.json'
+    original = raw.read_bytes()
+    service.embedding_model = service.embedding_inference = None
+    order = []
+    monkeypatch.setattr(service, '_release_moss_model', lambda *_, **__: order.append('exit'))
+    def load(_, *, embedding_only):
+        assert embedding_only and order == ['exit']
+    monkeypatch.setattr(service, '_load_models', load)
+    with pytest.raises(RuntimeError, match='voice model is unavailable'):
+        service._process_diarize_phase(video, audio, segments)
+    assert raw.read_bytes() == original
+    service.embedding_model = service.embedding_inference = object()
+    for method in ('_moss_speech_hints', '_get_moss_runtime'):
+        monkeypatch.setattr(service, method, lambda *_: pytest.fail('must reuse raw'))
+    monkeypatch.setattr('subprocess.run', lambda *_, **__: pytest.fail('must not normalize'))
+    reused, _, _ = service._load_raw_transcript_checkpoint(video, audio)
+    service._process_diarize_phase(video, audio, reused)
+    with Session(runtime.engine) as session:
+        rows = session.exec(select(TranscriptSegment)).all()
+        assert len(rows) == 2 and rows[0].speaker_id != rows[1].speaker_id
+        assert all(row.matched_profile_id is None for row in rows)
+        assert session.exec(select(SpeakerEmbedding)).all() == []
+    assert not crops and raw.read_bytes() == original
+
+
+def test_chunk_identity_enrollment_swapped_labels_and_retry(identity_harness, monkeypatch):
+    import numpy as np
+    import pickle
+    from sqlmodel import Session, select
+    from src.db.database import Channel, Speaker, SpeakerEmbedding, TranscriptSegment, Video
+    from src.services.ingestion import runtime
+    harness, crops = identity_harness
+    service, video, audio, manager, _, native = harness
+    sized_recording(harness)
+    texts = iter(['[0][S01]host[4][2][S08]nested[3][5][S08]guest[7]',
+                  '[0][S01]guest again[4][5][S08]host again[7]', '[0][S08]host EOF[10.0100]'])
+    def infer(data):
+        with wave.open(io.BytesIO(data)) as stream:
+            count = stream.getnframes()
+        return dict(result=parse_generation(next(texts), count, 16000, native['completion']), runtime=PROVENANCE.copy())
+    manager.transcribe = infer
+    segments, _ = run(harness)
+    assert [s.speaker for s in segments] == ['chunk-00000000:S01', 'chunk-00000000:S08',
+        'chunk-00000000:S08', 'chunk-00000001:S01', 'chunk-00000001:S08', 'chunk-00000002:S08']
+    def embed(_, segment):
+        crops.append((segment.start, segment.end))
+        return np.eye(16)[1 if segment.start in (5, 120) else 0]
+    monkeypatch.setattr(service, 'get_speaker_embedding', embed)
+    with Session(runtime.engine) as session:
+        session.add(Channel(id=2, name='Other', url='other'))
+        other = Speaker(channel_id=2, name='Wrong channel', embedding_blob=pickle.dumps(np.eye(16)[0]))
+        session.add(other)
+        session.commit()
+        session.add(SpeakerEmbedding(speaker_id=other.id, embedding_blob=other.embedding_blob))
+        session.commit()
+    raw = audio.parent / 'native_transcript_raw.json'
+    original = raw.read_bytes()
+    for method in ('_moss_speech_hints', '_get_moss_runtime'):
+        monkeypatch.setattr(service, method, lambda *_: pytest.fail('must reuse chunks'))
+    monkeypatch.setattr('subprocess.run', lambda *_, **__: pytest.fail('must not normalize'))
+    expected = [(0, 4, 'host'), (2, 3, 'nested'), (5, 7, 'guest'), (120, 124, 'guest again'),
+                (125, 127, 'host again'), (240, 250, 'host EOF')]
+    for recording in range(2):
+        if recording:
+            with Session(runtime.engine) as session:
+                video = Video(id=14, youtube_id='fixture14', channel_id=1, title='second')
+                session.add(video)
+                session.commit()
+                session.refresh(video)
+                session.expunge(video)
+            data = json.loads(original)
+            for chunk in data['chunks']:
+                result = chunk['result']
+                text = result['raw_text'].replace('S01', 'TEMP').replace('S08', 'S01').replace('TEMP', 'S08')
+                chunk['result'] = parse_generation(text, result['sample_count'], 16000, result['completion'])
+            (audio.parent / 'second_transcript_raw.json').write_text(json.dumps(data))
+        reused, _, engine = service._load_raw_transcript_checkpoint(video, audio)
+        assert engine == 'moss'
+        service._get_temp_diarization_path(video.id).write_text('stale RTTM ignored')
+        service._process_diarize_phase(video, audio, reused)
+        with Session(runtime.engine) as session:
+            rows = session.exec(select(TranscriptSegment).where(TranscriptSegment.video_id == video.id)
+                                .order_by(TranscriptSegment.id)).all()
+            assert [(r.start_time, r.end_time, r.text) for r in rows] == expected
+            assert all(r.words is None for r in rows)
+            assert rows[0].speaker_id == rows[4].speaker_id == rows[5].speaker_id
+            assert rows[1].speaker_id == rows[2].speaker_id == rows[3].speaker_id
+            assert rows[0].speaker_id != rows[1].speaker_id
+            assert len(session.exec(select(Speaker).where(Speaker.channel_id == 1)).all()) == 2
+            if not recording:
+                session.get(Speaker, rows[0].speaker_id).name = 'Host'
+                session.get(Speaker, rows[1].speaker_id).name = 'Guest'
+                session.commit()
+            else:
+                assert [session.get(Speaker, r.speaker_id).name for r in rows] == ['Host', 'Guest', 'Guest', 'Guest', 'Host', 'Host']
+            profiles = session.exec(select(SpeakerEmbedding).where(SpeakerEmbedding.source_video_id == video.id)).all()
+            assert profiles and all(not (p.sample_start_time < 3 and p.sample_end_time > 2) for p in profiles)
+        assert (audio.parent / f'{video.title}.srt').exists()
+        assert not service._get_temp_diarization_path(video.id).exists()
+    assert set(crops) == {(0, 2), (5, 7), (120, 124), (125, 127), (240, 250)}
+    assert raw.read_bytes() == original
+    assert json.loads(original)['chunks'][-1]['result']['corrections'][0]['raw_end'] == '10.0100'

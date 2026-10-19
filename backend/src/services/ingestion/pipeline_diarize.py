@@ -199,7 +199,7 @@ class DiarizePhaseMixin:
         native_moss = False
         if raw_path.exists():
             data = json.loads(raw_path.read_text(encoding="utf-8"))
-            if "moss_result" in data:
+            if "moss_result" in data or data.get("schema") == "moss-recording-v2":
                 segments, _ = self._moss_checkpoint_segments(data, audio_path)
                 native_moss = True
 

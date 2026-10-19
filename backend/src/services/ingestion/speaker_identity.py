@@ -65,7 +65,7 @@ class SpeakerIdentityMixin:
                 vec = np.asarray(embedding, dtype=np.float32).reshape(-1)
             except Exception:
                 return
-            if vec.size == 0 or int(vec.size) != int(cache.get("dim", -1)):
+            if vec.size == 0:
                 return
             norm = float(np.linalg.norm(vec))
             if norm <= 1e-12:
@@ -83,6 +83,8 @@ class SpeakerIdentityMixin:
                     cache["profile_ids"] = np.asarray([int(profile_id)], dtype=np.int64)
                     cache["speaker_ids"] = np.asarray([int(speaker_id)], dtype=np.int64)
                     cache["count"] = 1
+                    return
+                if int(vec.size) != int(cache.get("dim", -1)):
                     return
                 cache["matrix"] = np.vstack([matrix, vec[None, :]])
                 cache["profile_ids"] = np.append(profile_ids, int(profile_id))
