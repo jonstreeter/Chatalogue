@@ -61,7 +61,23 @@ established; new chunk behavior needs its own isolated and real verification.
 
 | 15 | Diagnose the reported timestamp rejection without production reprocessing; distinguish invalid model output from GPU decode failure and log safe numeric boundary evidence. Preserve exact moss-eof-v1 acceptance and all checkpoint/retry behavior; report any policy decision needed separately. | `backend/src/services/ingestion/moss.py`, `backend/src/services/ingestion/moss_worker.py`, `backend/src/services/ingestion/moss_runtime.py`, `backend/src/test_moss.py`, `backend/src/test_moss_runtime.py`, research, plan, handoff | M | ✅ done: strict policy retained; numeric diagnostics and invalid-output classification verified |
 
+| 16 | Prevent leading-VAD-silence-only microchunks by retaining leading silence with following speech; preserve bounded exact coverage, strict EOF validation and existing checkpoint resume. Reproduce the 256-frame leading-gap planner path and verify isolated pipeline requests plus real retained-audio CUDA inference. | `backend/src/services/ingestion/moss_chunks.py`, `backend/src/test_moss_chunks.py`, `backend/src/test_moss_pipeline.py`, research, plan, handoff | M | ✅ done: leading-gap regression, isolated pipeline and real CUDA/exit verified |
+
 ## Test plan
+
+### Leading VAD gap regression
+
+Task 16 addresses actual diagnostic duration 2/125 seconds (256 frames), not a
+larger timestamp tolerance. Reproduce leading speech hints starting at frame256
+with speech reaching the bounded-window end. Keep that leading silence inside
+the following speech request; only gaps preceded by speech within the current
+window should suggest an earlier seam. No arbitrary minimum chunk length, audio
+padding, silence deletion or malformed-output retries. Verify exact coverage,
+internal/trailing gaps, resumed nonzero cursors, EOF, VAD-unavailable and typed
+resource splits. Run isolated parser/runtime/chunk/pipeline suite and one real
+retained-audio CUDA check through repaired boundary planning with exact frame
+accounting/strict parse/worker exit. Do not reprocess production audio. Scoped
+Ruff, SDD validation, whitespace and normal commit hooks remain required.
 
 ### Timestamp rejection diagnostics
 
@@ -621,3 +637,28 @@ guarantee. No review subagents or product changes for this refinement.
   with exactly one failed attempt/no splitting. Final manager wording assertion
   ->5 PASS. Evidence: ignored task15/tests.log and tests.exit. Scoped Ruff,
   SDD validation and whitespace PASS; normal commit hooks run at checkpoint.
+
+
+- Task16 (2026-10-19): reproduced the planner defect before editing: first
+  speech at cursor+256 reaching the120s limit emitted a256-frame/16ms request,
+  both at cursor0 and resumed cursor1920000. Gap candidates now require prior
+  speech in the current window (`previous > cursor`); no minimum, padding,
+  deletion, validator or checkpoint change. Internal/trailing gaps still cut.
+  Guarded requested parser/runtime/chunk/pipeline suite ->212PASS,4 opt-in network
+  skips,1 existing TRANSFORMERS_CACHE warning,112.38s,exit0. Guard loaded before
+  app imports; deliberate production .env open denied. Exact PCM hash pipeline
+  regression routes250s as120/120/10s through real VAD adapter with injected hints.
+  Real retained9s audio plus256 leading zero frames ->144256 contiguous frames,
+  nonfinal bounded9.016s planner request, one actual CUDA decode/4 turns/3 native
+  overlaps, strict EOS/context, unchanged9.02->9.016 EOF correction (4ms).
+  Real default VAD found start0/end144256; exact256-start hint is separate injected
+  proof, not an assertion about actual default VAD or the production recording.
+  Verified standard install hashes/cache via normal ensure with lock replaced by
+  nullcontext to keep standard root read-only; downloads/rebuild forbidden.
+  Manager reused that verified install with task16-owned log/IPC; worker67068
+  launcherexit0/OSabsence. GPU free27909/32607MiB before load; no other process
+  stopped. Evidence ignored task16/proof.py/json/log/exit and tests.log/exit.
+  Scoped Ruff/SDD/whitespace PASS; normal hooks run at checkpoint. No production
+  job, settings, DB, checkpoint or app-server actions. Prior HEAD0decaefe5;
+  diagnostic baton archived byte-for-byte. Plan In progress/spec In Review;
+  no push/deployment/feature archive.

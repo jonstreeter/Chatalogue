@@ -39,6 +39,19 @@ def test_overlapping_hints_do_not_create_false_gap():
     ]) == Chunk(0, 10, "hard_cut")
 
 
+@pytest.mark.parametrize("cursor", [0, INITIAL_FRAME_CEILING])
+def test_leading_silence_belongs_with_following_speech(cursor):
+    limit = cursor + INITIAL_FRAME_CEILING
+    hints = [{"start": cursor + 256, "end": limit}]
+    assert next_chunk(limit + 1, cursor, speech=hints) == Chunk(cursor, limit, "hard_cut")
+
+
+def test_leading_gap_does_not_hide_later_internal_or_trailing_gap():
+    hints = [{"start": 2, "end": 4}, {"start": 6, "end": 12}]
+    assert next_chunk(30, ceiling=10, speech=hints) == Chunk(0, 6, "vad_gap")
+    assert next_chunk(30, ceiling=15, speech=hints) == Chunk(0, 15, "vad_gap")
+
+
 @pytest.mark.parametrize("args", [(-1,), (True,), (1.1,), (2, 3), (2, -1),
                                  (2, 0, 0), (2, 0, MAX_FRAME_CEILING + 1)])
 def test_invalid_dimensions(args):

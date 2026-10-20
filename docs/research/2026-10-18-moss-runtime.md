@@ -1913,3 +1913,48 @@ MOSS Load/Test; the new verified standard-root install is ready for reuse.
   with exactly one failed attempt/no splitting. Final manager wording assertion
   ->5 PASS. Evidence: ignored task15/tests.log and tests.exit. Scoped Ruff,
   SDD validation and whitespace PASS; normal commit hooks run at checkpoint.
+
+
+## Task16: leading-silence microchunk correction (2026-10-19)
+
+The reported numeric rejection was duration2/125s, end3/50s, excess11/250s:
+256 supplied frames/16ms versus60ms generated end/44ms excess. Those numbers do
+not establish the production source boundary or exact VAD origin. The pure
+planner reproduced a concrete path: hints beginning at cursor+256 and extending
+to the120s window end selected the leading gap as a separate request. Two failing
+regressions established this before the fix, including a nonzero resume cursor.
+Requiring speech before a candidate gap within the current window fixes the root
+cause in one condition; leading silence stays attached to following speech.
+Internal/trailing gap cuts, EOF, exact ownership, positive progress, optional VAD
+fallback, typed resource splits and strict malformed-output rejection remain.
+
+The requested guarded parser/runtime/chunk/pipeline suite passed212 tests with4
+opt-in network skips and1 existing TRANSFORMERS_CACHE warning in112.38s. The task14
+sitecustomize guard was copied to ignored task16 before tests; it redirects app
+paths, disables dotenv and uses SQLite memory. Deliberate production .env access
+was denied. The initial guard probe had a quoting SyntaxError only, then was
+corrected; no unguarded app imports occurred. The pipeline regression exercises
+the actual VAD-to-absolute-hint adapter with injected256-start predictions:
+250s routes120/120/10s, and concatenated request PCM SHA256 equals source PCM.
+
+One actual CUDA inference used the retained144000-frame overlap fixture (PCM
+SHA2566fa9e0bfb2a432a37680625901b449a429e99c2e4128f407ac69b7474fed7e11)
+with exactly256 leading zero frames, preserving the original bytes unchanged.
+The repaired planner treats this as a nonfinal bounded144256-frame request using
+that measured9.016s ceiling (below120s); deterministic hint start256 reaches its
+window end. Real installed-default Silero VAD was separately observed and returned
+start0/end144256, also selecting the full bounded window. This is honest separate
+proof, not a claim that default VAD produced the injected hint on this fixture.
+
+Normal ensure verified the existing standard install/source/model hashes from
+cache, with its installation lock replaced by nullcontext and downloads/rebuilds
+forbidden to retain read-only standard-root use. The task16 manager pointed at
+that verified install and owned its separate IPC/temp root and worker.log. It did
+not rebuild dependencies. GPU free27909 of32607MiB before load; no other process
+was stopped. Actual worker67068 produced4 native turns/3 cross-label overlap pairs,
+words=null, complete EOS/context evidence, and raw9.02 corrected to1127/125 under
+the unchanged0.01s policy (4ms correction). Owned unload completed with launcher
+exit0 and verified OS worker absence. No model output mocks in this CUDA step.
+Evidence: ignored backend/runtime/moss/task16/proof.py, proof.json, proof.log,
+proof.exit; tests.log/tests.exit. Scoped Ruff, SDD validation and whitespace PASS.
+No production reprocessing or timestamp-accuracy/lossless-recognition claim.

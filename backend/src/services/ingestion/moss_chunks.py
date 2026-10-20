@@ -45,7 +45,8 @@ def next_chunk(total_frames, cursor=0, ceiling=INITIAL_FRAME_CEILING, speech=Non
             if start < last_start or end <= start or end > total_frames:
                 raise ValueError("Invalid MOSS speech hints")
             last_start = start
-            if start > previous:
+            # A leading gap owns no speech yet; keep it with the following turn.
+            if start > previous > cursor:
                 candidate = min(start, limit)
                 if previous < candidate and cursor < candidate:
                     cut = candidate

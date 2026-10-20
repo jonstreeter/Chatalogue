@@ -585,6 +585,32 @@ def test_vad_defaults_local_to_absolute_and_fallback(harness, monkeypatch):
     assert len(calls) == 3 and raw['chunks'][0]['boundary_reason'] == 'vad_unavailable'
     assert raw['chunks'][0]['vad_fallback'] == 'ImportError' and seen == [7]
 
+
+def test_vad_leading_256_frames_never_becomes_separate_request(harness, monkeypatch):
+    import hashlib
+    import faster_whisper.vad
+    from src.services.ingestion.pipeline_transcribe import TranscribePhaseMixin
+
+    service, _, audio, manager, _, native = harness
+    sized_recording(harness)
+    monkeypatch.setattr(faster_whisper.vad, 'get_speech_timestamps',
+                        lambda samples: [dict(start=256, end=len(samples))])
+    monkeypatch.setattr(service, '_moss_speech_hints', TranscribePhaseMixin._moss_speech_hints)
+    received, counts = hashlib.sha256(), []
+    with wave.open(str(audio)) as stream:
+        original = hashlib.sha256(stream.readframes(stream.getnframes())).hexdigest()
+    def infer(data):
+        with wave.open(io.BytesIO(data)) as stream:
+            count = stream.getnframes()
+            received.update(stream.readframes(count))
+        counts.append(count)
+        return dict(result=parse_generation(' ', count, 16000, native['completion']),
+                    runtime=PROVENANCE.copy())
+    manager.transcribe = infer
+    run(harness)
+    assert counts == [120 * 16000, 120 * 16000, 10 * 16000]
+    assert received.hexdigest() == original
+
 def test_local_eof_corrections_and_exact_offsets(harness):
     from fractions import Fraction
     service, _, audio, manager, _, native = harness
