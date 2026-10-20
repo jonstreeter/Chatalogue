@@ -1,7 +1,7 @@
 # Speaker merge performance — Implementation Plan
 
 **Date:** 2026-10-20
-**Status:** Not started
+**Status:** In progress
 **Spec:** `docs/dev/specs/2026-10-20-speaker-merge-performance-design.md`
 
 ## Summary
@@ -48,7 +48,7 @@ only a test for the actual corrected defect should fail before its fix.
 
 | # | Task | Files | Size | Status |
 | --- | --- | --- | --- | --- |
-| 1 | Establish reproducible list and merge baselines; split request/SQL/commit/response/UI timings; record measured corrections and owner-approved end-to-end acceptance criteria | `scripts/benchmark_speaker_merge.py`, `backend/src/test_speaker_merge_benchmark.py`, `docs/dev/handoffs/2026-10-20-speaker-merge-loading.md`, this plan | M | ☐ todo |
+| 1 | Establish reproducible list and merge baselines; split request/SQL/commit/response/UI timings; record measured corrections and owner-approved end-to-end acceptance criteria | `scripts/benchmark_speaker_merge.py`, `backend/src/test_speaker_merge_benchmark.py`, `docs/dev/handoffs/2026-10-20-speaker-merge-loading.md`, this plan | M | ▶ in progress |
 | 2 | Add failing characterization/regression checks for the measured causes and preserved list/merge contracts | `backend/src/test_speaker_loading_optimization.py`, `backend/src/test_speaker_merge.py`, `frontend/e2e/speaker-merge.spec.ts` | M | ☐ todo |
 | 3 | Apply the measured list-path correction; change picker lifecycle handling only if evidence requires it; verify shared callers | `backend/src/services/speaker_queries.py`, `backend/src/routers/speakers.py`, `frontend/src/components/SpeakerModal.tsx`, `backend/src/db/database.py` only if proven necessary | M | ☐ todo |
 | 4 | Apply the measured merge-path correction while retaining transaction ownership, ownership integrity, response fields, and fresh parent state | `backend/src/services/speaker_merge.py`, `backend/src/routers/speakers.py`, `frontend/src/components/SpeakerModal.tsx`; implicated callback consumer only with recorded evidence | M | ☐ todo |
@@ -186,6 +186,29 @@ Re-review of the changed provisions: PASS; no necessary review finding open.
 This result supersedes the earlier review record, not the pending runtime gates.
 
 ## Verification log
+
+- 2026-10-20: Planning checkpoint `f3804be0e`; all pre-commit hooks PASS.
+  Git maintenance subsequently reported a geometric repack failure; the commit
+  succeeded. No hook bypass. Pre-existing unrelated work preserved.
+- 2026-10-20: Live read-only diagnosis on Postgres at loopback port 55432:
+  exact screenshot video is 16980, channel 9. GET `/speakers?channel_id=9`
+  returned 3,029 rows / 536,967 bytes in 0.439 s, repeat 0.050 s.
+  GET `/videos/16980/segments` returned 61 segments in 0.020 s.
+  Duration-aggregation subquery EXPLAIN ANALYZE took 391.304 ms; this is the
+  aggregate subquery, not a measurement of the complete endpoint. Installed
+  speaker foreign-key lookup indexes were confirmed. No blocked database
+  sessions or active app jobs were observed at inspection time.
+- 2026-10-20: Browser opened `/video/16980`, Edit Speaker -> Choose Speaker,
+  and searched `Dan` successfully. Full page had 3,119 buttons with the picker
+  open. UI observation round-trip was 4.932 s including accessibility extraction;
+  it is not an isolated rendering-time measurement. No merge POST was sent.
+- 2026-10-20: Owner confirms the list is fast now. No list regression was
+  reproduced; task 3 has no evidence-supported correction and must not start.
+  Asked whether merge confirmation remains slow. Original screenshot source
+  appears already merged into Dan McLellan; current video speakers are 6188 and
+  17567, so the exact original ownership state is unavailable. Task 1 remains
+  incomplete for merge timing; no benchmark infrastructure or application patch
+  was created in the absence of a current reproducible operation.
 
 - 2026-10-20: Owner approved revised plan with `d`. Planning checkpoint authorized;
   task 1 diagnosis follows. Review records above describe the pre-approval state.
