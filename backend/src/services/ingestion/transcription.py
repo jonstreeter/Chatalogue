@@ -1884,6 +1884,26 @@ class TranscriptionEngineMixin:
                 hypothesis = self._normalize_parakeet_hypothesis(result)
                 transcript_text, raw_words, raw_segments = self._extract_parakeet_transcript_items(hypothesis)
 
+                # A chunk containing only music/silence has no timestamps to validate.
+                # Require an independent speech check before accepting empty decoding.
+                if (
+                    progress_chunk_index is not None
+                    and not transcript_text.strip()
+                    and not raw_words
+                    and not raw_segments
+                    and waveform is not None
+                ):
+                    try:
+                        from faster_whisper.vad import get_speech_timestamps
+
+                        no_speech = not get_speech_timestamps(waveform)
+                    except Exception as e:
+                        log_verbose(f"Parakeet empty-chunk speech check failed: {e}")
+                        no_speech = False
+                    if no_speech:
+                        log(f"Parakeet chunk {progress_chunk_index}: no speech detected; accepting empty output.")
+                        return [], start_time_offset + input_duration
+
                 words = []
                 for item in raw_words:
                     if not isinstance(item, dict):
