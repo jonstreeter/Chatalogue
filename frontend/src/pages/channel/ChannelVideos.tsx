@@ -10,7 +10,6 @@ type SortField = 'published_at' | 'title' | 'duration' | 'status' | 'popularity'
 type SortOrder = 'asc' | 'desc';
 const VIDEO_PAGE_SIZE = 250;
 const DATE_BACKFILL_POLL_MS = 5000;
-const DATE_BACKFILL_MAX_POLLS = 24;
 const REFRESH_BURST_POLL_MS = 800;
 const REFRESH_BURST_ATTEMPTS = 6;
 const ACTIVE_PIPELINE_STATUSES = new Set(['pending', 'queued', 'downloading', 'transcribing', 'diarizing', 'waiting_diarize']);
@@ -64,7 +63,6 @@ export function ChannelVideos() {
     const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
     const [visibleCount, setVisibleCount] = useState(VIDEO_PAGE_SIZE);
     const backfillPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const backfillPollCountRef = useRef(0);
 
     const clearBackfillPollTimer = () => {
         if (backfillPollTimerRef.current) {
@@ -130,7 +128,7 @@ export function ChannelVideos() {
 
     const getChannelSyncProgress = () => Math.max(0, Math.min(100, Number(channel?.sync_progress ?? 0)));
 
-    const fetchVideos = async (polling: boolean = false): Promise<Video[]> => {
+    const fetchVideos = async (): Promise<Video[]> => {
         try {
             const res = await api.get<Video[]>('/videos/list', { params: { channel_id: id } });
             setVideos(res.data);
@@ -138,9 +136,6 @@ export function ChannelVideos() {
                 count + (video.published_at ? 0 : 1)
             ), 0);
             setMissingDateCount(nextMissingDateCount);
-            if (!polling && nextMissingDateCount === 0) {
-                backfillPollCountRef.current = 0;
-            }
             return res.data;
         } catch (e) {
             console.error('Failed to fetch videos:', e);
@@ -155,7 +150,7 @@ export function ChannelVideos() {
             await new Promise((resolve) => window.setTimeout(resolve, REFRESH_BURST_POLL_MS));
             const [nextChannel, nextVideos] = await Promise.all([
                 fetchChannel(),
-                fetchVideos(true),
+                fetchVideos(),
             ]);
             const channelIsRefreshing = nextChannel?.status === 'refreshing';
             const hasVideos = nextVideos.length > 0;
@@ -168,7 +163,6 @@ export function ChannelVideos() {
 
     useEffect(() => {
         clearBackfillPollTimer();
-        backfillPollCountRef.current = 0;
         void fetchChannel();
         void fetchVideos();
         return () => {
@@ -186,27 +180,25 @@ export function ChannelVideos() {
         const shouldPollMetadataBackfill = (
             !isManualChannel &&
             isMetadataBackfillDetail(channel?.sync_status_detail) &&
-            Number(channel?.sync_progress ?? 0) < 100 &&
-            backfillPollCountRef.current < DATE_BACKFILL_MAX_POLLS
+            Number(channel?.sync_progress ?? 0) < 100
         );
         if (!shouldPollRefresh && !shouldPollMetadataBackfill) {
-            if (!isMetadataBackfillDetail(channel?.sync_status_detail) || Number(channel?.sync_progress ?? 0) >= 100) {
-                backfillPollCountRef.current = 0;
-            }
             return;
         }
 
-        backfillPollTimerRef.current = setTimeout(() => {
-            if (!shouldPollRefresh && shouldPollMetadataBackfill) {
-                backfillPollCountRef.current += 1;
+        let cancelled = false;
+        const poll = async () => {
+            await Promise.all([fetchVideos(), fetchChannel()]);
+            // Unchanged progress must not stop polling. Cleanup owns cancellation
+            // when the channel finishes, changes, or this component unmounts.
+            if (!cancelled) {
+                backfillPollTimerRef.current = setTimeout(poll, DATE_BACKFILL_POLL_MS);
             }
-            void fetchVideos(true);
-            if (shouldPollRefresh || !isManualChannel) {
-                void fetchChannel();
-            }
-        }, DATE_BACKFILL_POLL_MS);
+        };
+        backfillPollTimerRef.current = setTimeout(poll, DATE_BACKFILL_POLL_MS);
 
         return () => {
+            cancelled = true;
             clearBackfillPollTimer();
         };
     }, [channel?.status, channel?.sync_progress, channel?.sync_status_detail, id, isManualChannel, missingDateCount]);
