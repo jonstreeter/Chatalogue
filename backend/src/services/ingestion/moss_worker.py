@@ -144,7 +144,7 @@ def main():
     parser.add_argument("--source-dir", type=Path, required=True)
     parser.add_argument("--temp-root", type=Path, required=True)
     args = parser.parse_args()
-    from moss import parse_generation
+    from moss import MossValidationError, parse_generation
     output, model, seen, requests = sys.stdout, None, set(), 0
     for line in sys.stdin:
         request_id, operation, error_code = None, None, "request_failed"
@@ -189,6 +189,8 @@ def main():
                     error_code = "cuda_oom"
                 elif isinstance(error, ContextBudgetError):
                     error_code = "context_exhausted"
+                elif isinstance(error, MossValidationError):
+                    error_code = "invalid_transcript"
             traceback.print_exc(file=sys.stderr)
             encoded = json.dumps({"protocol": 1, "id": request_id, "error": error_code})
         output.write(encoded + "\n")

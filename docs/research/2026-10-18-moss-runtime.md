@@ -1889,3 +1889,27 @@ wheel, runtime, completion/overlap/EOF and lifecycle evidence. Prior task1/task3
 task13 evidence, all production media/data/settings and completed checkpoints
 were untouched. Restart the backend so it imports the corrected pins, then retry
 MOSS Load/Test; the new verified standard-root install is ready for reuse.
+
+## Task15 timestamp rejection diagnostics
+
+- Task15 (2026-10-19): reported worker trace reaches EOF rejection, meaning end>D
+  and either excess>0.01s or collapsed correction start==D; no endpoint numbers
+  retained, so exact excess/recording cannot be identified. Parser now reports
+  only reason/index and exact rational end/duration/excess. Private worker
+  invalid_transcript distinguishes invalid generation from typed CUDA/context
+  resource failures; manager avoids GPU-memory advice. Acceptance/checkpoints/
+  retries/pins/lifecycle unchanged. No production reprocessing or CUDA rerun.
+  Initial cwd mistake aborted edits then mistakenly launched unguarded tests;
+  interrupted at about80 tests. Imports may have read dotenv; no mutation
+  established, no cleanup attempted. Later full suite guarded before imports,
+  SQLite/no dotenv/task15 fixtures; deliberate production .env open denied.
+  Scoped Ruff, SDD validation and whitespace PASS. Parser final refinement65PASS.
+
+- Final task15 guarded backend venv `python -m pytest src/test_moss.py
+  src/test_moss_runtime.py src/test_moss_chunks.py src/test_moss_pipeline.py -q`
+  ->208 PASS,4 opt-in network skips,1 existing TRANSFORMERS_CACHE warning,
+  110.43s,exit0. Includes actual worker JSONL loop/fake Decoder classification,
+  strict clock acceptance, and prior committed chunk retained on invalid output
+  with exactly one failed attempt/no splitting. Final manager wording assertion
+  ->5 PASS. Evidence: ignored task15/tests.log and tests.exit. Scoped Ruff,
+  SDD validation and whitespace PASS; normal commit hooks run at checkpoint.

@@ -516,6 +516,7 @@ def test_decoder_classifies_actual_oom_class_only(monkeypatch, is_oom):
 @pytest.mark.parametrize("code,kind", [("cuda_oom", runtime.MossCudaOOMError),
                                       ("context_exhausted", runtime.MossContextBudgetError),
                                       ("decode_failed", runtime.MossRuntimeError),
+                                      ("invalid_transcript", runtime.MossRuntimeError),
                                       ("load_failed", runtime.MossRuntimeError)])
 def test_typed_worker_reply_preserves_cleanup(owned_runtime, monkeypatch, code, kind):
     manager, _ = owned_runtime
@@ -534,6 +535,9 @@ def test_typed_worker_reply_preserves_cleanup(owned_runtime, monkeypatch, code, 
         with pytest.raises(kind) as caught:
             manager.transcribe(_silence())
         assert type(caught.value) is kind
+        if code == "invalid_transcript":
+            assert "invalid or incomplete transcript" in str(caught.value)
+            assert "GPU memory" not in str(caught.value)
         assert not manager.status()["process_running"]
         assert not list(manager.temp_root.iterdir())
     finally:
@@ -559,9 +563,10 @@ def test_worker_resource_codes_are_private_to_transcription(tmp_path):
 
 @pytest.mark.parametrize("failure,code", [("oom", "cuda_oom"),
                                          ("context", "context_exhausted"),
-                                         ("malformed", "decode_failed"),
+                                         ("malformed", "invalid_transcript"),
+                                         ("eof", "invalid_transcript"),
                                          ("diagnostic", "decode_failed")])
-def test_worker_emits_only_typed_resource_codes(monkeypatch, tmp_path, failure, code):
+def test_worker_emits_only_typed_resource_codes(monkeypatch, tmp_path, capsys, failure, code):
     import io
     import torch
     from src.services.ingestion import moss, moss_worker as worker
@@ -574,6 +579,8 @@ def test_worker_emits_only_typed_resource_codes(monkeypatch, tmp_path, failure, 
             worker.completion_for([1, 2], 131070, 131072)
         if failure == "diagnostic":
             raise RuntimeError("CUDA out of memory context exhausted")
+        if failure == "eof":
+            return "[0][S01]PRIVATE TRANSCRIPT[0.02]", worker.completion_for([1, 151645], 10, 131072)
         return "malformed output", worker.completion_for([1, 151645], 10, 131072)
     monkeypatch.setattr(decoder, "_generate", generate)
     monkeypatch.setattr(worker, "Decoder", lambda *args: decoder)
@@ -591,6 +598,10 @@ def test_worker_emits_only_typed_resource_codes(monkeypatch, tmp_path, failure, 
     reply = json.loads(output.getvalue().splitlines()[-1])
     assert reply == {"protocol": 1, "id": "decode", "error": code}
     assert "private" not in output.getvalue()
+    if failure == "eof":
+        diagnostic = capsys.readouterr().err
+        assert "index=0 end=1/50 duration=1/16000 excess=319/16000" in diagnostic
+        assert "PRIVATE TRANSCRIPT" not in diagnostic
 
 
 @pytest.mark.parametrize("bad", [b"", b"bad", None])
@@ -981,3 +992,26 @@ def test_retained_moss_is_not_evicted_for_its_own_vram(app_moss, monkeypatch):
     monkeypatch.setattr(service, "_upsert_job_payload_fields", lambda *a: None)
     monkeypatch.setattr(service, "purge_loaded_models", lambda **kw: pytest.fail("resident child is intentional"))
     service._maybe_recover_cuda_headroom(8 * 1024**3)
+
+
+from src.test_moss_pipeline import harness as pipeline_harness  # noqa: E402, F401
+from src.test_phonon import isolated_service  # noqa: E402, F401
+
+
+def test_invalid_transcript_preserves_committed_chunk_without_split(pipeline_harness):  # noqa: F811
+    from src.test_moss_pipeline import run, sized_recording
+    service, video, _, manager, *_ = pipeline_harness
+    calls = sized_recording(pipeline_harness)
+    actual = manager.transcribe
+    attempts = []
+    def infer(data):
+        attempts.append(True)
+        if len(calls) == 1:
+            raise runtime.MossRuntimeError("MOSS returned an invalid or incomplete transcript")
+        return actual(data)
+    manager.transcribe = infer
+    with pytest.raises(runtime.MossRuntimeError, match="invalid or incomplete transcript"):
+        run(pipeline_harness)
+    state = json.loads(service._get_temp_transcript_path(video.id).read_text())
+    assert state['chunk_count'] == 1 and state['frontier'] == 120 * 16000
+    assert len(calls) == 1 and len(attempts) == 2

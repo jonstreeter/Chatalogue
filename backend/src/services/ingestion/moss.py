@@ -102,7 +102,11 @@ def parse_generation(raw_text, sample_count, sample_rate, completion):
         normalized = end
         if end > duration:
             if end - duration > Fraction(1, 100) or duration <= start:
-                _fail()
+                raise MossValidationError(
+                    "Invalid or incomplete MOSS transcript; invalid EOF endpoint "
+                    f"reason={'beyond_allowance' if end - duration > Fraction(1, 100) else 'collapsed_span'} "
+                    f"index={len(segments)} end={end} duration={duration} "
+                    f"excess={end - duration}; retry transcription.")
             normalized = duration
             corrections.append({"index": len(segments), "raw_end": value,
                                 "normalized_end": str(duration), "policy": POLICY})

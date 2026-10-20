@@ -149,3 +149,16 @@ def test_backend_checks_correction_metadata_dimensions_and_shape(completion):
             moss.validate_worker_result(result, 144000, 16000)
     with pytest.raises(moss.MossValidationError):
         moss.validate_worker_result(original, 144001, 16000)
+
+
+def test_eof_rejection_numeric_diagnostic_without_text(completion):
+    with pytest.raises(moss.MossValidationError) as error:
+        parse("[0][S01]PRIVATE TRANSCRIPT[9.010001]", completion)
+    assert "reason=beyond_allowance" in str(error.value)
+    assert "index=0 end=9010001/1000000 duration=9 excess=10001/1000000" in str(error.value)
+    assert "PRIVATE TRANSCRIPT" not in str(error.value)
+
+
+def test_collapsed_eof_rejection_is_distinct(completion):
+    with pytest.raises(moss.MossValidationError, match="reason=collapsed_span"):
+        parse("[9][S01]private[9.01]", completion)

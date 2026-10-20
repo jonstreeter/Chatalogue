@@ -59,7 +59,21 @@ established; new chunk behavior needs its own isolated and real verification.
 | 13 | Verify isolated >90-minute coverage fixtures and real CUDA multi-chunk seams/identity/checkpoint reuse/GPU handoff; run full workflow and record measured limitations/local handoff. | `docs/research/2026-10-18-moss-runtime.md`, spec, plan, handoff; affected MOSS tests/paths only through explicit conductor repack | L | ✅ done: real three-chunk CUDA/identity/resume and full local verification |
 | 14 | Correct Windows-checkout source checksum pins to exact immutable upstream download bytes; prove fresh-source download setup, tamper rejection, offline reuse and native CUDA load/inference without touching checkpoints. | `backend/src/services/ingestion/moss_runtime.py`, `backend/src/test_moss_runtime.py`, `docs/research/2026-10-18-moss-runtime.md`, plan and handoff | M | ✅ done: canonical fresh-source setup, offline reuse and real CUDA/exit verified |
 
+| 15 | Diagnose the reported timestamp rejection without production reprocessing; distinguish invalid model output from GPU decode failure and log safe numeric boundary evidence. Preserve exact moss-eof-v1 acceptance and all checkpoint/retry behavior; report any policy decision needed separately. | `backend/src/services/ingestion/moss.py`, `backend/src/services/ingestion/moss_worker.py`, `backend/src/services/ingestion/moss_runtime.py`, `backend/src/test_moss.py`, `backend/src/test_moss_runtime.py`, research, plan, handoff | M | ✅ done: strict policy retained; numeric diagnostics and invalid-output classification verified |
+
 ## Test plan
+
+### Timestamp rejection diagnostics
+
+Task 15 preserves parser acceptance, private worker ownership and checkpoint
+formats. Verify safe numeric diagnostics for beyond-allowance EOF rejection,
+typed distinction from CUDA OOM/context errors, no automatic splitting/retry for
+malformed output, no transcript leakage, unchanged accepted EOF/overlap cases,
+and owned cleanup. Run isolated parser/runtime/chunk/pipeline tests, scoped Ruff,
+SDD validation, whitespace and normal commit hooks. Use injected worker output
+for rejected model generations; do not rerun production audio or repeat closed
+CUDA performance proofs. Any wider timestamp policy requires a separate owner
+decision after the measured diagnostic gap is recorded.
 
 ### Fresh-download checksum regression
 
@@ -585,3 +599,25 @@ guarantee. No review subagents or product changes for this refinement.
   is ready for reuse. No production jobs/settings/media/DB/checkpoints touched.
   All14 tasks verified; plan remains In progress/spec In Review; no push/deploy
   or feature archive.
+
+- Task15 (2026-10-19): reported worker trace reaches EOF rejection, meaning end>D
+  and either excess>0.01s or collapsed correction start==D; no endpoint numbers
+  retained, so exact excess/recording cannot be identified. Parser now reports
+  only reason/index and exact rational end/duration/excess. Private worker
+  invalid_transcript distinguishes invalid generation from typed CUDA/context
+  resource failures; manager avoids GPU-memory advice. Acceptance/checkpoints/
+  retries/pins/lifecycle unchanged. No production reprocessing or CUDA rerun.
+  Initial cwd mistake aborted edits then mistakenly launched unguarded tests;
+  interrupted at about80 tests. Imports may have read dotenv; no mutation
+  established, no cleanup attempted. Later full suite guarded before imports,
+  SQLite/no dotenv/task15 fixtures; deliberate production .env open denied.
+  Scoped Ruff, SDD validation and whitespace PASS. Parser final refinement65PASS.
+
+- Final task15 guarded backend venv `python -m pytest src/test_moss.py
+  src/test_moss_runtime.py src/test_moss_chunks.py src/test_moss_pipeline.py -q`
+  ->208 PASS,4 opt-in network skips,1 existing TRANSFORMERS_CACHE warning,
+  110.43s,exit0. Includes actual worker JSONL loop/fake Decoder classification,
+  strict clock acceptance, and prior committed chunk retained on invalid output
+  with exactly one failed attempt/no splitting. Final manager wording assertion
+  ->5 PASS. Evidence: ignored task15/tests.log and tests.exit. Scoped Ruff,
+  SDD validation and whitespace PASS; normal commit hooks run at checkpoint.

@@ -448,6 +448,9 @@ class MossRuntime:
                     raise MossCudaOOMError("MOSS CUDA memory exhausted for this request")
                 if reply["error"] == "context_exhausted":
                     raise MossContextBudgetError("MOSS output context exhausted for this request")
+            if reply["error"] == "invalid_transcript":
+                raise MossRuntimeError("MOSS returned an invalid or incomplete transcript; "
+                                       "check numeric boundary diagnostics in the local worker log")
             if reply["error"] == "invalid_input":
                 raise MossRuntimeError("Moss input must be a valid bounded 16 kHz mono PCM16 WAV")
             reason = "could not load its model" if reply["error"] == "load_failed" else "could not decode the input"
