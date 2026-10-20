@@ -57,8 +57,18 @@ established; new chunk behavior needs its own isolated and real verification.
 | 11 | Reconstruct chunk namespaces and reconcile real channel identities without native overlap loss; verify clean enrollment, swapped labels and identity-only retry. | `backend/src/services/ingestion/pipeline_diarize.py`, `backend/src/services/ingestion/speaker_identity.py`, `backend/src/test_moss_pipeline.py` | M | ✅ done: chunk identity enrollment, persistent names and retry verified |
 | 12 | Replace recording-limit and whole-input retry UI with automatic batching/resume capability; expose chunk progress and browser-verify controls, persistence and segment playback. | `frontend/src/pages/Settings.tsx`, `frontend/src/components/SetupWizard.tsx`, `frontend/src/pages/JobQueue.tsx`, `frontend/e2e/moss.spec.ts` | M | ✅ done: automatic batching/resume notice and isolated Chromium proof |
 | 13 | Verify isolated >90-minute coverage fixtures and real CUDA multi-chunk seams/identity/checkpoint reuse/GPU handoff; run full workflow and record measured limitations/local handoff. | `docs/research/2026-10-18-moss-runtime.md`, spec, plan, handoff; affected MOSS tests/paths only through explicit conductor repack | L | ✅ done: real three-chunk CUDA/identity/resume and full local verification |
+| 14 | Correct Windows-checkout source checksum pins to exact immutable upstream download bytes; prove fresh-source download setup, tamper rejection, offline reuse and native CUDA load/inference without touching checkpoints. | `backend/src/services/ingestion/moss_runtime.py`, `backend/src/test_moss_runtime.py`, `docs/research/2026-10-18-moss-runtime.md`, plan and handoff | M | ✅ done: canonical fresh-source setup, offline reuse and real CUDA/exit verified |
 
 ## Test plan
+
+### Fresh-download checksum regression
+
+Task 14 corrects an installation defect, not model/source revisions or a new
+inference contract. Verify canonical immutable Git blob/download bytes, reject
+tampered or truncated files, exercise downloader without preseeded source files,
+and run actual isolated setup/native CUDA inference with the corrected source.
+Retain old task-1/task-3 evidence unchanged and distinguish Windows checkout
+CRLF hashes from upstream LF hashes. Existing completed chunks survive unchanged.
 
 ### Batching amendment tasks
 
@@ -157,6 +167,13 @@ policy is derived from the recorded fixture failure, not an upstream precision
 guarantee. No review subagents or product changes for this refinement.
 
 ## Verification log
+
+- 2026-10-19 owner reported fresh setup failing source checksum. Exact immutable
+  upstream reads identify four CRLF checkout pins incorrectly used for LF download
+  bytes. For source/LICENSE: expected 11558 bytes versus upstream 11357; 201 CRLF
+  sequences account for the difference. All four local files normalize byte-for-
+  byte to their upstream LF content. Source/model revisions remain unchanged.
+  Task 14 is the authorized root fix and fresh-download regression/proof.
 
 - 2026-10-19 owner reported a real job rejected by the app's whole-recording
   guard and directed batching as the correct app responsibility. Revised existing
@@ -548,3 +565,23 @@ guarantee. No review subagents or product changes for this refinement.
   forced1.log/.exit. No product/identity changes; prior 316 backend/19 browser
   passes remain closed. SDD/whitespace/normal hooks run for the separate evidence
   commit; 622e7f437 is not amended. Task 13 and all 13 tasks are now fully verified.
+
+- Task 14 (2026-10-19): corrected only four source size/SHA pins from Windows
+  CRLF checkout bytes to unchanged immutable upstream LF downloads. Regular pin
+  assertion catches the old values; opt-in real fresh-network regression covers
+  all4 empty caches, offline verified reuse, truncated/altered/CRLF rejection.
+  Isolated requested runtime/parser/chunk suite with MOSS_TEST_FRESH_SOURCE=1:
+  168 PASS,0 skips,38.55s; scoped Ruff PASS. Actual normal standard-root ensure
+  freshly downloaded all4 source files, verified/reused19 existing model files,
+  and reused67 exact lock-matching dependency wheels after disk check. No model,
+  revision, requirement, raw validation or checkpoint changes. Setup876.271s;
+  offline verified reuse PASS. New version c19b2f905bd461f27f79731aa9745864128092d26a91f788b54980b5755ca98f.
+  Installed helper AST equals retained original CRLF checkout, newline-only bytes.
+  Actual retained9s CUDA decode:4 turns/3 native overlap pairs, strict EOS/context,
+  raw9.01->9 moss-eof-v1; worker66300 absent after owned unload, launcherexit0.
+  Evidence task14/proof.json/log/exit and tests.log/exit; old evidence untouched.
+  SDD/whitespace and normal required hooks run at checkpoint. Prior baton archived
+  unchanged. Restart backend before MOSS Load/Test; verified standard-root install
+  is ready for reuse. No production jobs/settings/media/DB/checkpoints touched.
+  All14 tasks verified; plan remains In progress/spec In Review; no push/deploy
+  or feature archive.

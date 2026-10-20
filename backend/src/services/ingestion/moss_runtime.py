@@ -60,12 +60,13 @@ PINNED_FILES = {'model/.gitattributes': (226, '97e0134c7dd6994fe5aa1ada1210b1cea
  'model/tokenizer_config.json': (503,
                                  '61d04c96104177240688396655ae3f7cf38ce2ea036db867a1d2b6883e27c3d5'),
  'model/vocab.json': (2776833, 'ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910'),
- 'source/LICENSE': (11558, '1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6'),
- 'source/README.md': (20024, '726e2d8a9bb9a5f78af9c530e69db5f8af7242874931dce424c67925731a48d5'),
- 'source/pyproject.toml': (1135,
-                           '1ad7b0f7b158dc141551f1c548bd8efff3aeb420962c357bd8989dc4f70d70fb'),
- 'source/moss_transcribe_diarize/inference_utils.py': (9026,
-                                                       '51266b42cb7eb44cdf6726e09c5ac5f72ac98aa8796ce1c7374c1047f54d9857')}
+ # Pin immutable download bytes, not a Windows checkout's CRLF conversion.
+ 'source/LICENSE': (11357, 'c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4'),
+ 'source/README.md': (19546, 'abcfe4aca1ae5d373dfe0f3ac8a8d8c7e6abf8e362ce139961775f2141d543eb'),
+ 'source/pyproject.toml': (1091,
+                           '181e406a953d1b6b1a18971dada4427732597fa592252fe8e63080169192d72b'),
+ 'source/moss_transcribe_diarize/inference_utils.py': (8784,
+                                                       '1d97700b83ed95438be2e3a59529b3726d7bf7f7cdd488ad2097180bad15b86b')}
 REQUIREMENTS = Path(__file__).with_name("moss_worker_requirements.txt")
 WORKER = Path(__file__).with_name("moss_worker.py")
 MAX_INPUT_BYTES = 5400 * 32000 + 44

@@ -1,4 +1,4 @@
-# Handoff: MOSS bounded recording final verification
+# Handoff: MOSS canonical source checksum repair
 
 **Date:** 2026-10-19
 **Spec:** `docs/dev/specs/2026-10-18-moss-engine-design.md`
@@ -6,84 +6,65 @@
 
 ## Status
 
-All13 tasks verified, including actual CUDA batching/identity and the full local
-workflow. Plan remains In progress; spec In Review for local closeout.
-Prior task12 baton preserved unchanged at
-`archive/2026-10/2026-10-18-moss-engine-batching-ui.md`.
+All14 tasks verified. Task14 fixes the four source checksums to immutable upstream
+LF download bytes; revisions, requirements and all19 model pins stay unchanged.
+Plan remains In progress/spec In Review for local closeout. Previous task13 baton
+is preserved byte-for-byte at
+`archive/2026-10/2026-10-18-moss-engine-batching-complete.md`.
 
 ## Next step
 
-Conductor reviews this evidence and the verification commit, then reports
-PLAN_COMPLETE. No push, installer update, deployment or feature archive is
-authorized by this phase.
+Conductor reviews task14 evidence/commit and reports PLAN_COMPLETE. Restart the
+backend to import the corrected pins, then retry MOSS Load/Test. Normal verified
+standard-root install is ready for reuse; no production job was retried.
+No push, deployment, installer update or feature archive is authorized here.
 
 ## Verification state
 
-- Frontend `npx tsc -b` → PASS, exit0.
-- Root `backend/.venv/Scripts/python.exe -m ruff check .` → PASS, exit0.
-- Frontend `npm run lint` → PASS, exit0;43 existing warnings,0 errors.
-- Backend isolated `.venv/Scripts/python.exe -m pytest src -q` →316 PASS,
-  1 reported warning,179.58s, exit0. Additional interpreter shutdown notice:
-  swigvarlink lacks __module__. No skips/failures.
-- Actual CUDA three-chunk proof → PASS after correcting a scratch manifest-field
-  assertion against the saved artifact without repeating ASR. Same childPID3208,
-  exact240s coverage, durable committed interruption/resume, strict native
-  completion/offset/EOF evidence. New output65 turns has no native overlap;
-  retained actual9s overlap proof and v2 fixture regressions cover overlap separately.
-- Required continuous-speech fallback seam follow-up → PASS. Explicit optional
-  VAD-unavailable fault injection on rotated cached speech; actual CUDA requests
-  120s/5s in child 61544, exact frames 0–1920000–2000000, 30 native turns, strict
-  EOS/context and final 5.01→5 EOF correction. Boundary source samples are intact
-  inside an observed speech turn. Adjacent text shows changed continuation
-  wording; recognition/timing accuracy remains unproven. No obvious whole-turn
-  replay, text deduplication or relaxed validation. Worker exit0/OS absence
-  verified. Evidence task13/forced1/, forced1.log/.exit; no suite/identity reruns.
-- Real CUDA identity →65 saved rows/19 profiles;22 clean-only crops.
-  Equal local labels route to different people; changed local labels reuse the
-  same real profile. OS worker absence verified before voice-model GPU load.
-- Named identity-only retry →65 matched rows,0 ASR/VAD calls, unchanged raw hash.
-- Frontend full installed-Chrome
-  `npm run test:e2e -- --config=../backend/runtime/moss/task13/playwright.config.cjs`
-  →19 PASS,49.6s,exit0. All19 selected; no exclusions. Unique
-  task13/e2e-results-full preserves older evidence. Fixture8000/Vites5173/5175
-  ownership verified before HTTP; installed Chrome env supplied for per-file
-  launch overrides. API processing/scan transitions are fixture simulations.
-- SDD validation, git whitespace and normal required commit hooks run at checkpoint.
+- Isolated backend venv `python -m pytest src/test_moss_runtime.py src/test_moss.py src/test_moss_chunks.py -q`
+  with task14 pre-import isolation and `MOSS_TEST_FRESH_SOURCE=1` ->168 PASS,
+  zero skips,38.55s,exit0. All four source files downloaded into fresh temporary
+  caches; altered/truncated/CRLF responses rejected, verified offline cache reused.
+- Scoped Ruff ->PASS. SDD validation and git whitespace ->PASS; required normal
+  hooks run at checkpoint.
+- Actual normal standard-root `MossInstallation.ensure()` ->PASS,876.271s.
+  Existing19 model cache files verified by exact unchanged hashes. All4 new source
+  digest paths initially absent; fresh canonical network bytes passed size/SHA.
+  Installed helper AST equals original CRLF checkout; source differences newline-only.
+- Reused67 exact lock-matching wheels (3,036,101,674 bytes) from read-only task3
+  caches after disk-space check; no dependency/model redownload or backend upgrade.
+  Offline pip install, pip check, native import/CUDA check and atomic manifest PASS.
+- Offline verified ensure with network/download/subprocess APIs forbidden ->PASS.
+- Real manager load/readiness/retained9s CUDA decode ->PASS. RTX5090,
+  Torch2.10.0+cu128/CUDA12.8, BF16/SDPA;4 turns,3 native overlap pairs,
+  strict EOS/context and raw9.01->9 moss-eof-v1 correction. Decode6.283s.
+- Owned unload ->PASS, worker66300 absent, launcherexit0, installed/unloaded status.
 
 ## Blockers
 
-None. Owned models released and fixture helpers exited; no listeners on
-8000/5173/5175 remain. Nine unrelated baseline paths preserved.
+None. No owned runtime process remains. Nine unrelated baseline paths preserved.
+The existing Transformers processor mapping deprecation warning is nonfatal.
 
 ## Diagnosis worth keeping
 
-All new evidence lives under ignored `backend/runtime/moss/task13/`, with copied
-pre-import isolation, dotenv disabled, fixture SQLite/data/env/runtime paths and
-production data/.env audit guard. Source is the cached120s conversation repeated
-twice, not an independent accuracy recording. Exact source hashes, intervals,
-completion tokens, memory and timings are in the research report and retained
-`real1/proof.json`/raw artifact. Three requests73.072/120/46.928s used default VAD;
-cuts are labeled vad_gap/vad_gap/eof, with no fallback. No forced continuous-speech
-cut accuracy, lossless recognition, independent voice accuracy,90-minute CUDA
-throughput or memory guarantee follows. Over90-minute coverage is instrumented
-inference with real normalization, not a90-minute real model run.
+Original source pins came from Windows checkout CRLF bytes. Immutable upstream
+revision e3bdd93f8ad58418e04659818efd5fd87a0bc486 downloads LF bytes. Failure was
+first source/LICENSE after model downloads, not corrupt weights. Task3's original
+checkout-seeded cache masked this fresh-download defect. Exact raw validation
+remains strict; no normalization, bypass, model/source revision or requirement change.
 
-Conductor review after 622e7f437 correctly identified that the initial 240s proof
-used VAD gaps only. The separate forced-speech fallback proof above closes the
-spec's remaining real seam verification requirement. It uses a 125s rotated source
-whose 120s boundary maps to original 27s inside speech, with byte-identical source
-PCM across the seam. Explicit VAD-unavailable injection affects only the optional
-hint function; all ASR and native validation remain real and unchanged.
-
-Initial scratch `proof.py` used raw.sample_count instead of moss_source.sample_count
-after successful final publication. Original script/log retained; corrected
-`continue_identity.py` consumed immutable raw without another model call.
-No product fix, threshold change, inference fallback, dependency installation or
-production data/settings/media operation was performed.
+New standard install version:
+`c19b2f905bd461f27f79731aa9745864128092d26a91f788b54980b5755ca98f`.
+Evidence under ignored `backend/runtime/moss/task14/`: exact copied sitecustomize,
+proof.py/proof.json/proof.log/proof.exit, tests.log/tests.exit. Production data/.env
+blocked by the pre-import audit guard; SQLite/app paths redirected before imports.
+Only normal app-managed standard runtime setup/cache writes were allowed.
+Original source/evidence, production recordings/settings/DB and checkpoints untouched.
+Pip-check log to manifest interval~16s; later quiet intervals were complete SHA
+verification, not a native import stall. Full source hashes/timings are in research.
 
 ## Next worker prompt
 
-PLAN_COMPLETE after conductor review. Do not repeat closed model/runtime checks.
-Keep local runtime evidence and measurements available; independent recognition
-accuracy, forced-cut accuracy and90-minute CUDA performance remain unproven.
-Leave plan In progress/spec In Review until the user's later closeout direction.
+PLAN_COMPLETE after conductor review. Do not rerun closed long/seam/browser proofs.
+Leave plan In progress/spec In Review pending later owner closeout direction.
+Restart backend before Load/Test so the new pin constants/version take effect.

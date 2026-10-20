@@ -111,6 +111,49 @@ class DownloadResponse:
         return self.body.read(count)
 
 
+SOURCE_DOWNLOAD_PINS = {
+    "source/LICENSE": (11357, "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"),
+    "source/README.md": (19546, "abcfe4aca1ae5d373dfe0f3ac8a8d8c7e6abf8e362ce139961775f2141d543eb"),
+    "source/pyproject.toml": (1091, "181e406a953d1b6b1a18971dada4427732597fa592252fe8e63080169192d72b"),
+    "source/moss_transcribe_diarize/inference_utils.py":
+        (8784, "1d97700b83ed95438be2e3a59529b3726d7bf7f7cdd488ad2097180bad15b86b"),
+}
+
+
+def test_source_pins_are_immutable_upstream_download_bytes():
+    assert runtime.SOURCE_REVISION == "e3bdd93f8ad58418e04659818efd5fd87a0bc486"
+    assert {name: pin for name, pin in runtime.PINNED_FILES.items()
+            if name.startswith("source/")} == SOURCE_DOWNLOAD_PINS
+
+
+@pytest.mark.skipif(os.environ.get("MOSS_TEST_FRESH_SOURCE") != "1",
+                    reason="opt-in immutable upstream network regression")
+@pytest.mark.parametrize("name", SOURCE_DOWNLOAD_PINS)
+def test_fresh_source_download_rejects_tampering_and_reuses_offline(tmp_path, monkeypatch, name):
+    """Run explicitly after pin changes; never seed from a local source checkout."""
+    install = runtime.MossInstallation(tmp_path / "moss")
+    assert not (install.root / "downloads").exists()
+    path = install._download(name)
+    body = path.read_bytes()
+    assert (len(body), hashlib.sha256(body).hexdigest()) == SOURCE_DOWNLOAD_PINS[name]
+    assert b"\r\n" not in body
+
+    def offline(*args, **kwargs):
+        pytest.fail("verified source cache must work offline")
+
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", offline)
+    assert install._download(name).read_bytes() == body
+    for untrusted in (body[:-1], bytes([body[0] ^ 1]) + body[1:], body.replace(b"\n", b"\r\n")):
+        path.unlink(missing_ok=True)
+        monkeypatch.setattr(runtime.urllib.request, "urlopen",
+                            lambda *args, data=untrusted, **kwargs: DownloadResponse(data))
+        with pytest.raises(runtime.MossRuntimeError, match="checksum|pinned size"):
+            install._download(name)
+        assert not path.exists()
+        # Oversized responses intentionally retain an untrusted partial for retry.
+        path.with_name(path.name + ".part").unlink(missing_ok=True)
+
+
 @pytest.mark.parametrize("range_supported", [True, False])
 def test_download_resume_and_range_ignored_restart(installer, monkeypatch, range_supported):
     body = b"test-model"

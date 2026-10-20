@@ -1810,3 +1810,82 @@ Peak allocated bytes were 2,506,171,904 / 1,870,037,504; peak reserved bytes
 Both calls and coverage checks passed, process exit0. Owned launcher exit0 and
 OS absence of worker 61544 were verified after unload. No identity reruns,
 backend/browser reruns, product edits or dependency changes were required.
+
+## Task 14 — canonical source download checksum repair (2026-10-19)
+
+Fresh user setup failed on `source/LICENSE`, after the 19 model download files
+were already cached. The four source pins had been measured from a Windows
+checkout with CRLF conversion. Immutable GitHub downloads at the unchanged source
+revision `e3bdd93f8ad58418e04659818efd5fd87a0bc486` contain LF bytes. Task 3
+seeded its source cache from that checkout, so its successful setup did not
+exercise this fresh-download mismatch. This repairs the intended exact-byte
+contract; source/model revisions, requirements and all model hashes are unchanged.
+
+| Source path | Checkout bytes / CRLF pairs | Canonical download bytes | Canonical SHA256 |
+| --- | --- | --- | --- |
+| LICENSE | 11558 / 201 | 11357 | `c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4` |
+| README.md | 20024 / 478 | 19546 | `abcfe4aca1ae5d373dfe0f3ac8a8d8c7e6abf8e362ce139961775f2141d543eb` |
+| pyproject.toml | 1135 / 44 | 1091 | `181e406a953d1b6b1a18971dada4427732597fa592252fe8e63080169192d72b` |
+| moss_transcribe_diarize/inference_utils.py | 9026 / 242 | 8784 | `1d97700b83ed95438be2e3a59529b3726d7bf7f7cdd488ad2097180bad15b86b` |
+
+The normal suite asserts these immutable download pins, so the previous pins fail
+the regression. Opt-in `MOSS_TEST_FRESH_SOURCE=1` additionally starts each of four
+downloads with an empty temporary cache and calls the real downloader against
+immutable upstream URLs. It verifies exact size/hash, verified offline reuse and
+rejection of truncated, same-size altered and CRLF-converted responses. Untrusted
+bytes are never normalized. Existing range/resume/durability tests remain intact.
+The scoped suite with the network regression enabled passed **168 tests** in
+38.55s, no skips. Scoped Ruff passed. The first sandboxed network attempt was
+offline; the authorized network-enabled run passed all four fresh downloads.
+
+Evidence/scripts are retained under ignored `backend/runtime/moss/task14/`.
+The exact task13 `sitecustomize.py` was copied there before app imports: dotenv
+is disabled, SQLite is temporary, all app data/env/temp paths are redirected,
+and the production data/.env audit guard remains active. This proof never opens
+production jobs, settings, recordings or checkpoints. Prior source/evidence stays
+unchanged, including the original CRLF checkout.
+
+### Actual standard-root setup and native proof
+
+`task14/proof.py` completed, exit0. New normal versioned installation is
+`backend/runtime/moss/installs/c19b2f905bd461f27f79731aa9745864128092d26a91f788b54980b5755ca98f`.
+All 19 existing standard-root model cache files passed their unchanged size/SHA
+pins before reuse. All four new source digest paths were absent before setup;
+the unmodified normal `MossInstallation.ensure()` freshly downloaded them from
+immutable upstream URLs. Each installed source is byte-identical to the original
+checkout after CRLF-to-LF conversion only, and the helper's parsed AST is equal.
+This comparison is evidence only: the downloader still accepts exact raw pinned
+bytes and performs no normalization.
+
+Before duplicating dependencies, free disk was checked (154 GB available).
+67 unchanged lock-matching wheels, 3,036,101,674 bytes, were copied from the
+read-only task3 wheel caches to the new standard wheelhouse and rehashed.
+Dependencies were cached; source downloads were fresh. No model/dependency
+redownload or backend ML upgrade occurred. Normal staged venv creation, hash-locked
+offline pip install, pip check, native Transformers/SoundFile/Torch CUDA import
+and atomic manifest publication passed. Ensure took 876.271s including staging,
+dependency installation and final installed-file hashing, excluding wheel-cache
+preparation. Pip-check log write to manifest publication was approximately16s
+(01:23:40Z to01:23:56Z); later quiet intervals were full-file verification.
+Offline `ensure()` reuse passed while network, downloader and setup subprocess
+calls were explicitly forbidden. No source cache was preseeded from a checkout.
+
+The real manager then loaded the standard-root install and decoded the retained
+research fixture (144000 samples at16000Hz, exactly9s; PCM SHA256
+`6fa9e0bfb2a432a37680625901b449a429e99c2e4128f407ac69b7474fed7e11`).
+Worker66300 reported native RTX5090, Torch2.10.0+cu128/CUDA12.8,
+BF16/SDPA, unchanged revisions; model load3.491s, readiness decode12.685s,
+research decode6.283s. Four turns retained native cross-speaker overlap pairs
+(0,1), (1,2), (2,3). Completion was EOS151645 with200 input/108 output tokens,
+budget130872/context131072; the manager independently validated the full result.
+Final raw9.01 normalized to9 under moss-eof-v1. Peak allocated1,874,400,256 bytes,
+reserved1,952,448,512 bytes. These observations do not establish recognition
+accuracy or long-input performance. The existing processor mapping deprecation
+warning was nonfatal; readiness silence output remains probe-only evidence.
+
+Owned unload passed: launcher exit0, OS worker absence verified, manager reports
+installed/unloaded with no running process. `task14/proof.json` preserves source,
+wheel, runtime, completion/overlap/EOF and lifecycle evidence. Prior task1/task3/
+task13 evidence, all production media/data/settings and completed checkpoints
+were untouched. Restart the backend so it imports the corrected pins, then retry
+MOSS Load/Test; the new verified standard-root install is ready for reuse.
