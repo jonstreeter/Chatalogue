@@ -365,15 +365,21 @@ export function ChannelVideos() {
     };
 
     const handleProcessAll = async () => {
+        const targets = processedVideos.filter(isProcessableVideo);
+        if (targets.length === 0) return;
         setProcessingAll(true);
+        let queued = 0;
         try {
-            const res = await api.post(`/channels/${id}/process-all`);
-            alert(`Queued ${res.data.queued} videos for processing`);
-            fetchVideos();
+            for (const video of targets) {
+                await api.post(`/videos/${video.id}/process`);
+                queued += 1;
+            }
+            alert(`Queued ${queued} videos for processing`);
         } catch (e) {
             console.error('Failed to process all:', e);
-            alert('Failed to queue videos');
+            alert(`Queued ${queued} of ${targets.length} videos. ${getErrorDetail(e) || 'Failed to queue remaining videos'}`);
         } finally {
+            await fetchVideos();
             setProcessingAll(false);
         }
     };
@@ -461,7 +467,7 @@ export function ChannelVideos() {
         return parsed.toLocaleDateString();
     }
 
-    const unprocessedCount = videos.filter(isProcessableVideo).length;
+    const unprocessedCount = processedVideos.filter(isProcessableVideo).length;
     const unmutedFilteredCount = processedVideos.filter(v => !v.muted && !v.access_restricted).length;
     const isRefreshingChannel = !isManualChannel && (channel?.status === 'refreshing' || fetching);
     const isDateBackfillActive = (
@@ -713,7 +719,7 @@ export function ChannelVideos() {
                                     <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-[13px] font-medium text-slate-700">
                                         {(searchQuery || statusFilters.size > 0) ? `${processedVideos.length} of ${videos.length}` : `${videos.length}`} video{videos.length !== 1 ? 's' : ''}
                                     </span>
-                                    {unprocessedCount > 0 && !searchQuery && (
+                                    {unprocessedCount > 0 && (
                                         <span className="inline-flex items-center rounded-full bg-blue-50 px-3 py-1 text-[13px] font-medium text-blue-700">
                                             {unprocessedCount} ready to process
                                         </span>
@@ -800,7 +806,7 @@ export function ChannelVideos() {
                                     </button>
                                 </>
                             )}
-                            {unprocessedCount > 0 && !searchQuery && (
+                            {unprocessedCount > 0 && (
                                 <button
                                     onClick={handleProcessAll}
                                     disabled={processingAll}
